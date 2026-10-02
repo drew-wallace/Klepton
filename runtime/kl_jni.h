@@ -71,7 +71,7 @@ void kl_jni_unpin_object(void *obj);
 // VRChat dies in GetObjectClass(NULL) resolving `HFPStatus.clearHFPStat`.
 //
 // Both drivers must call this, which is why it lives here rather than in either
-// one (see runtime/guest/kl_slink.c for the same argument). Idempotent.
+// one (see steam/steamlink/runtime/guest/kl_slink.c for the same argument). Idempotent.
 void kl_jni_unity_construct_helpers(void);
 
 // The interned jclass for a name — the host side of FindClass. A native method

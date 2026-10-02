@@ -26,7 +26,7 @@
 #include "klepton.h"
 #include "kl_x18.h"
 #include "kl_guestpatch.h"
-#include "kl_steam.h"
+#include "../steam/runtime/kl_steam.h"
 #include "kl_env.h"
 
 

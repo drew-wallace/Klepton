@@ -284,7 +284,7 @@ def main():
     # in its largest possible form. beatsaber/ is the reference target.
     if not UNITY_TREES:
         sys.exit("gen_libc_table: no unpacked Unity guest found — expected at "
-                 "least %s. Unpack the reference APK (BUILDING.md) before "
+                 "least %s. Unpack the reference APK (docs/BUILDING.md) before "
                  "regenerating, or this table loses every Unity import."
                  % os.path.relpath(os.path.join(ROOT, 'beatsaber/lib/arm64-v8a'), ROOT))
     print("Unity trees (the table is their UNION): %s" %

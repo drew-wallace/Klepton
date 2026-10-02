@@ -5,7 +5,7 @@
 #include <unistd.h>
 #include "kl_jni.h"
 #include "kl_obbmap.h"
-#include "jni/kl_jni_int.h"
+#include "../runtime/jni/kl_jni_int.h"
 
 static void expect_path(const char *root, const char *suffix) {
     char expected[1024];

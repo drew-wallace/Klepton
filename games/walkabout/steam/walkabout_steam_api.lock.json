@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "target": "walkabout-57013",
+  "app_id": 1408230,
+  "app_id_source": "https://store.steampowered.com/app/1408230/Walkabout_Mini_Golf_VR/",
+  "playfab_title_id": "98AD5",
+  "files": [
+    {
+      "path": "walkabout-57013/lib/arm64-v8a/libsteam_api.so",
+      "size": 187760,
+      "sha256": "f424277c8a431542b93bf71215615fa6730edb7968a03f5230d484437f0d4aa4"
+    },
+    {
+      "path": "walkabout-57013/lib/arm64-v8a/libc++_shared.so",
+      "size": 1292904,
+      "sha256": "4397241b4bd20a8e579bfb41d21107857e12985f6a01ca0c2a5f83380d1270b4"
+    }
+  ],
+  "interfaces": [
+    "SteamClient023",
+    "SteamUser023",
+    "SteamApps008",
+    "SteamUtils010"
+  ],
+  "callback_abi": {
+    "packing": 4,
+    "session_ticket": {
+      "id": 163,
+      "size": 8
+    },
+    "web_api_ticket": {
+      "id": 168,
+      "size": 2572
+    }
+  },
+  "ticket_api_source": "https://partner.steamgames.com/doc/api/ISteamUser",
+  "playfab_title_id_scope": "packaged PlayFabSharedSettings default; runtime override and HTTP request unverified",
+  "playfab_title_id_evidence": "games/walkabout/tools/walkabout_login.lock.json"
+}

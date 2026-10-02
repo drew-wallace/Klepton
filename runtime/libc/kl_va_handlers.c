@@ -13,7 +13,7 @@
 #include "kl_va.h"
 #include "kl_file.h"
 #include "klepton.h"
-#include "guest/kl_obbmap.h"
+#include "../guest/kl_obbmap.h"
 
 // Darwin arm64's va_list is a bare char*, so a marshalled buffer *is* a va_list.
 #define KL_MARSHAL(fmt, va, mode)                                        \

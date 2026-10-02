@@ -34,11 +34,11 @@ Klepton also has the ability to load and patch `.so` files at runtime with `mmap
 
 ## Building
 
-See [`BUILDING.md`](BUILDING.md) for the full guide. The short version:
+See [`docs/BUILDING.md`](docs/BUILDING.md) for the full guide. The short version:
 
 ```bash
 brew install pkg-config sdl3 apktool          # host dependencies
-apktool d -f -o beatsaber beatsaber.apk       # you supply the APK; see BUILDING.md
+apktool d -f -o beatsaber beatsaber.apk       # you supply the APK; see docs/BUILDING.md
 make check                                    # full regression sweep
 ```
 
@@ -81,3 +81,12 @@ WIP or not in a great state:
 Abandoned due to anticheat, JIT mmaping, or other problems:
 
 - VRChat (Steam Frame APK)
+## Project layout
+
+- `docs/`: development notes, discoveries, and build guides.
+- `steam/`: Steam runtime, acquisition and login tooling, tests, and Steam Link support.
+- `games/<name>/`: game-specific profiles, compatibility adapters, and tests.
+- `runtime/`: shared Android, engine, graphics, media, and XR compatibility.
+- `tools/prepare_apk.py` and `tools/build_apk.py`: generic local APK preparation and builds.
+
+The APK source collection defaults to `../apk`; pass its actual location to `prepare_apk.py` when needed.

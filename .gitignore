@@ -94,7 +94,11 @@ visionos/*.xcodeproj/
 visionos/__pycache__/
 tools/__pycache__/
 
-# Locally supplied ovrport APK trees
+# Locally supplied apk APK trees
 /4xvr-*/
 /roborecall-*/
 /walkabout-*/
+
+# Python bytecode is generated locally.
+__pycache__/
+*.py[cod]

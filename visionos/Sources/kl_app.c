@@ -160,7 +160,7 @@ int kl_app_configure(const char *resources, const char *container) {
     // bundle we signed, and nothing has established that it accepts one pushed
     // into Documents afterwards. The 2.3 GB of assets go the other way — into
     // the container — because they carry no code and re-uploading them on every
-    // install would make the edit/run loop unusable. See visionos/README.md.
+    // install would make the edit/run loop unusable. See docs/visionos/README.md.
     snprintf(g_libdir, sizeof g_libdir, "%s/guest/lib/arm64-v8a", resources);
     // Frameworks/, not a directory of our own: that is where Xcode code-signs
     // what it embeds, and a loose Mach-O elsewhere in the bundle is only

@@ -1,3 +1,4 @@
+#include "../../games/walkabout/runtime/compat.h"
 // libvulkan.so over MoltenVK — see kl_vulkan.h for what this is and why.
 //
 // The real Vulkan headers are used rather than transcribed, which is the
@@ -50,7 +51,7 @@ static void complain_once(void) {
     if (said++) return;
     fprintf(stderr,
             "  [vk] libvulkan.so requested, but MoltenVK is not vendored.\n"
-            "  [vk] Run 'make mvk' (see BUILDING.md); this build has no Vulkan.\n");
+            "  [vk] Run 'make mvk' (see docs/BUILDING.md); this build has no Vulkan.\n");
 }
 int   kl_vulkan_claims(const char *n) { if (name_is_vulkan(n)) complain_once(); return 0; }
 void *kl_vulkan_dlopen(const char *n) { if (name_is_vulkan(n)) complain_once(); return NULL; }
@@ -239,7 +240,7 @@ static void vk_init(void) {
 
     g_mvk = mvk_open();
     if (!g_mvk) {
-        VKI("MoltenVK could not be loaded — run 'make mvk' (BUILDING.md).\n");
+        VKI("MoltenVK could not be loaded — run 'make mvk' (docs/BUILDING.md).\n");
         return;
     }
     real_gipa = (PFN_vkGetInstanceProcAddr)mvk_sym("vkGetInstanceProcAddr");
@@ -3143,7 +3144,7 @@ static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
     if (shadow_array < 0) {
         const char *target = kl_driver_target_name();
         shadow_array = kl_env_on("KL_VK_SHADOWMASK_ARRAY",
-                                target && !strcmp(target, "walkabout-57013"));
+                                kl_walkabout_compat(target));
     }
     VkImageViewCreateInfo shadow_iv;
     VkFormat shadow_fmt = VK_FORMAT_UNDEFINED;
@@ -4478,7 +4479,7 @@ static void VKAPI_CALL klvk_CmdDrawIndexed(void *cb, uint32_t indexCount,
         // On supported GPUs preserve the original vertexOffset: rebasing
         // attribute buffers alone changes shader VertexIndex/BaseVertex and
         // corrupts procedural or vertex-pulling decoration meshes.
-        int def = unsupported && t && strcmp(t, "walkabout-57013") == 0;
+        int def = unsupported && kl_walkabout_compat(t);
         emulate = kl_env_on("KL_VK_EMULATE_BASE_VERTEX", def);
     }
     if (emulate && vertexOffset != 0 && real) {

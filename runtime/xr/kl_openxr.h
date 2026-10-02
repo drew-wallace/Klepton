@@ -134,7 +134,7 @@ void kl_openxr_set_frame_pacer(void (*wait)(void));
 void kl_openxr_set_capture_topmost_layer(int on);
 
 // The controller correction, pushed LIVE instead of read once from the
-// environment — see the KL_XR_GRIP_* knobs in DEBUG_ENV_VARS.md for what each
+// environment — see the KL_XR_GRIP_* knobs in docs/DEBUG_ENV_VARS.md for what each
 // term means.
 //
 // It exists because these values cannot be derived, only judged by wearing the

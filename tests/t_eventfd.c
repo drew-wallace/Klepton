@@ -1,5 +1,5 @@
 // Tests counter behavior through the same I/O hooks used by guest imports.
-#include "libc/kl_eventfd.h"
+#include "../runtime/libc/kl_eventfd.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>

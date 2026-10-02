@@ -11,7 +11,7 @@ MVK_INC := -Ivendor-moltenvk/out/include
 # too. One -I per source directory is what buys that; gen_xcodeproj.py carries
 # the same list as HEADER_SEARCH_PATHS.
 RUNTIME_INC := -Iruntime -Iruntime/jni -Iruntime/libc -Iruntime/gfx -Iruntime/xr \
-               -Iruntime/media -Iruntime/guest -Iruntime/diag
+               -Iruntime/media -Iruntime/guest -Iruntime/diag -Isteam/runtime -Isteam/steamlink/runtime/guest -Isteam/steamlink/runtime/libc
 CFLAGS  := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(RUNTIME_INC)
 # VideoToolbox/CoreMedia/CoreVideo are the video decoder (kl_vtdec.c), and they
 # are in the base LDLIBS rather than on one target because kl_vtdec is in
@@ -46,14 +46,14 @@ RUNTIME_JNI := runtime/kl_jni.c \
 
 RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_jump.c runtime/kl_jump_entries.S runtime/kl_tlsdesc.S runtime/kl_stub_cells.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
            runtime/libc/kl_va_handlers.c runtime/libc/kl_va_thunks.S \
-           runtime/libc/kl_libc.c runtime/libc/kl_libc_slink.c runtime/libc/kl_eventfd.c runtime/libc/kl_pthread.c runtime/kl_dl.c runtime/kl_steam.c \
+           runtime/libc/kl_libc.c steam/steamlink/runtime/libc/kl_libc_slink.c runtime/libc/kl_eventfd.c runtime/libc/kl_pthread.c runtime/kl_dl.c steam/runtime/kl_steam.c \
            runtime/guest/kl_ndk.c runtime/kl_x18.c runtime/kl_target.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c \
            runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
            runtime/xr/kl_ovrplat.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m \
            runtime/gfx/kl_vulkan.c \
-           runtime/guest/kl_nativeactivity.c runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
+           runtime/guest/kl_nativeactivity.c steam/steamlink/runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_sdl2.c \
            runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c \
            runtime/media/kl_aaudio.c runtime/media/kl_mediaplayer.c \
@@ -80,7 +80,7 @@ RUNTIME := $(RUNTIME_SHIP) $(RUNTIME_DIAG)
 # that measured a build nobody has.
 # kl_phonon_hrtf.S .incbins the SOFA blob, so the data file is a prerequisite
 # of everything too — same missed-FAILURE argument as the generated tables.
-RUNTIME_ALL_HDRS := $(wildcard runtime/*.h) $(wildcard runtime/*/*.h)
+RUNTIME_ALL_HDRS := $(wildcard steam/runtime/*.h) $(wildcard steam/steamlink/runtime/*/*.h) $(wildcard games/*/runtime/*.h) $(wildcard runtime/*.h) $(wildcard runtime/*/*.h)
 RUNTIME_HDRS := $(RUNTIME_ALL_HDRS) $(wildcard tests/*.h) \
                 runtime/data/phonon_hrtf_cipic_124.sofa \
                 runtime/data/kl_menu_font.ttf
@@ -169,21 +169,21 @@ build/t_load: tests/t_load.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_load.c $(RUNTIME) $(LDLIBS)
 
-build/steam_probe: tools/steam_probe.c tools/steam_probe_callbacks.h tools/steam_service_probe.h tools/steam_probe_login.h tools/steam_probe_session.h tools/steam_probe_mailbox.h tools/steam_probe_game_api.h tools/steam_probe_ticket_gate.h $(RUNTIME) $(RUNTIME_HDRS)
+build/steam_probe: steam/tools/steam_probe.c steam/tools/steam_probe_callbacks.h steam/tools/steam_service_probe.h steam/tools/steam_probe_login.h steam/tools/steam_probe_session.h steam/tools/steam_probe_mailbox.h games/walkabout/steam/steam_probe_game_api.h steam/tools/steam_probe_ticket_gate.h $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tools/steam_probe.c $(RUNTIME) $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ steam/tools/steam_probe.c $(RUNTIME) $(LDLIBS)
 
-build/t_steam: tests/t_steam.c runtime/kl_steam.c runtime/kl_steam.h runtime/kl_env.c runtime/kl_env.h
+build/t_steam: steam/tests/t_steam.c steam/runtime/kl_steam.c steam/runtime/kl_steam.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_steam.c runtime/kl_steam.c runtime/kl_env.c
+	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam.c steam/runtime/kl_steam.c runtime/kl_env.c
 
 build/t_eventfd: tests/t_eventfd.c runtime/libc/kl_eventfd.c runtime/libc/kl_eventfd.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_eventfd.c runtime/libc/kl_eventfd.c
 
-build/t_steam_ipc: tests/t_steam_ipc.c $(RUNTIME) $(RUNTIME_HDRS)
+build/t_steam_ipc: steam/tests/t_steam_ipc.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_steam_ipc.c $(RUNTIME) $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_ipc.c $(RUNTIME) $(LDLIBS)
 
 build/t_dladdr: tests/t_dladdr.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
@@ -197,26 +197,26 @@ build/t_tls_classifier: tests/t_tls_classifier.c runtime/kl_x18.c runtime/kl_x18
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_tls_classifier.c runtime/kl_x18.c runtime/kl_env.c
 
-build/t_steam_ticket_gate: tests/t_steam_ticket_gate.c tools/steam_probe_ticket_gate.h
+build/t_steam_ticket_gate: steam/tests/t_steam_ticket_gate.c steam/tools/steam_probe_ticket_gate.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_steam_ticket_gate.c
+	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_ticket_gate.c
 
-build/t_steam_mailbox: tests/t_steam_mailbox.c tools/steam_probe_mailbox.h
+build/t_steam_mailbox: steam/tests/t_steam_mailbox.c steam/tools/steam_probe_mailbox.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_steam_mailbox.c -lpthread
+	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_mailbox.c -lpthread
 
 .PHONY: steamcheck
-build/t_steam_callbacks: tests/t_steam_callbacks.c tools/steam_probe_callbacks.h
+build/t_steam_callbacks: steam/tests/t_steam_callbacks.c steam/tools/steam_probe_callbacks.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_steam_callbacks.c
+	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_callbacks.c
 
-build/t_steam_init_retry: tests/t_steam_init_retry.c tools/steam_probe_game_api.h tools/steam_probe_callbacks.h tools/steam_probe_ticket_gate.h
+build/t_steam_init_retry: games/walkabout/tests/t_steam_init_retry.c games/walkabout/steam/steam_probe_game_api.h steam/tools/steam_probe_callbacks.h steam/tools/steam_probe_ticket_gate.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_steam_init_retry.c -lpthread
+	$(CC) $(CFLAGS) -o $@ games/walkabout/tests/t_steam_init_retry.c -lpthread
 
 build/t_mprobe_gate: tests/t_mprobe_gate.c runtime/diag/kl_mprobe.c runtime/kl_env.c
 	@mkdir -p build
-	$(CC) $(CFLAGS) -Iruntime/diag -o $@ tests/t_mprobe_gate.c runtime/diag/kl_mprobe.c runtime/kl_env.c
+	$(CC) $(CFLAGS) -Iruntime/diag -Isteam/runtime -Isteam/steamlink/runtime/guest -Isteam/steamlink/runtime/libc -o $@ tests/t_mprobe_gate.c runtime/diag/kl_mprobe.c runtime/kl_env.c
 
 build/t_signal_wait: tests/t_signal_wait.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
@@ -253,8 +253,8 @@ steamcheck: assetcheck build/t_jni_refcache build/t_jump_mask build/t_signal_wai
 	./build/t_tls_classifier
 	./build/t_steam_ipc
 	./build/t_dladdr
-	python3 -m unittest discover -s tests -p 'test_steam*.py'
-	python3 -m unittest discover -s tests -p 'test_walkabout*.py'
+	python3 -m unittest discover -s steam/tests -p 'test_steam*.py'
+	python3 -m unittest discover -s games/walkabout/tests -p 'test_walkabout*.py'
 
 # Which guest the host gates run against. `make check TARGET=superhot` points
 # every one of them at another title's tree — the libraries, the assets and the
@@ -961,7 +961,7 @@ xros-sim: build/xrsim/libklepton.dylib
 # with only the archives listed, a header-only change (a new prototype, say) never
 # reaches the app and the build fails with "call to undeclared function" naming a
 # function that is plainly declared in runtime/. This is the same stale-artifact
-# trap visionos/README.md records for libklepton.a; the fix there stopped at the
+# trap docs/visionos/README.md records for libklepton.a; the fix there stopped at the
 # archives and left the headers behind it.
 # ...and WHICH SLICES it holds is a prerequisite too, for the same reason and
 # with a sharper edge: with XROS_PLATFORMS selectable, an xcframework built for

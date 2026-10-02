@@ -8,7 +8,7 @@
 #include <sys/stat.h>              // the cloud-save directory is created
 #include "klepton.h"
 #include "kl_jni.h"
-#include "guest/kl_driver.h"   // target name, for the per-target KL_PLAT_USER default
+#include "../guest/kl_driver.h"   // target name, for the per-target KL_PLAT_USER default
 #include "kl_env.h"
 #include "kl_ovrplat.h"
 

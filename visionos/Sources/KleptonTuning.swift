@@ -1,4 +1,4 @@
-// Live controller-alignment tuning — the values in DEBUG_ENV_VARS.md's
+// Live controller-alignment tuning — the values in docs/DEBUG_ENV_VARS.md's
 // KL_SENSE_* and KL_XR_GRIP_* entries, made adjustable while wearing the
 // headset instead of only at launch.
 //

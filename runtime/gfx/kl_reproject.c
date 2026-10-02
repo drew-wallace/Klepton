@@ -50,7 +50,7 @@ void kl_reproject_reset_depth(void) { s_depth = 0.0f; }
 // Defaults are VisionOSALVRClient's, unchanged, so a value found there
 // transfers: off, a mid green (16, 124, 16), and a fade band of 0.35 to 0.7.
 // The environment seeds them once so a run can be keyed without opening a
-// panel, and DEBUG_ENV_VARS.md carries the names.
+// panel, and docs/DEBUG_ENV_VARS.md carries the names.
 static int   s_chroma_on = -1;
 static float s_chroma_key[3] = { 16.0f / 255.0f, 124.0f / 255.0f, 16.0f / 255.0f };
 static float s_chroma_min = 0.35f, s_chroma_max = 0.7f;
