@@ -7,10 +7,13 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include "kl_va.h"
+#include "kl_file.h"
 #include "klepton.h"
+#include "guest/kl_obbmap.h"
 
 // Darwin arm64's va_list is a bare char*, so a marshalled buffer *is* a va_list.
 #define KL_MARSHAL(fmt, va, mode)                                        \
@@ -194,7 +197,7 @@ int klh_fscanf(void *f, const char *fmt, kl_va *va) {
 int kl_open_flags(int lx);          // kl_libc.c
 int klh_open(const char *path, int flags, kl_va *va) {
     // Guest passes Linux O_* values, which differ from Darwin's; translate.
-    // The mode argument only matters with O_CREAT, but reading it is harmless.
+    // Consume the optional mode only for O_CREAT or O_TMPFILE.
     // The path goes through the /proc rewrite for the same reason fopen does.
     char kp[1024];
     // Xash's con_logfile / -log open their .log via open() with a RELATIVE name
@@ -218,7 +221,18 @@ int klh_open(const char *path, int flags, kl_va *va) {
             }
         }
     }
-    int fd = open(kl_guest_path(path, kp, sizeof kp), kl_open_flags(flags), (int)kl_va_gp(va));
+    const char *mapped = kl_guest_path(path, kp, sizeof kp);
+    int host_flags = kl_open_flags(flags);
+    int mode = (flags & (0x40 | 0x400000)) ? (int)kl_va_gp(va) : 0;
+    int fd = kl_open_mapped(-100, mapped, flags, mode);
+    // stat/access already see OBB-backed paks and synthetic UE descriptors.
+    // open is the actual read path and must consult the same virtual filesystem.
+    if (fd < 0 && (errno == ENOENT || errno == ENOTDIR) &&
+        (host_flags & O_ACCMODE) == O_RDONLY) {
+        int original_errno = errno;
+        fd = kl_obbmap_open(mapped, host_flags);
+        if (fd < 0) errno = original_errno;
+    }
     kl_fs_trace_open(path, flags, fd);
     return fd;
 }

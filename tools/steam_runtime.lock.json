@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "manifest_url": "https://client-update.akamai.steamstatic.com/steam_client_linuxarm64",
+  "manifest_sha256": "c0e305d2c072126770e8a48d69467518caad0e3c3b64ecdf4642f0870d1dcc79",
+  "client_version": "1788652215",
+  "packages": [
+    {
+      "name": "bins_androidarm64_linuxarm64",
+      "url": "https://client-update.akamai.steamstatic.com/bins_androidarm64_linuxarm64.zip.08de8e3048c171be2d609e52dda128c31b38b054",
+      "size": 18018134,
+      "sha256": "c6e606259ab36a3c14875e360095dbee5a17da0c8808cd020a19892004385576",
+      "archive": "bins_androidarm64_linuxarm64.zip.08de8e3048c171be2d609e52dda128c31b38b054"
+    },
+    {
+      "name": "bins_sdk_linuxarm64_linuxarm64",
+      "url": "https://client-update.akamai.steamstatic.com/bins_sdk_linuxarm64_linuxarm64.zip.9e39e51c8c8235e87475e00a978a6d2f5d095113",
+      "size": 15797465,
+      "sha256": "55fa4fb9d7871058157544a749100e73afcd9e68be2618e2b23a20eea8aa5173",
+      "archive": "bins_sdk_linuxarm64_linuxarm64.zip.9e39e51c8c8235e87475e00a978a6d2f5d095113"
+    },
+    {
+      "name": "bins_linuxarm64_linuxarm64",
+      "url": "https://client-update.akamai.steamstatic.com/bins_linuxarm64_linuxarm64.zip.dc817d33f8308815bf4fde6a3cb61fd4529728c8",
+      "size": 109802908,
+      "sha256": "c2d7c0ecb8de7e209504cd657b785127cd1ac3d905668c296e87c360b2b54163",
+      "archive": "bins_linuxarm64_linuxarm64.zip.dc817d33f8308815bf4fde6a3cb61fd4529728c8"
+    },
+    {
+      "name": "steam_linuxarm64",
+      "url": "https://client-update.akamai.steamstatic.com/steam_linuxarm64.zip.eca3384aa92d366d0c994f5000963191e9fc8e72",
+      "size": 4352482,
+      "sha256": "f5377de4e98b93297078cd1f4944cfa5a7632e5a89c5a96d45ef0ef542a31e45",
+      "archive": "steam_linuxarm64.zip.eca3384aa92d366d0c994f5000963191e9fc8e72"
+    },
+    {
+      "name": "sdl3_linuxarm64",
+      "url": "https://client-update.akamai.steamstatic.com/sdl3_linuxarm64.zip.c5c90a261c46ea42555c55759e3a1972d0469f71",
+      "size": 16755943,
+      "sha256": "63a06161d99d11c4e6070a19be940003b1eb63d86ff6cafd15904cd96efae7f0",
+      "archive": "sdl3_linuxarm64.zip.c5c90a261c46ea42555c55759e3a1972d0469f71"
+    },
+    {
+      "name": "sdl3_linuxarm64_linuxarm64",
+      "url": "https://client-update.akamai.steamstatic.com/sdl3_linuxarm64_linuxarm64.zip.f93eb71fa237ed9c1b2435302aaf8ef72bf19fdc",
+      "size": 9589078,
+      "sha256": "097bb5adfc0b7927b6e57dd8d23613052da7c026e69b4a024c3d43f70d5561e2",
+      "archive": "sdl3_linuxarm64_linuxarm64.zip.f93eb71fa237ed9c1b2435302aaf8ef72bf19fdc"
+    }
+  ],
+  "manifest_archive": "steam_client_linuxarm64.vdf",
+  "provenance": "Valve client CDN over HTTPS; package size and SHA-256 from the pinned manifest. Valve kvsignatures are recorded in the manifest, not independently verified by this tool.",
+  "manifest_snapshot": "steam_runtime.manifest.vdf"
+}

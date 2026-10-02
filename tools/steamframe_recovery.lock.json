@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "release": "0.3.0",
+  "build": "20260922.5153644",
+  "filename": "steamframe-oobe-repair-20260922.5153644-0.3.0.img.zip",
+  "url": "https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.zip",
+  "size": 4061612171,
+  "sha256": "672df1b9c5c6b849df506c995a32fe136b53c4db688f924e6727639dd8b963a9",
+  "image_size": 7516192768,
+  "acquired_utc": "2026-09-28",
+  "provenance": "Valve HTTPS recovery directory; observed SHA-256 pin, no independent signature verification",
+  "client_builddate": "Tue Sep 15 19:45:26 UTC 2026",
+  "artifacts": [
+    {
+      "path": "androidarm64/libsteamclient.so",
+      "size": 37850332,
+      "sha256": "4b1318ea53168ecbf74318ef5b330eb0a41a3e2d335c14f3827504bebba4b40d",
+      "architecture": "aarch64",
+      "needed": [
+        "libandroid.so",
+        "liblog.so",
+        "libm.so",
+        "libdl.so",
+        "libc.so"
+      ]
+    },
+    {
+      "path": "androidarm64/steamservice.so",
+      "size": 7610992,
+      "sha256": "5625b2a0fe98b4cfb4af52266550e74d25d7e283b0503c319bdadfc51070b1b6",
+      "architecture": "aarch64",
+      "needed": [
+        "libandroid.so",
+        "liblog.so",
+        "libm.so",
+        "libdl.so",
+        "libc.so"
+      ]
+    },
+    {
+      "path": "steamrtarm64/steam",
+      "size": 10130496,
+      "sha256": "41083cb8f807a3749a589491de80caef109ddab95e90d9a64cafb5b15c56d406",
+      "architecture": "aarch64",
+      "needed": [
+        "libdl.so.2",
+        "libm.so.6",
+        "libpthread.so.0",
+        "libc.so.6",
+        "ld-linux-aarch64.so.1"
+      ]
+    },
+    {
+      "path": "steamrtarm64/steamui.so",
+      "size": 39057008,
+      "sha256": "430a393aa6133fefe03154a6b14c73b643b84198c22027b3f65835c615b39a3f",
+      "architecture": "aarch64",
+      "needed": [
+        "libdl.so.2",
+        "librt.so.1",
+        "ld-linux-aarch64.so.1",
+        "libtier0_s.so",
+        "libvstdlib_s.so",
+        "libSDL3.so.0",
+        "libvideo.so",
+        "libGL.so.1",
+        "libXtst.so.6",
+        "libXfixes.so.3",
+        "libXrandr.so.2",
+        "libXrender.so.1",
+        "libXext.so.6",
+        "libX11.so.6",
+        "libXi.so.6",
+        "libgobject-2.0.so.0",
+        "libglib-2.0.so.0",
+        "libgio-2.0.so.0",
+        "libgtk-x11-2.0.so.0",
+        "libpipewire-0.3.so.0",
+        "libpulse.so.0",
+        "libgdk_pixbuf-2.0.so.0",
+        "libm.so.6",
+        "libpthread.so.0",
+        "libc.so.6"
+      ]
+    },
+    {
+      "path": "steamrtarm64/crashhandler.so",
+      "size": 1249040,
+      "sha256": "c458b70fffe3869eda3615e6360e0e7b5f6ca25ce919aefd37fcfdf82cf001b5",
+      "architecture": "aarch64",
+      "needed": [
+        "libdl.so.2",
+        "ld-linux-aarch64.so.1",
+        "libm.so.6",
+        "libpthread.so.0",
+        "libc.so.6"
+      ]
+    },
+    {
+      "path": "steamrtarm64/libSDL3.so.0",
+      "size": 3299552,
+      "sha256": "84fbe57780fc5ac9fba49e5bb312d581a8b48fa706afecc30d648ac806806ae3",
+      "architecture": "aarch64",
+      "needed": [
+        "libdl.so.2",
+        "ld-linux-aarch64.so.1",
+        "libEGL.so.1",
+        "libm.so.6",
+        "libpthread.so.0",
+        "libc.so.6"
+      ]
+    },
+    {
+      "path": "steamrtarm64/steamclient.so",
+      "size": 47264616,
+      "sha256": "3b044464e6cf912c92de65a12520da020a156141ecb45235a5de682cb7ab08a0",
+      "architecture": "aarch64",
+      "needed": [
+        "libdl.so.2",
+        "librt.so.1",
+        "ld-linux-aarch64.so.1",
+        "libtier0_s.so",
+        "libvstdlib_s.so",
+        "libXrandr.so.2",
+        "libXi.so.6",
+        "libGL.so.1",
+        "libXrender.so.1",
+        "libX11.so.6",
+        "libXtst.so.6",
+        "libpipewire-0.3.so.0",
+        "libopenal.so.1",
+        "libpulse.so.0",
+        "libnm.so.0",
+        "libgobject-2.0.so.0",
+        "libglib-2.0.so.0",
+        "libudev.so.1",
+        "libgio-2.0.so.0",
+        "libm.so.6",
+        "libpthread.so.0",
+        "libc.so.6"
+      ]
+    }
+  ]
+}

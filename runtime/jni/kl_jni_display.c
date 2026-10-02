@@ -306,8 +306,14 @@ const klj_binding klj_bind_display[] = {
     {"com/unity3d/player/UnityPermissions", "hasUserAuthorizedPermission",
      "(Lcom.unity3d.player.UnityPlayerActivity;Ljava/lang/String;)Z",
                                                  klj_UnityPermissions_hasUserAuthorized},
+    {"com/unity3d/player/UnityPermissions", "hasUserAuthorizedPermission",
+     "(Lcom/unity3d/player/UnityPlayerActivity;Ljava/lang/String;)Z",
+                                                 klj_UnityPermissions_hasUserAuthorized},
     {"com/unity3d/player/UnityPermissions", "requestUserPermissions",
      "(Lcom.unity3d.player.UnityPlayerActivity;[Ljava/lang/String;Lcom.unity3d.player.IPermissionRequestCallbacks;)V",
+                                                 klj_UnityPermissions_requestUserPermissions},
+    {"com/unity3d/player/UnityPermissions", "requestUserPermissions",
+     "(Lcom/unity3d/player/UnityPlayerActivity;[Ljava/lang/String;Lcom/unity3d/player/IPermissionRequestCallbacks;)V",
                                                  klj_UnityPermissions_requestUserPermissions},
 
     // ---- display, window and orientation ----

@@ -469,12 +469,11 @@ static int begin_unity(FILE *out) {
     g_thiz = kl_jni_new_object("com/unity3d/player/UnityPlayer");
     if (!g_thiz) return fail("kl_driver_boot must run first");
 
-    // Index the OBB's audio banks by basename (NULL base = no UE4 loose-path
-    // serving, banks only). A Unity sound engine — Wwise (ZIX) or FMOD — reads
-    // its .bnk/.wem/.bank by a native path unrelated to the OBB layout, and the
-    // banks live only inside the OBB; without this the engine gets AK_FileNotFound
-    // and renders silence.
-    kl_obbmap_init(kl_jni_obb_dir(), NULL);
+    // Unity split builds keep deployment assets such as UnitySubsystems
+    // manifests in the OBB. Index those entries under their `assets/...`
+    // names as well as the audio-bank basename index, so native fopen/open
+    // calls can read them through the same read-only OBB window.
+    kl_obbmap_init(kl_jni_obb_dir(), "");
 
     // The order UnityPlayerActivity drives: attach a surface, resume, then one
     // frame. nativeRecreateGfxState is what reaches for EGL, and it is also what
@@ -659,6 +658,11 @@ int kl_driver_frame(void) {
     kl_mprobe_tick(g_frames);
     if (g_alarm) alarm(0);
     g_frames++;
+    // Opt-in progress evidence that does not require debugger function calls.
+    // Powers of two keep long simulator runs from flooding the boot log.
+    if (kl_env_on("KL_TRACE_FRAME_PROGRESS", 0) &&
+        !(g_frames & (g_frames - 1)))
+        fprintf(stderr, "  [frame-progress] completed=%u\n", g_frames);
     return r;
 }
 

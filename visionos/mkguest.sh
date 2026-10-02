@@ -51,8 +51,24 @@ FIRST_PLAT=$(printf '%s' "$PLATS" | awk '{print $1}')
 # runtime.
 rm -rf "build/guest/$KLT_NAME" "$OUT"; mkdir -p "build/guest/$KLT_NAME" "$OUT"
 
+# Walkabout's ownership interface asks BIsDlcInstalled, but its Android course
+# bundles live outside Steam depot storage. Redirect only that consumer to the
+# genuine subscription query, on a hash-pinned copy before signing. Keep the
+# standard patch A/B controls and never modify the supplied game library.
+DLC_INPUT=""
+case ",${KL_GUEST_PATCH_OFF:-}," in
+  *,walkabout-dlc-ownership,*) DLC_OFF=1 ;;
+  *) DLC_OFF=0 ;;
+esac
+if [ "$KLT_NAME" = walkabout-57013 ] && [ "${KL_GUEST_PATCH:-1}" != 0 ] && [ "$DLC_OFF" = 0 ]; then
+  DLC_INPUT="$ROOT/build/walkabout-dlc-compat/libil2cpp.so"
+  python3 "$ROOT/tools/walkabout_dlc_compat.py" --binary "$SRC/libil2cpp.so" --out "$DLC_INPUT"
+fi
+
 for NAME in $LIBS; do
   [ -f "$SRC/$NAME.so" ] || { echo "!! $SRC/$NAME.so missing"; exit 1; }
+  INPUT="$SRC/$NAME.so"
+  if [ "$NAME" = libil2cpp ] && [ -n "$DLC_INPUT" ]; then INPUT="$DLC_INPUT"; fi
   # Bundle identifiers admit only alphanumerics, '-' and '.'. Several of these
   # names contain '_', and libc++_shared contains '+' — which the previous
   # underscores-only rewrite let through, and Xcode rejects at the EMBED step
@@ -72,7 +88,7 @@ for NAME in $LIBS; do
     esac
     FW="build/guest/$KLT_NAME/$PLAT/$FWNAME.framework"
     mkdir -p "$FW"
-    "$LD" "$SRC/$NAME.so" -o "$FW/$FWNAME" --platform "$KLPLAT" \
+    "$LD" "$INPUT" -o "$FW/$FWNAME" --platform "$KLPLAT" \
           --install-name "@rpath/$FWNAME.framework/$FWNAME" --quiet
     cat > "$FW/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -96,7 +112,7 @@ EOF
   xcodebuild -create-xcframework "${FWARGS[@]}" \
       -output "$OUT/$NAME.xcframework" > /dev/null
   printf '  %-22s %s bytes\n' "$NAME.xcframework" \
-      "$(stat -f%z "build/guest/$KLT_NAME/$FIRST_PLAT/$NAME.framework/$NAME")"
+      "$(stat -f%z "build/guest/$KLT_NAME/$FIRST_PLAT/$FWNAME.framework/$FWNAME")"
 done
 
 echo "[mkguest] $KLT_NAME done -> $OUT/"

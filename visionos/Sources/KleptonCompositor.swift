@@ -3455,11 +3455,22 @@ final class KleptonCompositor {
     /// `origin_from_head` from `origin_from_device`.
     private static func headFrom(_ originFromDevice: simd_float4x4,
                                  midpoint m: SIMD3<Float>) -> simd_float4x4 {
-        if m == SIMD3<Float>(0, 0, 0) { return originFromDevice }
         var t = matrix_identity_float4x4
         t.columns.3 = SIMD4<Float>(m.x, m.y, m.z, 1)
-        return originFromDevice * t
+        var head = originFromDevice * t
+        #if targetEnvironment(simulator)
+        // The simulator may start its camera at floor height. An opt-in lift
+        // lets floor-origin games be tested without a tracked physical head.
+        // Apply it to both guest sampling and composite/headAt math.
+        head.columns.3.y += simHeadHeight
+        #endif
+        return head
     }
+
+    #if targetEnvironment(simulator)
+    private static let simHeadHeight: Float =
+        Float(ProcessInfo.processInfo.environment["KL_SIM_HEAD_HEIGHT"] ?? "0") ?? 0
+    #endif
 
     /// `head_from_view` from `device_from_view` — the drawable's own per-eye
     /// transform, restated about the midpoint so the whole composite chain is

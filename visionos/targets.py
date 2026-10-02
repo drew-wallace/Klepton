@@ -643,6 +643,121 @@ TARGETS = {
     },
 }
 
+# Local ovrport variants have separate libraries, assets and userdata.
+TARGETS['4xvr-11026-vrp'] = {
+    'libs': None,
+    'srcdir': '4xvr-11026-vrp/lib/arm64-v8a',
+    'tree': '4xvr-11026-vrp',
+    'apk': '4xvr-11026-vrp.apk',
+    'assets': '4xvr-11026-vrp/assets',
+    'qtplugins': '',
+    'obb': 'obb',
+    'entry': 'libvr4p-oculus',
+    'kind': 'native',
+    'product': 'Klepton4Xvr11026Vrp',
+    'display': '4XVR 1.10.26 VRP',
+}
+
+TARGETS['4xvr-11026'] = {
+    'libs': None,
+    'srcdir': '4xvr-11026/lib/arm64-v8a',
+    'tree': '4xvr-11026',
+    'apk': '4xvr-11026.apk',
+    'assets': '4xvr-11026/assets',
+    'qtplugins': '',
+    'obb': 'obb',
+    'entry': 'libvr4p-oculus',
+    'kind': 'native',
+    'product': 'Klepton4Xvr11026',
+    'display': '4XVR 1.10.26',
+}
+
+TARGETS['roborecall-41778'] = {
+    'libs': None,
+    'srcdir': 'roborecall-41778/lib/arm64-v8a',
+    'tree': 'roborecall-41778',
+    'apk': 'roborecall-41778.apk',
+    'assets': 'roborecall-41778/assets',
+    'qtplugins': '',
+    'obb': 'Android/obb/com.YourCompany.RoboRecall',
+    'entry': 'libUE4',
+    'kind': 'ue4',
+    'product': 'KleptonRoborecall41778',
+    'display': 'Robo Recall 41778',
+}
+
+TARGETS['roborecall-41904'] = {
+    'libs': None,
+    'srcdir': 'roborecall-41904/lib/arm64-v8a',
+    'tree': 'roborecall-41904',
+    'apk': 'roborecall-41904.apk',
+    'assets': 'roborecall-41904/assets',
+    'qtplugins': '',
+    'obb': 'Android/obb/com.YourCompany.RoboRecall',
+    'entry': 'libUE4',
+    'kind': 'ue4',
+    'product': 'KleptonRoborecall41904',
+    'display': 'Robo Recall 41904',
+}
+
+TARGETS['roborecall-47091'] = {
+    'libs': None,
+    'srcdir': 'roborecall-47091/lib/arm64-v8a',
+    'tree': 'roborecall-47091',
+    'apk': 'roborecall-47091.apk',
+    'assets': 'roborecall-47091/assets',
+    'qtplugins': '',
+    'obb': 'Android/obb/com.YourCompany.RoboRecall',
+    'entry': 'libUE4',
+    'kind': 'ue4',
+    'product': 'KleptonRoborecall47091',
+    'display': 'Robo Recall 47091',
+}
+
+TARGETS['roborecall-47091-patched'] = {
+    'libs': None,
+    'srcdir': 'roborecall-47091-patched/lib/arm64-v8a',
+    'tree': 'roborecall-47091-patched',
+    'apk': 'roborecall-47091-patched.apk',
+    'assets': 'roborecall-47091-patched/assets',
+    'qtplugins': '',
+    'obb': 'Android/obb/com.YourCompany.RoboRecall',
+    'entry': 'libUE4',
+    'kind': 'ue4',
+    'product': 'KleptonRoborecall47091Patched',
+    'display': 'Robo Recall 47091 Patched',
+}
+
+TARGETS['roborecall-47091-v76'] = {
+    'libs': None,
+    'srcdir': 'roborecall-47091-v76/lib/arm64-v8a',
+    'tree': 'roborecall-47091-v76',
+    'apk': 'roborecall-47091-v76.apk',
+    'assets': 'roborecall-47091-v76/assets',
+    'qtplugins': '',
+    'obb': 'Android/obb/com.YourCompany.RoboRecall',
+    'entry': 'libUE4',
+    'kind': 'ue4',
+    'product': 'KleptonRoborecall47091V76',
+    'display': 'Robo Recall 47091 v76',
+}
+
+TARGETS['walkabout-57013'] = {
+    'libs': None,
+    'srcdir': 'walkabout-57013/lib/arm64-v8a',
+    'tree': 'walkabout-57013',
+    'apk': 'walkabout-57013.apk',
+    'assets': 'walkabout-57013/assets',
+    'qtplugins': '',
+    'obb': 'obb',
+    # This folder also carries 124 loose Addressables bundles; stage it whole.
+    'obb_raw': '1',
+    'entry': 'libmain',
+    'kind': 'unity',
+    'product': 'KleptonWalkabout57013',
+    'display': 'Walkabout Mini Golf 6.7',
+}
+
 DEFAULT = "beatsaber"
 
 

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "source_lock": "steamframe_recovery.lock.json",
+  "scope": "Valve UI modules for an anonymous QR authentication transport probe; no account authentication",
+  "files": [
+    {"path": "library.js", "size": 506404, "sha256": "b7009b82faa375d5b0ca24d4e5f14535565a65260db537aed893dd3c92f63639"},
+    {"path": "chunk~2dcc5aaf7.js", "size": 16173101, "sha256": "e27a338a1691a262d01dd9c96d42f8b4640265eae45e3da35d81ed8bada4b3f8"},
+    {"path": "chunk~1a96cdf59.js", "size": 50625, "sha256": "885d01af9fca39973092962abd269c7f5927b7cab282a48bc6191406fb6b32ff"},
+    {"path": "libraries/libraries~00299a408.js", "size": 644053, "sha256": "c91bc523b82f44503454439c0610caf5dd8ec30d2274df00768b4b2c6ec949b0"}
+  ]
+}

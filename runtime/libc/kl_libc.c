@@ -7,6 +7,9 @@
 #include <string.h>
 #include <strings.h>
 #include <errno.h>
+#include "kl_eventfd.h"
+#include "kl_file.h"
+#include "../kl_steam.h"
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -125,6 +128,21 @@ int kl_errno_from_linux(int e) {
     for (size_t i = 0; i < sizeof g_errno_map / sizeof g_errno_map[0]; i++)
         if (g_errno_map[i].linux_ == e) return g_errno_map[i].darwin;
     return e;
+}
+
+// Linux's advisory cache API has no equivalent with all of its range/cache
+// semantics on Darwin. Report that limitation as an error, rather than abort
+// at an unresolved symbol or claim to have applied the advice. POSIX returns
+// the error number directly and leaves errno unchanged.
+int klb_posix_fadvise(int fd, int64_t offset, int64_t length, int advice) {
+    int saved = errno, result;
+    struct stat st;
+    if (offset < 0 || length < 0 || advice < 0 || advice > 5) result = EINVAL;
+    else if (fstat(fd, &st)) result = kl_errno_to_linux(errno);
+    else if (S_ISFIFO(st.st_mode)) result = ESPIPE;
+    else result = 95; // Linux EOPNOTSUPP: no cache operation performed.
+    errno = saved;
+    return result;
 }
 
 // bionic spells it __errno(), and it returns the *location* rather than the
@@ -357,6 +375,14 @@ int  klb_sched_getaffinity(int p, size_t sz, void *m) {
     return 0;
 }
 int  klb_sched_setaffinity(int p, size_t sz, const void *m) { (void)p;(void)sz;(void)m; return 0; }
+// Bionic CPU_ALLOC uses an array of unsigned-long words (64 bits on ARM64).
+// https://android.googlesource.com/platform/bionic/+/main/libc/bionic/sched_cpualloc.cpp
+// Allocation does not initialize the mask; CPU_ZERO_S is the caller's job.
+void *klb___sched_cpualloc(size_t count) {
+    if (count > SIZE_MAX - 63) { errno = ENOMEM; return NULL; }
+    return malloc(((count + 63) / 64) * sizeof(uint64_t));
+}
+void klb___sched_cpufree(void *mask) { free(mask); }
 // What `CPU_COUNT()` expands to on bionic — the macro is a call, so a guest that
 // counts the cores in a mask needs this symbol rather than just the mask. It is
 // a plain popcount over the set, and it has to agree with what
@@ -637,11 +663,12 @@ static const char *kl_hl2_launcher_graphics_cfg(const char *path, size_t *len) {
 int klb_stat(const char *p, bionic_stat *b)  { char kp[1024]; const char *q = kl_guest_path(p, kp, sizeof kp);
                                                struct stat s; int r = stat(q, &s);
                                                long long osz;
-                                               if (r != 0 && errno == ENOENT && kl_obbmap_stat(q, &osz)) {
+                                               if (r != 0 && (errno == ENOENT || errno == ENOTDIR) && kl_obbmap_stat(q, &osz)) {
                                                    // Virtual OBB entry: synthesize a plain-file stat of the
                                                    // right size, so UE4 sizes its pak read from it.
-                                                   memset(&s, 0, sizeof s); s.st_mode = S_IFREG | 0444;
-                                                   s.st_size = (off_t)osz; r = 0;
+                                                   memset(&s, 0, sizeof s);
+                                                   s.st_mode = (osz < 0 ? S_IFDIR : S_IFREG) | 0444;
+                                                   s.st_size = (off_t)(osz < 0 ? 0 : osz); r = 0;
                                                }
                                                if (r != 0 && errno == ENOENT && kl_obbmap_icu_dir(q)) {
                                                    // The ICU data directory lives inside a mounted pak; a
@@ -678,6 +705,12 @@ int klb_stat(const char *p, bionic_stat *b)  { char kp[1024]; const char *q = kl
                                                if (!r) stat_to_bionic(&s, b); return r; }
 int klb_lstat(const char *p, bionic_stat *b) { char kp[1024]; const char *q = kl_guest_path(p, kp, sizeof kp);
                                                struct stat s; int r = lstat(q, &s);
+                                               long long osz;
+                                               if (r != 0 && (errno == ENOENT || errno == ENOTDIR) && kl_obbmap_stat(q, &osz)) {
+                                                   memset(&s, 0, sizeof s);
+                                                   s.st_mode = (osz < 0 ? S_IFDIR : S_IFREG) | 0444;
+                                                   s.st_size = (off_t)(osz < 0 ? 0 : osz); r = 0;
+                                               }
                                                kl_fs_trace("lstat", p, NULL, r != 0);
                                                if (!r) stat_to_bionic(&s, b); return r; }
 int klb_fstat(int fd, bionic_stat *b)        { long long osz; int handled;
@@ -1431,6 +1464,8 @@ static void kl_casefix(char *path, size_t prefix) {
 
 static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) {
     if (!path) return path;
+    const char *steam = kl_steam_guest_path(path, buf, cap);
+    if (steam != path) return steam;
     // Windows-heritage guests (reVC / GTA Vice City) build paths with '\'
     // separators — "gamedata\TEXT\american.gxt". The POSIX host never opens
     // those, so every asset load fails and the game reads garbage lengths into
@@ -1446,6 +1481,24 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
         path = tmp;
     }
     #define KL_GP_PASS() (path == tmp ? (snprintf(buf, cap, "%s", tmp), (const char *)buf) : path)
+    // Unity 6's split-data resolver names the OBB as the data root even for
+    // files that physically came from the APK. Convert an OBB `/assets/`
+    // spelling to the staged asset tree before the normal prefix rules run.
+    // This deliberately returns only when the target exists; OBB-only entries
+    // (Addressables bundles and the OpenXR manifest) continue to the virtual
+    // OBB handlers with their original path.
+    {
+        const char *oa = strstr(path, ".obb/assets/");
+        if (oa) {
+            const char *as = oa + 4; // `/assets/...`
+            const char *root = kl_jni_assets_dir();
+            if (root && *root) {
+                snprintf(buf, cap, "%s/%s", root, as + 8);
+                struct stat st;
+                if (stat(buf, &st) == 0) return buf;
+            }
+        }
+    }
     // hl2 world-model gamedir fallback. The HL2Q3VR *server* loads maps/*.bsp from
     // "<data>/srceng/maps/" — the game ROOT, with the gamedir dropped — but the
     // maps are staged (correctly) in the hl2 gamedir "<data>/srceng/hl2/maps/",
@@ -1475,7 +1528,72 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
     // picked "portal2" and force-loaded the Portal 2 map sp_a1_intro2, which is
     // absent from Portal 1 data -> black. There is no portal2 content; letting the
     // probe fail makes the launcher honor SOURCE_GAME=portal and load Portal 1.
+    // UE4's startup descriptor is passed as a relative path from its Android
+    // executable directory (../../../<Project>/<Project>.uproject). Darwin's
+    // app working directory is unrelated to that directory, so resolve this
+    // one project-relative resource into the staged UE4Game tree. The OBB VFS
+    // can then answer stat/open with its synthetic descriptor.
+    if (g_ext_target[0] && !strncmp(path, "../../../", 9)) {
+        const char *rel = path + 9;
+        size_t len = strlen(rel);
+        if (len >= 9 && !strcmp(rel + len - 9, ".uproject") && strchr(rel, '/')) {
+            snprintf(buf, cap, "%s/UE4Game/%s", g_ext_target, rel);
+            return buf;
+        }
+    }
     if (path[0] != '/') return KL_GP_PASS();
+    // Older UE4 builds resolve their ../../../<Project>/<Project>.uproject
+    // command line against Android's virtual external-storage root and end up
+    // opening /UE4Game/... directly. It is the same storage as /sdcard/UE4Game,
+    // whose contents (including OBB-backed paks) live under g_ext_target.
+    if (g_ext_target[0] &&
+        (!strncmp(path, "/UE4Game/", 9) || !strncmp(path, "/UnrealGame/", 12))) {
+        snprintf(buf, cap, "%s%s", g_ext_target, path);
+        return buf;
+    }
+    // Unity's Addressables catalog stores optional bundles using the Android
+    // package OBB spelling (/sdcard/Android/obb/<package>/file.bundle). The
+    // simulator staging deliberately flattens that package directory into the
+    // writable OBB root, where the same files are present beside main.<ver>.obb.
+    // Rebase only this external-storage OBB form; the archive URL and native
+    // asset paths continue through their normal virtual OBB handlers.
+    {
+        const char *ao = strstr(path, "/Android/obb/");
+        const char *obbroot = kl_jni_obb_dir();
+        if (ao && obbroot && *obbroot &&
+            (!strncmp(path, "/sdcard/", 8) ||
+             !strncmp(path, "/storage/emulated/0/", 20))) {
+            const char *pkg = ao + strlen("/Android/obb/");
+            const char *rest = strchr(pkg, '/');
+            if (rest && rest[1]) snprintf(buf, cap, "%s/%s", obbroot, rest + 1);
+            else               snprintf(buf, cap, "%s", obbroot);
+            return buf;
+        }
+    }
+    // Unity's split APK loader promotes the OBB directory to the data root and
+    // then probes `<obb>/assets/...` as if the ZIP were a directory. The
+    // unpacked APK asset tree is the real filesystem view for the core player
+    // files (globalgamemanagers, split resources, level0, etc.); leave entries
+    // that only exist in the OBB to the OBB read-through below. Without this
+    // fallback every core probe reaches `...obb/assets/...` and Darwin returns
+    // ENOTDIR before the guest can load the scene.
+    {
+        const char *obb = kl_jni_obb_dir();
+        size_t olen = obb ? strlen(obb) : 0;
+        if (olen && !strncmp(path, obb, olen) && path[olen] == '/') {
+            // Unity inserts the concrete `main.<version>.<package>.obb`
+            // filename between the directory and `/assets`, so match that
+            // component rather than treating the OBB directory itself as the
+            // mount point.
+            const char *suffix = strstr(path + olen, ".obb/assets/");
+            if (suffix && g_apk_target[0]) {
+                suffix += 4; // retain the leading `/assets/...`
+                snprintf(buf, cap, "%s%s", g_apk_target, suffix);
+                struct stat st;
+                if (stat(buf, &st) == 0) return buf;
+            }
+        }
+    }
     size_t alen = strlen(g_apk_prefix);
     if (alen && strncmp(path, g_apk_prefix, alen) == 0 && path[alen] == '/') {
         snprintf(buf, cap, "%s%s", g_apk_target, path + alen);
@@ -1674,7 +1792,7 @@ FILE *klb_fopen(const char *path, const char *mode) {
     // A sound engine that reads its banks through stdio (Wwise fopen(<files>/
     // Init.bnk)) will miss them: the banks live only inside the OBB, not on disk.
     // Serve them from the OBB by basename when the real open fails. Read-only.
-    if (!f && errno == ENOENT && mode && mode[0] == 'r') {
+    if (!f && (errno == ENOENT || errno == ENOTDIR) && mode && mode[0] == 'r') {
         f = kl_obbmap_fopen(_p, mode);
         if (f) { kl_file_note(f, path); return f; }
     }
@@ -2073,7 +2191,38 @@ static int kl_sig_x18_repair_on(void) {
 }
 #define KL_NSIG 65
 static struct { void *handler; int siginfo; } g_guest_sig[KL_NSIG];
+static unsigned g_guest_sig_entered[KL_NSIG];
+// Bounded, lock-free signal metadata; no allocation or formatted I/O from the
+// signal handler. Read it at a later futex boundary to distinguish a changed
+// resume context from a mask change after the handler returned.
+static int g_trace_signal_context;
+static struct {
+    uintptr_t owner;
+    unsigned started, completed, resumed, source_mask, return_mask;
+} g_signal_context[128];
+static int signal_context_slot(uintptr_t owner, int claim) {
+    for (int i = 0; i < 128; i++) {
+        uintptr_t found = __atomic_load_n(&g_signal_context[i].owner, __ATOMIC_RELAXED);
+        if (found == owner) return i;
+        if (!found && claim && __atomic_compare_exchange_n(&g_signal_context[i].owner,
+                &found, owner, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return i;
+    }
+    return -1;
+}
 static void kl_sig_x18_tramp(int sig, siginfo_t *info, void *uctx) {
+    if (sig > 0 && sig < KL_NSIG)
+        __atomic_add_fetch(&g_guest_sig_entered[sig], 1, __ATOMIC_RELAXED);
+    int slot = -1;
+    if (__atomic_load_n(&g_trace_signal_context, __ATOMIC_RELAXED) && (sig == 30 || sig == 24)) {
+        slot = signal_context_slot((uintptr_t)pthread_self(), 1);
+        if (slot >= 0) {
+            if (sig == 30) {
+                __atomic_add_fetch(&g_signal_context[slot].started, 1, __ATOMIC_RELAXED);
+                if (uctx) __atomic_store_n(&g_signal_context[slot].source_mask,
+                    ((ucontext_t *)uctx)->uc_sigmask, __ATOMIC_RELAXED);
+            } else __atomic_add_fetch(&g_signal_context[slot].resumed, 1, __ATOMIC_RELAXED);
+        }
+    }
     void *h  = (sig > 0 && sig < KL_NSIG) ? g_guest_sig[sig].handler : NULL;
     int   si = (sig > 0 && sig < KL_NSIG) ? g_guest_sig[sig].siginfo : 0;
     if (h) {
@@ -2097,10 +2246,19 @@ static void kl_sig_x18_tramp(int sig, siginfo_t *info, void *uctx) {
             uc->uc_mcontext->__ss.__x[18] = (uint64_t)(uintptr_t)tgt;
         }
     }
+    if (slot >= 0 && sig == 30) {
+        if (uctx) __atomic_store_n(&g_signal_context[slot].return_mask,
+            ((ucontext_t *)uctx)->uc_sigmask, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_signal_context[slot].completed, 1, __ATOMIC_RELAXED);
+    }
 }
 
 int klb_sigaction(int sig, const bionic_sigaction *in, bionic_sigaction *old) {
     struct sigaction d, o;
+    __atomic_store_n(&g_trace_signal_context, kl_env_on("KL_TRACE_SIGMASK", 0), __ATOMIC_RELAXED);
+    if (kl_env_on("KL_TRACE_SIGMASK", 0) && in)
+        fprintf(stderr, "  [sigmask] action signal=%d flags=%#x mask=%#llx handler=%p\n",
+                sig, in->flags, (unsigned long long)in->mask, in->handler);
     if (kl_env_on("KL_TRACE_SIG", 0))
         fprintf(stderr, "  [sig] sigaction(%d, handler=%p)\n", sig,
                 in ? in->handler : NULL);
@@ -2192,7 +2350,9 @@ off_t  klb_lseek(int fd, off_t o, int w)   { int handled; off_t r = kl_obbmap_ls
                                              return handled ? r : lseek(fd, o, w); }
 // ...and close, so an OBB read-through fd is unregistered before its number can
 // be recycled by an unrelated open (or the table would misroute that open).
-int    klb_close(int fd)                   { int handled; int r = kl_obbmap_close(fd, &handled);
+int    klb_close(int fd)                   { int handled; int r = kl_eventfd_close(fd, &handled);
+                                             if (handled) return r;
+                                             r = kl_obbmap_close(fd, &handled);
                                              return handled ? r : close(fd); }
 // bare-name pread (libUE4 uses it): interpose the read-through window.
 ssize_t klb_pread(int fd, void *buf, size_t n, off_t off) {
@@ -2327,6 +2487,35 @@ int klb_clock_gettime(int clk, struct timespec *ts) {
     return r;
 }
 
+// bionic clock_nanosleep returns the error number directly; nanosleep returns
+// -1 and sets errno. Translate the clock first, then preserve that distinction.
+int klb_clock_nanosleep(int clk, int flags, const struct timespec *req,
+                        struct timespec *rem) {
+    int dclk = kl_clock_to_darwin(clk);
+    if (dclk < 0 || (flags & ~1) || !req || req->tv_sec < 0 ||
+        req->tv_nsec < 0 || req->tv_nsec >= 1000000000L)
+        return EINVAL;
+    if (!(flags & 1)) {
+        if (nanosleep(req, rem) == 0) return 0;
+        return errno;
+    }
+
+    // TIMER_ABSTIME is in the selected guest clock's domain. Re-evaluate the
+    // deadline on each call, but return EINTR immediately as Linux does.
+    for (;;) {
+        struct timespec now, delta;
+        if (clock_gettime(dclk, &now) != 0) return errno;
+        delta.tv_sec = req->tv_sec - now.tv_sec;
+        delta.tv_nsec = req->tv_nsec - now.tv_nsec;
+        ts_normalise(&delta);
+        if (delta.tv_sec < 0 || (delta.tv_sec == 0 && delta.tv_nsec == 0))
+            return 0;
+        if (nanosleep(&delta, NULL) == 0) return 0;
+        if (errno != EINTR) return errno;
+        return EINTR;
+    }
+}
+
 // bionic struct timeval is { int64 sec; int64 usec }; Darwin's tv_usec is a
 // 32-bit suseconds_t. Forwarding the guest's buffer straight to gettimeofday
 // leaves the top half of its tv_usec as stack garbage — observed at il2cpp's
@@ -2422,6 +2611,31 @@ static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct tim
     switch (base) {
     case KL_FUTEX_WAIT:
     case KL_FUTEX_WAIT_BITSET: {
+        if (kl_env_on("KL_TRACE_SIGMASK", 0)) {
+            static _Thread_local unsigned traced;
+            static _Thread_local sigset_t previous;
+            size_t offset = 0;
+            const char *image = kl_addr_image(__builtin_return_address(0), &offset);
+            if (image && (strstr(image, "libil2cpp") || strstr(image, "libunity")) && traced < 8) {
+                sigset_t current = 0;
+                pthread_sigmask(SIG_SETMASK, NULL, &current);
+                if (!traced || current != previous) {
+                    previous = current;
+                    traced++;
+                    fprintf(stderr, "  [sigmask] futex wait thread=%p image=%s current=%#x offset=%#zx\n",
+                            (void *)pthread_self(), image, current, offset);
+                    int slot = signal_context_slot((uintptr_t)pthread_self(), 0);
+                    if (slot >= 0)
+                        fprintf(stderr, "  [sigmask] signal context thread=%p started=%u completed=%u resumed=%u source=%#x returned=%#x\n",
+                            (void *)pthread_self(),
+                            __atomic_load_n(&g_signal_context[slot].started, __ATOMIC_RELAXED),
+                            __atomic_load_n(&g_signal_context[slot].completed, __ATOMIC_RELAXED),
+                            __atomic_load_n(&g_signal_context[slot].resumed, __ATOMIC_RELAXED),
+                            __atomic_load_n(&g_signal_context[slot].source_mask, __ATOMIC_RELAXED),
+                            __atomic_load_n(&g_signal_context[slot].return_mask, __ATOMIC_RELAXED));
+                }
+            }
+        }
         pthread_mutex_lock(&g_futex[b].m);
         if ((uint32_t)__atomic_load_n(uaddr, __ATOMIC_SEQ_CST) != val) {
             pthread_mutex_unlock(&g_futex[b].m);
@@ -2538,6 +2752,47 @@ static void syscall_warn_once(long n, void *ra) {
             n, img ? img : "", img ? "+" : "pc ", img ? off : (size_t)(uintptr_t)ra);
 }
 
+// Valve's profiler checks tgkill(getpid(), tid, 0) before retaining another
+// thread's state. Refusing that check made it destroy profiles for LIVE workers.
+// Enumerate our task's actual Mach thread IDs, matching klb_gettid; never infer
+// death from a compatibility failure. Signal delivery and other tasks remain
+// unsupported. Release every thread port and the out-of-line enumeration array.
+static long kl_tgkill_probe(long tgid, long tid) {
+    if (tgid <= 0 || tid <= 0) { errno = EINVAL; return -1; }
+    if (tgid != getpid()) { errno = kl_errno_to_linux(ENOSYS); return -1; }
+    thread_act_array_t list = NULL;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &list, &count) != KERN_SUCCESS) {
+        errno = EIO; return -1;
+    }
+    int alive = 0, failed = 0;
+    for (mach_msg_type_number_t i = 0; i < count; i++) {
+        thread_identifier_info_data_t info;
+        mach_msg_type_number_t size = THREAD_IDENTIFIER_INFO_COUNT;
+        kern_return_t result = thread_info(list[i], THREAD_IDENTIFIER_INFO,
+                                          (thread_info_t)&info, &size);
+        if (result == KERN_SUCCESS && info.thread_id == (uint64_t)tid) {
+            // Darwin can cache the kernel thread after pthread_join. Require
+            // a live pthread as well; libpthread validates its own handle list.
+            pthread_t thread = pthread_from_mach_thread_np(list[i]);
+            if (thread) {
+                int status = pthread_kill(thread, 0);
+                if (!status) alive = 1;
+                else if (status != ESRCH) failed = 1;
+            }
+        }
+        // A thread may exit after enumeration; a dead port is not a lookup
+        // failure. Other failures cannot justify declaring a worker dead.
+        if (result != KERN_SUCCESS && result != KERN_TERMINATED &&
+            result != KERN_INVALID_ARGUMENT && result != MACH_SEND_INVALID_DEST) failed = 1;
+        mach_port_deallocate(mach_task_self(), list[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)list, count * sizeof *list);
+    if (alive) return 0;
+    errno = failed ? EIO : ESRCH;
+    return -1;
+}
+
 long klb_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
     // futex is the only syscall here that reads past the fourth argument, so a5
     // and a6 must be carried through: without them FUTEX_WAKE_OP cannot be
@@ -2585,6 +2840,11 @@ long klb_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
     // different hat: the guard would then compare an id from one door against an
     // id from the other and call every acquisition recursive.
     if (n == KL_SYS_gettid) return klb_gettid();
+    if (n == 131 && a3 == 0) return kl_tgkill_probe(a1, a2); // AArch64 tgkill
+    if (n == 131) { // Actual signal delivery is not implemented.
+        syscall_warn_once(n, __builtin_return_address(0));
+        errno = kl_errno_to_linux(ENOSYS); return -1;
+    }
 
     syscall_warn_once(n, __builtin_return_address(0));
     errno = ENOSYS;
@@ -2777,6 +3037,7 @@ int klb_mprotect(void *addr, size_t len, int prot) {
 #define LX_O_DIRECTORY 0x4000
 #define LX_O_NOFOLLOW 0x8000
 #define LX_O_CLOEXEC 0x80000
+#define LX_O_TMPFILE_BIT 0x400000
 
 int kl_open_flags(int lx) {
     int d = lx & 0x3;                            // O_RDONLY/WRONLY/RDWR agree
@@ -2790,6 +3051,45 @@ int kl_open_flags(int lx) {
     if (lx & LX_O_NOFOLLOW)  d |= O_NOFOLLOW;
     if (lx & LX_O_CLOEXEC)   d |= O_CLOEXEC;
     return d;
+}
+
+// Valve's bionic shared-memory implementation uses open(".", O_TMPFILE|O_RDWR)
+// followed by dup/ftruncate/mmap. Darwin has no O_TMPFILE: create an exclusive
+// random file in the requested directory and unlink it before returning. Its
+// backing inode remains alive through all fd aliases and mappings. Directory
+// choice, access mode, umask and CLOEXEC remain real kernel decisions. Linking
+// the anonymous inode into the filesystem with Linux AT_EMPTY_PATH is not
+// supported by this adapter.
+int kl_open_mapped(int guest_dirfd, const char *path, int flags, int mode) {
+    int dirfd = guest_dirfd == -100 ? AT_FDCWD : guest_dirfd;
+    if (!(flags & LX_O_TMPFILE_BIT))
+        return openat(dirfd, path, kl_open_flags(flags), (mode_t)mode);
+    int access = flags & 3;
+    if (!(flags & LX_O_DIRECTORY) || (access != O_WRONLY && access != O_RDWR)) {
+        errno = EINVAL; return -1;
+    }
+    int parent = openat(dirfd, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                        ((flags & LX_O_NOFOLLOW) ? O_NOFOLLOW : 0));
+    if (parent < 0) return -1;
+    int fd = -1;
+    for (unsigned attempt = 0; attempt < 16; attempt++) {
+        char name[64];
+        snprintf(name, sizeof name, ".klepton-tmp-%08x%08x%08x%08x",
+                 arc4random(), arc4random(), arc4random(), arc4random());
+        int native = kl_open_flags(flags & ~(LX_O_DIRECTORY | LX_O_EXCL));
+        fd = openat(parent, name, native | O_CREAT | O_EXCL, (mode_t)mode);
+        if (fd < 0) { if (errno == EEXIST) continue; break; }
+        if (unlinkat(parent, name, 0) < 0) {
+            int saved = errno;
+            close(fd); fd = -1;
+            close(parent); errno = saved; return -1;
+        }
+        break;
+    }
+    int saved = errno;
+    close(parent);
+    errno = saved;
+    return fd;
 }
 // ---- fcntl / ioctl: the same flag divergence, in two more calls ----
 //
@@ -2850,18 +3150,23 @@ static int open_flags_to_linux(int d) {
 
 int kl_fcntl(int fd, int cmd, uintptr_t arg) {
     switch (cmd) {
-    case LX_F_SETFL:
-        // The only translated-argument case, and the one that bit.
-        return fcntl(fd, F_SETFL, kl_open_flags((int)arg));
+    case LX_F_SETFL: {
+        int handled;
+        int flags = kl_open_flags((int)arg);
+        int result = kl_eventfd_setfl(fd, flags, &handled);
+        return handled ? result : fcntl(fd, F_SETFL, flags);
+    }
     case LX_F_GETFL: {
-        int d = fcntl(fd, F_GETFL);
+        int handled;
+        int d = kl_eventfd_getfl(fd, &handled);
+        if (!handled) d = fcntl(fd, F_GETFL);
         return d < 0 ? d : open_flags_to_linux(d);
     }
     // FD_CLOEXEC is 1 on both, and these three take no flag word we own.
-    case LX_F_DUPFD:         return fcntl(fd, F_DUPFD, (int)arg);
+    case LX_F_DUPFD:         return kl_eventfd_dup(fd, -2, (int)arg, 0);
     case LX_F_GETFD:         return fcntl(fd, F_GETFD);
     case LX_F_SETFD:         return fcntl(fd, F_SETFD, (int)arg);
-    case LX_F_DUPFD_CLOEXEC: return fcntl(fd, F_DUPFD_CLOEXEC, (int)arg);
+    case LX_F_DUPFD_CLOEXEC: return kl_eventfd_dup(fd, -2, (int)arg, 1);
     case LX_F_SETOWN:        return fcntl(fd, F_SETOWN, (int)arg);
     case LX_F_GETOWN:        return fcntl(fd, F_GETOWN);
     // struct flock is laid out differently on the two platforms (Linux leads
@@ -3101,8 +3406,9 @@ int klb_madvise(void *a, size_t n, int advice) {
 // open() lives behind a variadic thunk in kl_va_handlers.c, so its trace call
 // comes back here rather than duplicating the mode lookup there.
 void kl_fs_trace_open(const char *path, int flags, int fd) {
-    (void)flags;
-    kl_fs_trace("open", path, NULL, fd < 0);
+    char detail[32];
+    snprintf(detail, sizeof detail, "flags=0x%x", flags);
+    kl_fs_trace("open", path, detail, fd < 0);
     if (kl_file_watch && fd >= 0) kl_file_watch("open", path, fd, NULL, 0, 0, NULL);
 }
 

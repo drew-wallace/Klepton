@@ -41,7 +41,7 @@ diff --git a/src/libANGLE/renderer/metal/DisplayMtl.mm b/src/libANGLE/renderer/m
 index 71f0c61..dbc9481 100644
 --- a/src/libANGLE/renderer/metal/DisplayMtl.mm
 +++ b/src/libANGLE/renderer/metal/DisplayMtl.mm
-@@ -959,6 +959,13 @@ void DisplayMtl::initializeExtensions() const
+@@ -959,6 +959,13 @@ bool IsMetalDisplayAvailable()
      mNativeExtensions.textureMirrorClampToEdgeEXT   = true;
      mNativeExtensions.depthClampEXT                 = true;
      mNativeExtensions.rgbxInternalFormatANGLE       = mFeatures.hasTextureSwizzle.enabled;
@@ -59,7 +59,7 @@ diff --git a/src/libANGLE/renderer/metal/FrameBufferMtl.mm b/src/libANGLE/render
 index 2825a7c..49f308d 100644
 --- a/src/libANGLE/renderer/metal/FrameBufferMtl.mm
 +++ b/src/libANGLE/renderer/metal/FrameBufferMtl.mm
-@@ -29,6 +29,33 @@ namespace rx
+@@ -29,6 +29,33 @@
  {
  namespace
  {
@@ -93,7 +93,7 @@ index 2825a7c..49f308d 100644
  // Override clear color based on texture's write mask
  void OverrideMTLClearColor(const mtl::TextureRef &texture,
                             const mtl::ClearColorValue &clearColor,
-@@ -567,6 +594,56 @@ angle::Result FramebufferMtl::blit(const gl::Context *context,
+@@ -567,6 +594,56 @@ void RoundValueAndAdjustCorrespondingValue(float a,
      baseParams.unpackFlipX = false;
      baseParams.unpackFlipY = false;
  
@@ -150,7 +150,7 @@ index 2825a7c..49f308d 100644
      return blitWithDraw(context, srcFrameBuffer, blitColorBuffer, blitDepthBuffer,
                          blitStencilBuffer, filter, baseParams);
  }
-@@ -1144,6 +1221,46 @@ angle::Result FramebufferMtl::prepareRenderPass(const gl::Context *context,
+@@ -1144,6 +1221,46 @@ void RoundValueAndAdjustCorrespondingValue(float a,
          desc.stencilAttachment = {};
      }
  
@@ -197,6 +197,47 @@ index 2825a7c..49f308d 100644
      if (desc.numColorAttachments == 0 && mDepthRenderTarget == nullptr &&
          mStencilRenderTarget == nullptr)
      {
+diff --git a/src/libANGLE/renderer/metal/TextureMtl.mm b/src/libANGLE/renderer/metal/TextureMtl.mm
+index 7894742..2bd3489 100644
+--- a/src/libANGLE/renderer/metal/TextureMtl.mm
++++ b/src/libANGLE/renderer/metal/TextureMtl.mm
+@@ -327,14 +327,25 @@ void ConvertDepthStencilData(const MTLSize &regionSize,
+                                                  size_t *buffer2DImageSizeOut,
+                                                  mtl::BufferRef *bufferOut)
+ {
+-    size_t stagingBufferRowPitch    = regionSize.width * textureAngleFormat.pixelBytes;
+-    size_t stagingBuffer2DImageSize = stagingBufferRowPitch * regionSize.height;
++    // A block-compressed upload has one source row per block row, not one per
++    // pixel row. Copying regionSize.height rows reads far beyond the caller's
++    // imageSize for ASTC textures (for example 2048x2048 ASTC 6x6 has 342
++    // block rows). Preserve the compressed pitches passed down by GL.
++    size_t stagingBufferRowPitch = textureAngleFormat.isBlock
++                                       ? bytesPerRow
++                                       : regionSize.width * textureAngleFormat.pixelBytes;
++    size_t stagingBuffer2DImageSize = textureAngleFormat.isBlock
++                                          ? bytesPer2DImage
++                                          : stagingBufferRowPitch * regionSize.height;
+     size_t stagingBufferSize        = stagingBuffer2DImageSize * regionSize.depth;
+     mtl::BufferRef stagingBuffer;
+     ANGLE_TRY(mtl::Buffer::MakeBuffer(contextMtl, stagingBufferSize, &stagingBuffer));
+ 
+     uint8_t *pdst = stagingBuffer->map(contextMtl).data();
+-    CopyTextureData(regionSize, bytesPerRow, bytesPer2DImage, data, stagingBufferRowPitch,
++    MTLSize copySize = regionSize;
++    if (textureAngleFormat.isBlock)
++        copySize.height = bytesPerRow ? bytesPer2DImage / bytesPerRow : 0;
++    CopyTextureData(copySize, bytesPerRow, bytesPer2DImage, data, stagingBufferRowPitch,
+                     stagingBuffer2DImageSize, pdst);
+ 
+     stagingBuffer->unmap(contextMtl);
+@@ -549,7 +560,6 @@ void CopyBufferToOriginalTextureIfDstIsAView(ContextMtl *contextMtl,
+                                                      const mtl::TextureRef &texture)
+ {
+     ASSERT(texture && texture->valid());
+-    ASSERT(!textureAngleFormat.isBlock);
+ 
+     angle::FormatID stagingBufferFormatID   = textureAngleFormat.id;
+     const angle::Format &angleStagingFormat = angle::Format::Get(stagingBufferFormatID);
 diff --git a/src/libANGLE/renderer/metal/mtl_common.h b/src/libANGLE/renderer/metal/mtl_common.h
 index 85cc743..1b76b7e 100644
 --- a/src/libANGLE/renderer/metal/mtl_common.h
@@ -347,7 +388,7 @@ index d5f657b..c1658d0 100644
  #include "libANGLE/angletypes.h"
  #include "libANGLE/renderer/metal/DisplayMtl.h"
  
-@@ -87,5 +91,211 @@ mtl::CommandQueue &Context::cmdQueue()
+@@ -87,5 +91,211 @@
      return mDisplay->cmdQueue();
  }
  
@@ -563,7 +604,7 @@ diff --git a/src/libANGLE/renderer/metal/mtl_format_table_autogen.mm b/src/libAN
 index 7ec88c5..d49c3e1 100644
 --- a/src/libANGLE/renderer/metal/mtl_format_table_autogen.mm
 +++ b/src/libANGLE/renderer/metal/mtl_format_table_autogen.mm
-@@ -304,6 +304,12 @@ angle::FormatID Format::MetalToAngleFormatID(MTLPixelFormat formatMtl)
+@@ -304,6 +304,12 @@
              return angle::FormatID::ASTC_8x8_UNORM_BLOCK;
  #    endif  // TARGET_OS_IOS || TARGET_OS_OSX || TARGET_OS_VISION
  #endif      // TARGET_OS_IPHONE || mac 11.0+
@@ -576,7 +617,7 @@ index 7ec88c5..d49c3e1 100644
          default:
              return angle::FormatID::NONE;
      }
-@@ -2848,6 +2854,21 @@ void Format::init(const DisplayMtl *display, angle::FormatID intendedFormatId_)
+@@ -2848,6 +2854,21 @@
              break;
  
  #endif  // TARGET_OS_OSX && (__MAC_OS_X_VERSION_MAX_ALLOWED >= 110000))
@@ -602,7 +643,7 @@ diff --git a/src/libANGLE/renderer/metal/mtl_format_utils.mm b/src/libANGLE/rend
 index 180cc18..014dd64 100644
 --- a/src/libANGLE/renderer/metal/mtl_format_utils.mm
 +++ b/src/libANGLE/renderer/metal/mtl_format_utils.mm
-@@ -436,6 +436,18 @@ void FormatTable::adjustFormatCapsForDevice(const mtl::ContextDevice &device,
+@@ -436,6 +436,18 @@ void GenerateTextureCapsMap(const FormatTable &formatTable,
  void FormatTable::initNativeFormatCaps(const DisplayMtl *display)
  {
      initNativeFormatCapsAutogen(display);
@@ -642,7 +683,7 @@ diff --git a/src/libANGLE/renderer/metal/mtl_render_utils.mm b/src/libANGLE/rend
 index 0710ffe..ad3916b 100644
 --- a/src/libANGLE/renderer/metal/mtl_render_utils.mm
 +++ b/src/libANGLE/renderer/metal/mtl_render_utils.mm
-@@ -59,7 +59,11 @@ struct BlitParamsUniform
+@@ -59,7 +59,11 @@
      int srcLevel         = 0;
      int srcLayer         = 0;
      uint8_t dstLuminance = 0;  // dest texture is luminace
@@ -712,7 +753,7 @@ diff --git a/src/libANGLE/renderer/metal/mtl_state_cache.mm b/src/libANGLE/rende
 index ec81f97..39b8d35 100644
 --- a/src/libANGLE/renderer/metal/mtl_state_cache.mm
 +++ b/src/libANGLE/renderer/metal/mtl_state_cache.mm
-@@ -580,6 +580,14 @@ bool RenderPassDesc::equalIgnoreLoadStoreOptions(const RenderPassDesc &other) co
+@@ -580,6 +580,14 @@ void ToObjC(const RenderPassStencilAttachmentDesc &desc,
          return false;
      }
  
@@ -727,7 +768,7 @@ index ec81f97..39b8d35 100644
      return depthAttachment.equalIgnoreLoadStoreOptions(other.depthAttachment) &&
             stencilAttachment.equalIgnoreLoadStoreOptions(other.stencilAttachment);
  }
-@@ -600,7 +608,8 @@ bool RenderPassDesc::operator==(const RenderPassDesc &other) const
+@@ -600,7 +608,8 @@ void ToObjC(const RenderPassStencilAttachmentDesc &desc,
      }
      return depthAttachment == other.depthAttachment &&
             stencilAttachment == other.stencilAttachment && defaultWidth == other.defaultWidth &&
@@ -737,7 +778,7 @@ index ec81f97..39b8d35 100644
  }
  
  // Convert to Metal object
-@@ -627,6 +636,19 @@ void RenderPassDesc::convertToMetalDesc(MTLRenderPassDescriptor *objCDesc,
+@@ -627,6 +636,19 @@ void ToObjC(const RenderPassStencilAttachmentDesc &desc,
      ToObjC(depthAttachment, objCDesc.depthAttachment);
      ToObjC(stencilAttachment, objCDesc.stencilAttachment);
  

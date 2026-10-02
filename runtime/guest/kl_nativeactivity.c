@@ -84,12 +84,14 @@ int kl_na_create(kl_image *img, const char *entry, const char *data_path, FILE *
 void kl_na_start(FILE *out) {
     NA_CB(out, onStart);
     NA_CB(out, onResume);
+    NA_CB(out, onInputQueueCreated, kl_ndk_input_queue());
     NA_CB(out, onNativeWindowCreated, kl_ndk_window());
     NA_CB(out, onWindowFocusChanged, 1);
 }
 
 void kl_na_stop(FILE *out) {
     NA_CB(out, onWindowFocusChanged, 0);
+    NA_CB(out, onInputQueueDestroyed, kl_ndk_input_queue());
     NA_CB(out, onNativeWindowDestroyed, kl_ndk_window());
     NA_CB(out, onPause);
     NA_CB(out, onStop);

@@ -231,6 +231,119 @@ static int kl_ALooper_pollOnce(int timeoutMillis, int *outFd, int *outEvents, vo
     return kl_looper_poll(timeoutMillis, outFd, outEvents, outData);
 }
 
+// ============================================================ AInputQueue
+// A byte in the pipe corresponds to each queued event, so Android's looper
+// reports input until the guest drains it with getEvent/finishEvent.
+typedef struct {
+    int32_t type, device_id, source, action, flags, keycode, meta, buttons;
+    float x, y;
+} kl_input_event;
+typedef struct {
+    int read_fd, write_fd;
+    pthread_mutex_t lock;
+    kl_looper *looper;
+    kl_input_event *pending[64];
+    unsigned head, count;
+} kl_input_queue;
+static kl_input_queue g_input_queue;
+static pthread_once_t g_input_once = PTHREAD_ONCE_INIT;
+
+static void kl_input_init(void) {
+    int p[2];
+    if (pipe(p) != 0) { g_input_queue.read_fd = g_input_queue.write_fd = -1; return; }
+    g_input_queue.read_fd = p[0]; g_input_queue.write_fd = p[1];
+    fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(p[1], F_SETFL, fcntl(p[1], F_GETFL, 0) | O_NONBLOCK);
+    pthread_mutex_init(&g_input_queue.lock, NULL);
+}
+void *kl_ndk_input_queue(void) {
+    pthread_once(&g_input_once, kl_input_init);
+    return g_input_queue.read_fd >= 0 ? &g_input_queue : NULL;
+}
+static void kl_input_push(kl_input_event *e) {
+    kl_input_queue *q = kl_ndk_input_queue();
+    if (!q || !e) { free(e); return; }
+    pthread_mutex_lock(&q->lock);
+    if (q->count == 64) { pthread_mutex_unlock(&q->lock); free(e); return; }
+    q->pending[(q->head + q->count++) % 64] = e;
+    char wake = 1;
+    (void)write(q->write_fd, &wake, 1);
+    pthread_mutex_unlock(&q->lock);
+}
+void kl_ndk_input_key(int32_t action, int32_t keycode, int32_t flags, int32_t meta) {
+    kl_input_event *e = calloc(1, sizeof *e);
+    if (!e) return;
+    *e = (kl_input_event){.type = 1, .source = 0x401 /* gamepad */,
+                          .action = action, .keycode = keycode,
+                          .flags = flags, .meta = meta};
+    kl_input_push(e);
+}
+void kl_ndk_input_motion(int32_t action, float x, float y, int32_t buttons) {
+    kl_input_event *e = calloc(1, sizeof *e);
+    if (!e) return;
+    *e = (kl_input_event){.type = 2, .source = 0x1002 /* touch screen */,
+                          .action = action, .x = x, .y = y, .buttons = buttons};
+    kl_input_push(e);
+}
+static void kl_AInputQueue_attachLooper(kl_input_queue *q, kl_looper *l, int ident,
+                                        kl_looper_cb cb, void *data) {
+    if (!q || !l) return;
+    pthread_mutex_lock(&q->lock);
+    if (q->looper) kl_ALooper_removeFd(q->looper, q->read_fd);
+    q->looper = l;
+    kl_ALooper_addFd(l, q->read_fd, ident, ALOOPER_EVENT_INPUT, cb, data);
+    pthread_mutex_unlock(&q->lock);
+}
+static void kl_AInputQueue_detachLooper(kl_input_queue *q) {
+    if (!q) return;
+    pthread_mutex_lock(&q->lock);
+    if (q->looper) kl_ALooper_removeFd(q->looper, q->read_fd);
+    q->looper = NULL;
+    pthread_mutex_unlock(&q->lock);
+}
+static int32_t kl_AInputQueue_getEvent(kl_input_queue *q, kl_input_event **out) {
+    if (!q || !out) return -EINVAL;
+    pthread_mutex_lock(&q->lock);
+    if (!q->count) { pthread_mutex_unlock(&q->lock); return -EAGAIN; }
+    *out = q->pending[q->head];
+    q->head = (q->head + 1) % 64;
+    q->count--;
+    char wake;
+    (void)read(q->read_fd, &wake, 1);
+    pthread_mutex_unlock(&q->lock);
+    return 0;
+}
+static int32_t kl_AInputQueue_preDispatchEvent(kl_input_queue *q, kl_input_event *e) {
+    (void)q; (void)e; return 0;
+}
+static void kl_AInputQueue_finishEvent(kl_input_queue *q, kl_input_event *e, int handled) {
+    (void)q; (void)handled; free(e);
+}
+#define KL_INPUT_GET(name, field, ret) \
+    static ret kl_##name(const kl_input_event *e) { return e ? e->field : 0; }
+KL_INPUT_GET(AInputEvent_getType, type, int32_t)
+KL_INPUT_GET(AInputEvent_getDeviceId, device_id, int32_t)
+KL_INPUT_GET(AInputEvent_getSource, source, int32_t)
+KL_INPUT_GET(AKeyEvent_getAction, action, int32_t)
+KL_INPUT_GET(AKeyEvent_getFlags, flags, int32_t)
+KL_INPUT_GET(AKeyEvent_getKeyCode, keycode, int32_t)
+KL_INPUT_GET(AKeyEvent_getMetaState, meta, int32_t)
+KL_INPUT_GET(AMotionEvent_getAction, action, int32_t)
+KL_INPUT_GET(AMotionEvent_getButtonState, buttons, int32_t)
+#undef KL_INPUT_GET
+static size_t kl_AMotionEvent_getPointerCount(const kl_input_event *e) {
+    return e && e->type == 2 ? 1 : 0;
+}
+static int32_t kl_AMotionEvent_getPointerId(const kl_input_event *e, size_t pointer) {
+    return e && pointer == 0 ? 0 : -1;
+}
+static float kl_AMotionEvent_getX(const kl_input_event *e, size_t pointer) {
+    return e && pointer == 0 ? e->x : 0;
+}
+static float kl_AMotionEvent_getY(const kl_input_event *e, size_t pointer) {
+    return e && pointer == 0 ? e->y : 0;
+}
+
 // ============================================================ ANativeWindow
 typedef struct kl_native_window {
     int     refs;
@@ -581,32 +694,47 @@ static float kl_ASensor_getResolution(const kl_sensor *s)   { return s ? s->reso
 static int   kl_ASensor_getMinDelay(const kl_sensor *s)     { return s ? s->min_delay_us : 0; }
 
 // ============================================================ AConfiguration
-// An AConfiguration is Android's ResTable_config — locale, orientation, density,
-// screen size, the fields resource selection is done with. The VR guest imports
-// exactly three of the family, and none of them is a getter:
-//
-//   AConfiguration_new / _fromAssetManager / _delete
-//
-// which is native_app_glue's boilerplate verbatim. So nothing ever reads a field
-// back, and the honest answer is a zeroed block: every ACONFIGURATION_*_ANY
-// constant is 0, so "all defaults, nothing specified" is what the guest sees.
-// That is also true — we have no Android resource configuration to report.
-//
-// Sized generously and not from a transcribed struct, deliberately: the layout
-// is private to the platform, we hand out the only pointers, and the moment a
-// getter appears in an import list it becomes an unresolved name that stops the
-// run BY NAME rather than a field read off the end of a struct we guessed at.
-#define KL_ACONFIG_BYTES 128
+// AConfiguration is opaque to the guest. Keep only fields that we actually
+// supply, rather than guessing Android's private ResTable_config layout.
+typedef struct {
+    int32_t sdk, orientation, density, screen_size, screen_long;
+    int32_t ui_type, ui_night, touchscreen, keyboard, keys_hidden;
+    int32_t navigation, nav_hidden, mcc, mnc;
+} kl_config;
 
-static void *kl_AConfiguration_new(void) { return calloc(1, KL_ACONFIG_BYTES); }
+static void *kl_AConfiguration_new(void) { return calloc(1, sizeof(kl_config)); }
 static void  kl_AConfiguration_delete(void *c) { free(c); }
 static void  kl_AConfiguration_fromAssetManager(void *c, void *mgr) {
-    // Android fills the config from the asset manager's current device state.
-    // Ours has none, so this stays all-defaults; it is not a no-op standing in
-    // for something, it is the whole answer.
     (void)mgr;
-    if (c) memset(c, 0, KL_ACONFIG_BYTES);
+    if (!c) return;
+    kl_config *cfg = c;
+    *cfg = (kl_config){0};
+    // Match ANativeActivity.sdkVersion and Build.VERSION.SDK_INT. Unspecified
+    // resource qualifiers retain Android's *_ANY value (zero).
+    cfg->sdk = 29;
+    cfg->ui_type = 7; // ACONFIGURATION_UI_MODE_TYPE_VR_HEADSET
+    cfg->ui_night = 1; // ACONFIGURATION_UI_MODE_NIGHT_NO
 }
+
+#define KL_CONFIG_GET(name, field) \
+    static int32_t kl_AConfiguration_get##name(void *c) { \
+        return c ? ((const kl_config *)c)->field : 0; \
+    }
+KL_CONFIG_GET(Mcc, mcc)
+KL_CONFIG_GET(Mnc, mnc)
+KL_CONFIG_GET(Orientation, orientation)
+KL_CONFIG_GET(Density, density)
+KL_CONFIG_GET(ScreenSize, screen_size)
+KL_CONFIG_GET(ScreenLong, screen_long)
+KL_CONFIG_GET(UiModeType, ui_type)
+KL_CONFIG_GET(UiModeNight, ui_night)
+KL_CONFIG_GET(Touchscreen, touchscreen)
+KL_CONFIG_GET(Keyboard, keyboard)
+KL_CONFIG_GET(KeysHidden, keys_hidden)
+KL_CONFIG_GET(Navigation, navigation)
+KL_CONFIG_GET(NavHidden, nav_hidden)
+KL_CONFIG_GET(SdkVersion, sdk)
+#undef KL_CONFIG_GET
 
 // ...and the getters, which the note above predicted would arrive one day and
 // stop a run BY NAME. **Unreal Engine 4 is that day**: native_app_glue's
@@ -693,6 +821,25 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
     N("ALooper_addFd",      kl_ALooper_addFd),
     N("ALooper_removeFd",   kl_ALooper_removeFd),
 
+    N("AInputQueue_attachLooper", kl_AInputQueue_attachLooper),
+    N("AInputQueue_detachLooper", kl_AInputQueue_detachLooper),
+    N("AInputQueue_getEvent", kl_AInputQueue_getEvent),
+    N("AInputQueue_preDispatchEvent", kl_AInputQueue_preDispatchEvent),
+    N("AInputQueue_finishEvent", kl_AInputQueue_finishEvent),
+    N("AInputEvent_getType", kl_AInputEvent_getType),
+    N("AInputEvent_getDeviceId", kl_AInputEvent_getDeviceId),
+    N("AInputEvent_getSource", kl_AInputEvent_getSource),
+    N("AKeyEvent_getAction", kl_AKeyEvent_getAction),
+    N("AKeyEvent_getFlags", kl_AKeyEvent_getFlags),
+    N("AKeyEvent_getKeyCode", kl_AKeyEvent_getKeyCode),
+    N("AKeyEvent_getMetaState", kl_AKeyEvent_getMetaState),
+    N("AMotionEvent_getAction", kl_AMotionEvent_getAction),
+    N("AMotionEvent_getButtonState", kl_AMotionEvent_getButtonState),
+    N("AMotionEvent_getPointerCount", kl_AMotionEvent_getPointerCount),
+    N("AMotionEvent_getPointerId", kl_AMotionEvent_getPointerId),
+    N("AMotionEvent_getX", kl_AMotionEvent_getX),
+    N("AMotionEvent_getY", kl_AMotionEvent_getY),
+
     N("ANativeWindow_acquire",            kl_ANativeWindow_acquire),
     N("ANativeWindow_release",            kl_ANativeWindow_release),
     N("ANativeWindow_fromSurface",        kl_ANativeWindow_fromSurface),
@@ -738,6 +885,20 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
     N("AConfiguration_fromAssetManager", kl_AConfiguration_fromAssetManager),
     N("AConfiguration_getLanguage",      kl_AConfiguration_getLanguage),
     N("AConfiguration_getCountry",       kl_AConfiguration_getCountry),
+    N("AConfiguration_getMcc",           kl_AConfiguration_getMcc),
+    N("AConfiguration_getMnc",           kl_AConfiguration_getMnc),
+    N("AConfiguration_getOrientation",   kl_AConfiguration_getOrientation),
+    N("AConfiguration_getDensity",       kl_AConfiguration_getDensity),
+    N("AConfiguration_getScreenSize",    kl_AConfiguration_getScreenSize),
+    N("AConfiguration_getScreenLong",    kl_AConfiguration_getScreenLong),
+    N("AConfiguration_getUiModeType",    kl_AConfiguration_getUiModeType),
+    N("AConfiguration_getUiModeNight",   kl_AConfiguration_getUiModeNight),
+    N("AConfiguration_getTouchscreen",   kl_AConfiguration_getTouchscreen),
+    N("AConfiguration_getKeyboard",      kl_AConfiguration_getKeyboard),
+    N("AConfiguration_getKeysHidden",    kl_AConfiguration_getKeysHidden),
+    N("AConfiguration_getNavigation",    kl_AConfiguration_getNavigation),
+    N("AConfiguration_getNavHidden",     kl_AConfiguration_getNavHidden),
+    N("AConfiguration_getSdkVersion",    kl_AConfiguration_getSdkVersion),
 
     N("ANativeActivity_finish",        kl_ANativeActivity_finish),
     N("ANativeActivity_setWindowFormat", kl_ANativeActivity_setWindowFormat),

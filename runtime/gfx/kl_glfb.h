@@ -254,6 +254,9 @@ void *kl_glfb_mtl_device(void);
 // internalformat the guest asked for.
 int kl_glfb_bind_eye_mtl_texture(int eye, int stage, uint32_t gl_tex,
                                  int w, int h, uint32_t internal_fmt);
+// DoubleWide eyes share one GL texture and one Metal slice. Register the second
+// eye for composition without rebinding that GL name to a different EGLImage.
+int kl_glfb_alias_eye_mtl_texture(int eye, int stage, int source_eye);
 
 // The MTLTexture currently backing (eye, stage), or NULL — what the compositor
 // pass samples, and what a test reads back to check the guest's frame arrived.

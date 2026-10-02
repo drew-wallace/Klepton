@@ -11,10 +11,15 @@
 #define KL_CACERTS_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 // How many anchors we will present. 0 means "no trust store", which is what
 // this runtime did before the table existed and what KL_CA_ANCHORS=0 restores.
 int kl_cacert_count(void);
+
+// Export the same baked trust anchors for native guest OpenSSL consumers.
+// Returns 0 on success, -1 on an output error. No validation bypass.
+int kl_cacerts_write_pem(FILE *output);
 
 // Anchor `i` as DER, or NULL if `i` is out of range. The bytes are static and
 // immutable — the caller copies into whatever the guest is given.

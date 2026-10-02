@@ -15,10 +15,10 @@
 // which is why this replaced the earlier extract-and-delete approach (that lost
 // data when the container rotated between runs).
 //
-// UE4-only: kl_ue4_configure is the sole caller of kl_obbmap_init, so the index
-// is empty for every other guest and the open/read/stat hooks are branches
-// never taken. Unity reaches its OBB through the Java ZipFile shim (kl_jni_io.c),
-// a separate path this does not touch.
+// UE4 supplies a base path and gets its staged files mounted below that path.
+// Unity supplies an empty base and gets the archive's deployment-relative
+// `assets/...` entries. That second shape is needed by split Unity builds whose
+// subsystem manifests live in the OBB rather than in the APK.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,8 +39,8 @@
 typedef struct {
     char     loose[1024];   // container-absolute path the guest opens
     char     obb[1024];     // archive it lives in
-    uint64_t lhdr, size;    // local-header offset and (uncompressed) size
-    uint16_t method;        // 0 stored (served); 8 deflate (refused, see below)
+    uint64_t lhdr, size, csize; // local-header offset, uncompressed/compressed size
+    uint16_t method;        // 0 stored; 8 deflate (inflated on demand)
     uint8_t  is_loose;      // 1: `obb` IS the data file (a loose container in the
                             // OBB dir), data at offset 0, no ZIP local header
     uint8_t  is_abs;        // 1: lhdr IS the absolute data offset in `obb` — an
@@ -200,9 +200,13 @@ static void index_one(const char *obbpath) {
                                        // return base 0 (past-header skipped) — the
                                        // pak then mounts at the wrong offset and the
                                        // guest finds no content (UE4 dies in ICU init).
-            snprintf(e->loose, sizeof e->loose, "%s/%s", g_base, rel);
+            if (g_base_len)
+                snprintf(e->loose, sizeof e->loose, "%s/%s", g_base, rel);
+            else
+                snprintf(e->loose, sizeof e->loose, "%s", rel);
             snprintf(e->obb, sizeof e->obb, "%s", obbpath);
             e->method = rd16(cd + p + 10);
+            e->csize  = rd32(cd + p + 20);
             e->size   = rd32(cd + p + 24);
             e->lhdr   = rd32(cd + p + 42);
             bank_add(rel, obbpath, e->method, e->size, e->lhdr);
@@ -413,10 +417,40 @@ void kl_obbmap_init(const char *obbdir, const char *ue4game_base) {
 
 // Find an indexed entry by its loose path. NULL if not one of ours.
 static obb_entry *find(const char *loose) {
-    if (!g_n || !loose || !g_base_len) return NULL;   // no base -> basename index only
-    if (strncmp(loose, g_base, g_base_len) != 0) return NULL;
+    if (!g_n || !loose) return NULL;
+    if (g_base_len) {
+        if (strncmp(loose, g_base, g_base_len) != 0) return NULL;
+    } else {
+        // Native Unity paths are rooted at the APK mount (for example
+        // `<apk>/assets/bin/Data/...`) while ZIP entries are deployment
+        // relative (`assets/bin/Data/...`). Match that suffix only.
+        const char *asset = strstr(loose, "assets/");
+        if (asset) loose = asset;
+    }
     for (unsigned i = 0; i < g_n; i++)
         if (strcmp(g_ent[i].loose, loose) == 0) return &g_ent[i];
+
+    // Unity's split-data reader probes the hashed resource payload with a
+    // platform-specific companion suffix (.resG/.resS/.res), while the
+    // Android OBB stores that payload under the bare hash.  Android's
+    // AssetManager hides this distinction; a normal Darwin stat sees the OBB
+    // as a file and returns ENOTDIR before the virtual archive path can answer.
+    // Restrict the alias to Unity's deployment-relative index (g_base empty)
+    // and only these known resource suffixes so an unrelated missing file is
+    // never fabricated.
+    if (!g_base_len) {
+        static const char *const suffixes[] = { ".resG", ".resS", ".res" };
+        for (unsigned s = 0; s < sizeof suffixes / sizeof suffixes[0]; s++) {
+            size_t n = strlen(loose), sn = strlen(suffixes[s]);
+            if (n <= sn || strcmp(loose + n - sn, suffixes[s]) != 0) continue;
+            char bare[1024];
+            if (n - sn >= sizeof bare) continue;
+            memcpy(bare, loose, n - sn);
+            bare[n - sn] = '\0';
+            for (unsigned i = 0; i < g_n; i++)
+                if (strcmp(g_ent[i].loose, bare) == 0) return &g_ent[i];
+        }
+    }
     return NULL;
 }
 
@@ -430,6 +464,23 @@ int kl_obbmap_stat(const char *loose, long long *size) {
     if (!e) {
         obb_bank *b = bank_find(loose);
         if (b) { if (size) *size = (long long)b->size; return 1; }
+        // Unity Addressables probes the parent directory before opening the
+        // file (for example ...!/assets/aa/settings.json). The directory is
+        // virtual too: answer it when any indexed entry has this path prefix.
+        const char *key = loose;
+        if (!g_base_len) {
+            const char *asset = strstr(key, "assets/");
+            if (asset) key = asset;
+        }
+        size_t kl = strlen(key);
+        while (kl && key[kl - 1] == '/') kl--;
+        for (unsigned i = 0; i < g_n; i++) {
+            const char *ep = g_ent[i].loose;
+            if (strlen(ep) > kl && !strncmp(ep, key, kl) && ep[kl] == '/') {
+                if (size) *size = -1; // directory marker; callers synthesize S_IFDIR
+                return 1;
+            }
+        }
         return 0;
     }
     if (size) *size = (long long)e->size;
@@ -690,6 +741,57 @@ static int data_offset(FILE *f, const obb_entry *e, uint64_t *out) {
     return 1;
 }
 
+// ZIP method 8 entries are common for Unity's split resource sidecars.  The
+// Android AssetManager transparently inflates them; the OBB read-through used
+// to reject them, leaving Unity with an incomplete ResourceFile and a splash
+// screen that never advanced.  Inflate into an unlinked temporary fd so all
+// normal read/lseek/fstat paths continue to work without adding a permanent
+// extracted tree to the container.
+static int zip_deflate_open(const obb_entry *e) {
+    if (!e || e->method != 8 || e->is_abs || e->is_loose ||
+        e->csize == 0 || e->size == 0 || e->csize > (512u << 20) ||
+        e->size > (512u << 20)) return -1;
+    int in = open(e->obb, O_RDONLY);
+    if (in < 0) return -1;
+    FILE *probe = fdopen(dup(in), "rb");
+    if (!probe) { close(in); return -1; }
+    uint64_t base = 0;
+    int ok = data_offset(probe, e, &base);
+    fclose(probe);
+    if (!ok) { close(in); return -1; }
+    uint8_t *src = malloc((size_t)e->csize);
+    uint8_t *dst = malloc((size_t)e->size);
+    if (!src || !dst || pread(in, src, (size_t)e->csize, (off_t)base) != (ssize_t)e->csize) {
+        free(src); free(dst); close(in); return -1;
+    }
+    z_stream z;
+    memset(&z, 0, sizeof z);
+    z.next_in = src; z.avail_in = (uInt)e->csize;
+    z.next_out = dst; z.avail_out = (uInt)e->size;
+    int zr = inflateInit2(&z, -MAX_WBITS);
+    if (zr != Z_OK) { free(src); free(dst); close(in); return -1; }
+    zr = inflate(&z, Z_FINISH);
+    size_t got = z.total_out;
+    inflateEnd(&z);
+    free(src); close(in);
+    if (zr != Z_STREAM_END || got != (size_t)e->size) { free(dst); return -1; }
+    const char *td = getenv("TMPDIR");
+    char t[1024];
+    snprintf(t, sizeof t, "%s/klepton-obb-XXXXXX", td && *td ? td : "/tmp");
+    int out = mkstemp(t);
+    if (out < 0) { free(dst); return -1; }
+    unlink(t);
+    size_t done = 0;
+    while (done < got) {
+        ssize_t n = write(out, dst + done, got - done);
+        if (n <= 0) { close(out); free(dst); return -1; }
+        done += (size_t)n;
+    }
+    free(dst);
+    lseek(out, 0, SEEK_SET);
+    return out;
+}
+
 // A FILE* over an OBB entry's byte window, for guests that read banks through
 // STDIO (Wwise fopen) rather than open(). A virtual fd cannot back a host FILE*
 // — host stdio calls the host read()/lseek(), not Klepton's window-translating
@@ -724,16 +826,27 @@ static int klobb_cookie_close(void *c_) {
 FILE *kl_obbmap_fopen(const char *loose, const char *mode) {
     if (!loose || !mode || mode[0] != 'r') return NULL;       // read-only
     obb_entry *e = find(loose);
+    if (g_verbose && loose && strstr(loose, "jar:file:"))
+        fprintf(stderr, "  [obb] jar fopen lookup %s -> %s\n", loose,
+                e ? e->loose : "MISS");
     obb_entry tmp;
     if (!e) {
         obb_bank *b = bank_find(loose);
         if (!b) return NULL;
         memset(&tmp, 0, sizeof tmp);
         snprintf(tmp.obb, sizeof tmp.obb, "%s", b->obb);
-        tmp.method = b->method; tmp.size = b->size; tmp.lhdr = b->lhdr;
+        tmp.method = b->method; tmp.size = b->size; tmp.csize = 0;
+        tmp.lhdr = b->lhdr;
         e = &tmp;
     }
-    if (e->method != 0) return NULL;                          // STORED only
+    if (e->method == 8) {
+        int fd = zip_deflate_open(e);
+        if (fd < 0) return NULL;
+        FILE *f = fdopen(fd, "rb");
+        if (!f) close(fd);
+        return f;
+    }
+    if (e->method != 0) return NULL;
     FILE *probe = fopen(e->obb, "rb");
     if (!probe) return NULL;
     uint64_t base;
@@ -749,7 +862,7 @@ FILE *kl_obbmap_fopen(const char *loose, const char *mode) {
     if (!f) { close(fd); free(c); return NULL; }
     static int said; if (said < 16) { said++;
         const char *bn = strrchr(loose,'/'); bn = bn?bn+1:loose;
-        fprintf(stderr, "  [obb] fopen bank %s from the OBB (%llu bytes)\n",
+        fprintf(stderr, "  [obb] fopen entry %s from the OBB (%llu bytes)\n",
                 bn, (unsigned long long)e->size); }
     return f;
 }
@@ -823,13 +936,17 @@ int kl_obbmap_open(const char *loose, int flags) {
     }
     if ((flags & O_ACCMODE) != O_RDONLY) return -1;   // read-only path only
     obb_entry *e = find(loose);
+    if (g_verbose && loose && strstr(loose, "jar:file:"))
+        fprintf(stderr, "  [obb] jar lookup %s -> %s\n", loose,
+                e ? e->loose : "MISS");
     obb_entry tmp;
     if (!e) {
         obb_bank *b = bank_find(loose);
         if (!b) return -1;
         memset(&tmp, 0, sizeof tmp);
         snprintf(tmp.obb, sizeof tmp.obb, "%s", b->obb);
-        tmp.method = b->method; tmp.size = b->size; tmp.lhdr = b->lhdr;
+        tmp.method = b->method; tmp.size = b->size; tmp.csize = 0;
+        tmp.lhdr = b->lhdr;
         e = &tmp;
         static int said; if (said < 16) { said++;
             fprintf(stderr, "  [obb] serving audio bank %s from the OBB (%llu bytes) "
@@ -845,13 +962,15 @@ int kl_obbmap_open(const char *loose, int flags) {
                     (unsigned long long)e->size);
         return zfd;    // a real fd over the plain bytes — no window translation
     }
-    if (e->method != 0) {
-        static int said;
-        if (!said) { said = 1;
-            fprintf(stderr, "  [obb] %s is DEFLATE inside the OBB — read-through only "
-                            "handles stored entries; letting the open fail\n", loose); }
-        return -1;
+    if (e->method == 8) {
+        int fd = zip_deflate_open(e);
+        if (fd >= 0 && g_verbose)
+            fprintf(stderr, "  [obb] inflated %s from the OBB (%llu bytes)\n",
+                    strrchr(loose, '/') ? strrchr(loose, '/') + 1 : loose,
+                    (unsigned long long)e->size);
+        return fd;
     }
+    if (e->method != 0) return -1;
     FILE *probe = fopen(e->obb, "rb");
     if (!probe) return -1;
     uint64_t base;
@@ -1037,6 +1156,13 @@ void *kl_obbmap_opendir(const char *dirpathin) {
     size_t dl = strlen(dbuf);
     while (dl > 1 && dbuf[dl - 1] == '/') dbuf[--dl] = 0;
     const char *dirpath = dbuf;
+    if (!g_base_len) {
+        // Unity names directories under its APK mount, just as it names files.
+        // Keep the original path for the native directory so loose and archive
+        // children are still merged; normalize only the archive lookup key.
+        const char *asset = strstr(dirpath, "assets/");
+        if (asset) { dirpath = asset; dl = strlen(dirpath); }
+    }
     if (strncmp(dirpath, g_base, g_base_len) != 0) return NULL;
     // Collect indexed entries whose loose path is dirpath + "/" + <child...>.
     obb_dir tmp; memset(&tmp, 0, sizeof tmp);
@@ -1064,7 +1190,7 @@ void *kl_obbmap_opendir(const char *dirpathin) {
         // "<dir-leaf>.uproject" is not knowable here, so skip — the engine opens
         // it by the command-line path, not by listing. (No dir entry needed.)
     }
-    DIR *real = opendir(dirpath);
+    DIR *real = opendir(dbuf);
     if (!tmp.n && !real) return NULL;                  // nothing to offer
     // Unconditional, once per distinct directory: "did the guest list this dir,
     // and how many virtual entries did it get" is the question that says whether

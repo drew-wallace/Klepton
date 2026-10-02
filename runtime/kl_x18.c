@@ -531,6 +531,28 @@ int kl_x18_is_data(const void *code, size_t size, size_t index) {
     return klx_looks_like_data((const uint32_t *)code, size / 4, index);
 }
 
+// Measured TLS false positives in Valve client 1788652215 and the Steam Frame
+// 0.3.0 recovery client (Android SHA-256 4b1318ea): an OpenSSL
+// attribution string ends immediately before a stack-protected function.
+// Require the complete observed prologue and canary load, rather than lowering
+// the data threshold for arbitrary constants. Shared by AOT and ELF rewriting.
+int kl_x18_tls_is_data(const void *code, size_t size, size_t index) {
+    const uint32_t *w = code;
+    static const uint32_t prologues[][10] = {
+        {0xd10183ff, 0xa9027bfd, 0xa9035ff8, 0xa90457f6,
+         0xa9054ff4, 0x910083fd, 0xd53bd058, 0x900028c9,
+         0xaa0403f3, 0xf9401708},
+        {0xd10183ff, 0xa9027bfd, 0xa9035ff8, 0xa90457f6,
+         0xa9054ff4, 0x910083fd, 0xd53bd058, 0xf0002989,
+         0xaa0403f3, 0xf9401708}
+    };
+    if (index >= 6 && index < size / 4 && size / 4 - index >= 4) {
+        for (unsigned i = 0; i < sizeof prologues / sizeof prologues[0]; i++)
+            if (!memcmp(w + index - 6, prologues[i], sizeof prologues[i])) return 0;
+    }
+    return kl_x18_is_data(code, size, index);
+}
+
 // One survey feeding both the count and the emitter, so a chunk with no real
 // sites still reports its data words. The emitter returns early in that case —
 // correctly, there is nothing to veneer — and counting there alone silently

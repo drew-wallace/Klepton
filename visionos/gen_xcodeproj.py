@@ -41,71 +41,28 @@ KLT = targets_mod.resolve(os.environ.get("KLEPTON_TARGET") or targets_mod.DEFAUL
 # would be five file copies to say one thing.
 NAME = KLT["product"]
 BUNDLE_ID = os.environ.get("KLEPTON_BUNDLE_ID", KLT["bundle"])
+STEAM_LOCAL = os.environ.get("KLEPTON_STEAM_LOCAL", "0") == "1"
+if STEAM_LOCAL:
+    if KLT['name'] != 'walkabout-57013':
+        raise ValueError('KLEPTON_STEAM_LOCAL currently requires walkabout-57013')
+    import mksteam
+    mksteam.verify_staged()
 
-# Klepton.entitlements — the two memory capabilities (see that file for what
-# they buy and why this app wants them). **On by default: they fixed the
-# loading-transition kills on device, so a build without them is the unusual
-# one.**
-#
-# KLEPTON_ENTITLEMENTS=0 detaches them, and the reason to keep that escape hatch
-# is that this is an account setting as much as a build setting. Both keys need
-# an EXPLICIT App ID with the capabilities enabled on it; the team's *wildcard*
-# profile cannot carry capabilities at all, and attaching them to one does not
-# degrade — it fails the build outright:
-#
-#   error: Provisioning profile "iOS Team Provisioning Profile: *" doesn't
-#          support the Extended Virtual Addressing and Increased Memory Limit
-#          capability.
-#   error: Failed Registering Bundle Identifier: the app identifier
-#          "…dev.klepton.target.beatsaber" cannot be registered to your
-#          development team
-#
-# That pair of errors means the App ID is not set up, not that the entitlements
-# are wrong. Enable both capabilities on it (Xcode > Settings > Accounts, or the
-# developer portal) — or build with KLEPTON_ENTITLEMENTS=0 to get moving without
-# them, at the cost of the memory headroom.
-#
-# The SECOND error has another cause worth telling apart, and it is why the id
-# carries $USER (targets.py, bundle_for): an App ID belongs to exactly one team,
-# so an UNSCOPED id is registered by whoever builds first and refused to everyone
-# else — the same sentence, about a name already spoken for rather than about
-# capabilities. If it appears with a scoped id, it really is the App ID setup.
+# Keep Increased Memory Limit on: the current Personal Team can provision it.
+# A 2026-09-28 device build confirmed that the same team refuses Extended
+# Virtual Addressing and Low-Latency Streaming. Those remain in the authored
+# plist, but are opt-in so rebuilding does not require hand-editing capabilities.
+# KLEPTON_EXTENDED_VA=1 requires a team/profile supporting that capability.
+# KLEPTON_LOW_LATENCY=1 additionally requires the streaming capability; it is
+# for Foveated Streaming, not standalone guest rendering or audio.
 ENTITLEMENTS = os.environ.get("KLEPTON_ENTITLEMENTS", "1") != "0"
-
-# ...and the keys that are NOT self-service, each with its own escape hatch.
-#
-# The two memory keys above are safe to attach unconditionally: Xcode's own
-# capability database knows them, they are enabled by ticking a box, and
-# automatic signing adds them to the App ID on the next build. A key that is
-# granted by REQUEST — or that the toolchain does not recognise at all — is on a
-# completely different footing, because attaching one does not degrade. It fails
-# the whole signing step, which takes the memory keys down with it, and those
-# are what stopped the loading-transition kills. That is why
-# `com.apple.developer.networking.multicast` was removed outright once the
-# broadcast fan-out in kl_shim.c made it unnecessary.
-#
-# So a risky key gets a knob rather than a second authored file — two entitlement
-# files that have to agree is exactly how they stop agreeing. The authored file
-# is the union; the knob FILTERS a generated copy.
-#
-#   com.apple.developer.low-latency-streaming (KLEPTON_LOW_LATENCY=0 drops it)
-#       Added at the user's request while chasing a streaming regression. Note
-#       honestly what is and is not known about it: this key does not appear in
-#       the XROS SDK or in Xcode's Library tree — but neither do the two memory
-#       keys, which certainly do work, so that search is INCONCLUSIVE and not
-#       evidence the key is wrong. If the build starts failing with "doesn't
-#       include the com.apple.developer.low-latency-streaming entitlement" (a
-#       grant you must be given) or with an unknown-entitlement error (a key the
-#       platform does not know), set KLEPTON_LOW_LATENCY=0 and the memory keys
-#       survive. Do not diagnose a stream problem from its presence alone —
-#       runtime/xr/kl_openxr.c's KL_XR_PROFILE is the A/B for the change that
-#       actually altered what the client publishes.
 OPTIONAL_ENTITLEMENTS = {
+    "com.apple.developer.kernel.extended-virtual-addressing": "KLEPTON_EXTENDED_VA",
     "com.apple.developer.low-latency-streaming": "KLEPTON_LOW_LATENCY",
 }
 ENTITLEMENTS_FILE = "Klepton.entitlements"
 _dropped = [k for k, env in OPTIONAL_ENTITLEMENTS.items()
-            if os.environ.get(env, "1") == "0"]
+            if os.environ.get(env, "0") != "1"]
 if ENTITLEMENTS and _dropped:
     import plistlib
     src = pathlib.Path(__file__).with_name("Klepton.entitlements")
@@ -120,6 +77,8 @@ if ENTITLEMENTS and _dropped:
 ENTITLEMENTS_SETTING = (f"\t\t\t\tCODE_SIGN_ENTITLEMENTS = {ENTITLEMENTS_FILE};\n"
                         if ENTITLEMENTS else "")
 GUEST = KLT["libs"].split()
+if STEAM_LOCAL:
+    GUEST = [g for g in GUEST if g not in ('libsteam_api', 'libc++_shared')]
 ANGLE = ["ANGLE_libEGL", "ANGLE_libGLESv2"]
 # ...and the OTHER renderer, for a guest whose graphics API is Vulkan (BONELAB).
 # Same treatment as ANGLE for the same reasons: one driver for every guest that
@@ -142,7 +101,8 @@ ANGLE_DIR = "Frameworks"
 # Both sets are embedded-not-linked, so the pbxproj treatment is identical and
 # the generator stays data-driven — the two lists differ only in what a missing
 # one means, which is why main() reports them separately.
-EMBED = GUEST + ANGLE + MVK
+STEAM_FRAMEWORKS = ['libsteamclient_backend', 'libsteamclient', 'libsteam_api', 'libc++_shared'] if STEAM_LOCAL else []
+EMBED = GUEST + ANGLE + MVK + STEAM_FRAMEWORKS
 
 
 def detect_team():
@@ -237,21 +197,23 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonAudio.swift", "KleptonShell.swift", "KleptonTuning.swift",
          "KleptonChroma.swift", "KleptonMic.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift"]
+if STEAM_LOCAL:
+    SWIFT += ['kl_steam_host.c', '../build/SteamLocal/SteamHostLogin.swift']
 swift = [{"name": s, "ref": oid(f"FS{i}"), "bld": oid(f"BS{i}")} for i, s in enumerate(SWIFT)]
 
 swift_buildfiles = "\n".join(
     f'\t\t{s["bld"]} /* {s["name"]} in Sources */ = {{isa = PBXBuildFile; fileRef = {s["ref"]}; }};'
     for s in swift)
 swift_filerefs = "\n".join(
-    f'\t\t{s["ref"]} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; '
-    f'path = {s["name"]}; sourceTree = "<group>"; }};' for s in swift)
+    f'\t\t{s["ref"]} = {{isa = PBXFileReference; lastKnownFileType = {"sourcecode.c.c" if s["name"].endswith(".c") else "sourcecode.swift"}; '
+    f'path = "{s["name"]}"; sourceTree = "<group>"; }};' for s in swift)
 swift_children = "\n".join(f'\t\t\t\t{s["ref"]},' for s in swift)
 swift_sources  = "\n".join(f'\t\t\t\t{s["bld"]},' for s in swift)
 F_RT    = oid("FRT");   B_RT_LNK = oid("BRTLK")
 
 # One file ref + one embed build-file per embedded framework.
 guest = [{"name": g, "ref": oid(f"FG{i}"), "emb": oid(f"BG{i}"),
-          "dir": GUEST_DIR if g in GUEST else ANGLE_DIR}
+          "dir": 'Frameworks/SteamLocal' if g in STEAM_FRAMEWORKS else GUEST_DIR if g in GUEST else ANGLE_DIR}
          for i, g in enumerate(EMBED)]
 
 buildfiles = "\n".join(
@@ -287,14 +249,22 @@ _display = (_launcher_display.get(KLT['name'], KLT['display']) if _launcher_on
 # Trailing newline, glued at line-start to the next setting — the same shape as
 # ENTITLEMENTS_SETTING / ASSETCATALOG_SETTING above, so it lands on its own line in
 # the output and expands to nothing (no blank line) when the flag is off.
-LAUNCHER_COND = ('\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "KL_CUSTOM_LAUNCHER $(inherited)";\n'
-                 if _launcher_on else "")
+_conditions = (['KL_CUSTOM_LAUNCHER'] if _launcher_on else []) + (['KL_STEAM_GAME_HOST'] if STEAM_LOCAL else [])
+LAUNCHER_COND = ('\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "'+ ' '.join(_conditions)+' $(inherited)";\n'
+                 if _conditions else "")
+STEAM_C_COND = ('\t\t\t\tARCHS = arm64;\n' if STEAM_LOCAL else '')
+STEAM_C_DEFINE = ('\t\t\t\t\t"KL_STEAM_GAME_HOST=1",\n' if STEAM_LOCAL else '')
+F_STEAM_ASSETS, B_STEAM_ASSETS = oid('FSTEAMASSETS'), oid('BSTEAMASSETS')
+STEAM_ASSETS_REF = (f'\t\t{F_STEAM_ASSETS} = {{isa = PBXFileReference; lastKnownFileType = folder; path = build/SteamLocal/SteamAuthAssets; sourceTree = SOURCE_ROOT; }};\n' if STEAM_LOCAL else '')
+STEAM_ASSETS_BUILD = (f'\t\t{B_STEAM_ASSETS} = {{isa = PBXBuildFile; fileRef = {F_STEAM_ASSETS}; }};\n' if STEAM_LOCAL else '')
+STEAM_RES = f'\t\t\t\t{B_STEAM_ASSETS},\n' if STEAM_LOCAL else ''
 
 COMMON = f"""
+{STEAM_C_COND}
 				CLANG_ENABLE_MODULES = YES;
 {ENTITLEMENTS_SETTING}				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = {TEAM};
+				DEVELOPMENT_TEAM = "{TEAM}";
 				ENABLE_PREVIEWS = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 {ASSETCATALOG_SETTING}				INFOPLIST_FILE = Info.plist;
@@ -332,6 +302,7 @@ COMMON = f"""
 				// which names the target and says nothing about quoting.
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
+{STEAM_C_DEFINE}\
 					"KL_TARGET_DEFAULT=\\\\\\"{KLT['name']}\\\\\\"",
 				);
 				INFOPLIST_KEY_CFBundleDisplayName = "{_display}";
@@ -383,6 +354,7 @@ PBX = f"""// !$*UTF8*$!
 	objects = {{
 
 /* Begin PBXBuildFile section */
+{STEAM_ASSETS_BUILD}
 {swift_buildfiles}
 		{B_C} /* kl_app.c in Sources */ = {{isa = PBXBuildFile; fileRef = {F_C}; }};
 		{B_ASSETS} /* Assets.xcassets in Resources */ = {{isa = PBXBuildFile; fileRef = {F_ASSETS}; }};
@@ -391,6 +363,7 @@ PBX = f"""// !$*UTF8*$!
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+{STEAM_ASSETS_REF}
 		{PRODUCT} /* {NAME}.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = {NAME}.app; sourceTree = BUILT_PRODUCTS_DIR; }};
 {swift_filerefs}
 		{F_C} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = kl_app.c; sourceTree = "<group>"; }};
@@ -518,6 +491,7 @@ PBX = f"""// !$*UTF8*$!
 			buildActionMask = 2147483647;
 			files = (
 				{B_ASSETS},
+{STEAM_RES}
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		}};

@@ -19,6 +19,7 @@
 #include "kl_vulkan.h"
 #include "kl_aaudio.h"
 #include "kl_openxr.h"
+#include "kl_steam.h"
 
 #define KL_MAX_IMAGES 64
 typedef struct { char soname[128]; kl_image *img; } entry;
@@ -75,7 +76,7 @@ int kl_dl_iterate_phdr(int (*cb)(void *, size_t, void *), void *data) {
         if (!phdr || !phnum) continue;
         kl_dl_phdr_info info = {0};
         info.dlpi_addr  = (uint64_t)(uintptr_t)kl_base(g_imgs[i].img);
-        info.dlpi_name  = g_imgs[i].soname;
+        info.dlpi_name  = kl_image_path(g_imgs[i].img);
         info.dlpi_phdr  = phdr;
         info.dlpi_phnum = (uint16_t)phnum;
         int r = cb((void *)&info, sizeof info, data);
@@ -298,7 +299,10 @@ void *kl_guest_sym_global(const char *name) {
     for (int i = 0; i < g_nimgs && !v; i++)
         v = kl_sym(g_imgs[i].img, name);
     pthread_mutex_unlock(&g_lock);
-    if (v) { void *w = kl_fmod_interpose(name, v); if (w) return w; }
+    if (v) {
+        void *w = kl_fmod_interpose(name, v); if (w) return w;
+        w = kl_steam_interpose(name, v); if (w) return w;
+    }
     return v;
 }
 
@@ -390,6 +394,14 @@ kl_image *kl_load_recursive(const char *path) {
         char full[1024];
         if (strchr(names[i], '/')) snprintf(full, sizeof full, "%s", names[i]);
         else snprintf(full, sizeof full, "%s/%s", g_libdir, names[i]);
+        // 4XVR packages Oculus Audio as libovraudio.so, whose ELF SONAME is
+        // libovraudio64.so. Its dependents correctly request the SONAME; look
+        // up the packaged filename when the SONAME path has no image.
+        if (!strcmp(names[i], "libovraudio64.so") && !kl_can_load(full)) {
+            char packaged[1024];
+            snprintf(packaged, sizeof packaged, "%s/libovraudio.so", g_libdir);
+            if (kl_can_load(packaged)) snprintf(full, sizeof full, "%s", packaged);
+        }
         // Framework-aware, NOT a raw access() on "<dir>/libfoo.so": on device the
         // guest libraries ship as translated frameworks (libfoo.framework/libfoo),
         // so a plain access() finds NONE of them and every bundled dependency is
@@ -406,11 +418,14 @@ kl_image *kl_load_recursive(const char *path) {
         }
         if (kl_env_on("KL_TRACE_NEEDED", 1))
             fprintf(stderr, "  [dl]     %s -> loading (%s)\n", names[i], full);
-        if (!kl_load_recursive(full)) {
+        kl_image *dep = kl_load_recursive(full);
+        if (!dep) {
             fprintf(stderr, "  [klepton] dependency %s of %s failed to load: %s\n",
                     names[i], path, kl_error());
             return NULL;
         }
+        if (strcmp(names[i], "libovraudio64.so") == 0)
+            kl_register_image(names[i], dep);
     }
 
     kl_image *img = kl_load_auto(path);
@@ -698,6 +713,7 @@ static int kl_core_shim_is_handle(void *h) { return h == (void *)&g_core_shim_ha
 
 void *klb_dlopen(const char *path, int flags) {
     (void)flags;
+    kl_steam_trace_dlopen(path);
     { static int once; if (!once) { once = 1; kl_dl_trace_shims(); } }
     if (!path) return (void *)-1;                    // RTLD_DEFAULT-ish: whole process
     if (kl_dlopen_refused(path)) return NULL;
@@ -835,6 +851,7 @@ static void *klb_dlsym_null(const char *name) {
 }
 
 void *klb_dlsym(void *handle, const char *name) {
+    kl_steam_trace_lookup(name);
     if (kl_egl_is_handle(handle)) return kl_egl_sym(name);
     if (kl_opensl_is_handle(handle)) return kl_opensl_sym(name);
     if (kl_ovrp_is_handle(handle)) return kl_ovrp_sym(name);
@@ -996,6 +1013,10 @@ static void *kl_dl_interpose(const char *name, void *real) {
                                             void *, void *))real;
         return (void *)kl_trace_iplHRTFCreate;
     }
+    {
+        void *w = kl_steam_interpose(name, real);
+        if (w) return w;
+    }
     return NULL;
 }
 
@@ -1017,7 +1038,11 @@ int klb_dladdr(const void *addr, kl_dl_info *info) {
     for (int i = 0; i < g_nimgs; i++) {
         uint8_t *b = kl_base(g_imgs[i].img);
         if ((const uint8_t *)addr >= b && (const uint8_t *)addr < b + kl_span(g_imgs[i].img)) {
-            info->dli_fname = g_imgs[i].soname;
+            // The filename must retain its directory. Valve's backend derives
+            // its install directory from this; a bare SONAME becomes empty
+            // after filename stripping. Report the real ELF/framework backing
+            // path, whose storage lives as long as the registered image.
+            info->dli_fname = kl_image_path(g_imgs[i].img);
             info->dli_fbase = b;
             info->dli_sname = NULL;      // TODO: reverse-lookup nearest .dynsym entry
             info->dli_saddr = NULL;
