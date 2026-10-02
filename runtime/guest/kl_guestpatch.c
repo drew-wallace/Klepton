@@ -17,7 +17,7 @@
 //   * a group is atomic: either every word matches and all are written, or none
 //     are. Half of a two-instruction replacement is a crash, not a no-op.
 //
-// Knobs (DEBUG_ENV_VARS.md): `KL_GUEST_PATCH=0` turns all of this off, which is
+// Knobs (docs/DEBUG_ENV_VARS.md): `KL_GUEST_PATCH=0` turns all of this off, which is
 // the A/B for every row; `KL_GUEST_PATCH_OFF=<name>[,<name>...]` turns off one.
 //
 // DEVICE: a klepton-ld dylib is signed, so its text cannot be written at run

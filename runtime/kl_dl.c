@@ -19,7 +19,7 @@
 #include "kl_vulkan.h"
 #include "kl_aaudio.h"
 #include "kl_openxr.h"
-#include "kl_steam.h"
+#include "../steam/runtime/kl_steam.h"
 
 #define KL_MAX_IMAGES 64
 typedef struct { char soname[128]; kl_image *img; } entry;

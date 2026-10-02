@@ -16,7 +16,7 @@
 #define KL_DRIVER_H
 
 #include <stdio.h>
-#include "kl_slink.h"
+#include "../../steam/steamlink/runtime/guest/kl_slink.h"
 #include "kl_target.h"
 
 // Bind the driver to a target before anything else. `libdir` is where the guest

@@ -25,7 +25,7 @@
 #include "kl_ovrplat.h"
 #include "kl_mprobe.h"
 #include "kl_sample.h"
-#include "kl_slink.h"
+#include "../../steam/steamlink/runtime/guest/kl_slink.h"
 #include "kl_ue4.h"
 
 typedef int    (*jni_onload_fn)(void *vm, void *reserved);

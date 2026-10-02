@@ -9,7 +9,7 @@
 #include <errno.h>
 #include "kl_eventfd.h"
 #include "kl_file.h"
-#include "../kl_steam.h"
+#include "../../steam/runtime/kl_steam.h"
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -41,7 +41,7 @@ int getentropy(void *buf, size_t buflen);
 #include <wchar.h>
 #include <ctype.h>
 #include "klepton.h"
-#include "guest/kl_obbmap.h"
+#include "../guest/kl_obbmap.h"
 #include "kl_va.h"
 #include <sys/ucontext.h>   /* Darwin mcontext for the x18-veneer signal repair */
 #include "kl_x18.h"         /* KLX_TSD_SLOT */

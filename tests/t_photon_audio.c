@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "kl_jni.h"
-#include "jni/kl_jni_int.h"
+#include "../runtime/jni/kl_jni_int.h"
 static int enabled, open_failure;
 static atomic_int opens, closes, callbacks, stops;
 static void *test_buffer;

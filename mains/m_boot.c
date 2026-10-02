@@ -34,7 +34,7 @@
 #include "../runtime/kl_fault.h"
 #include "../runtime/kl_target.h"
 #include "../runtime/guest/kl_driver.h"
-#include "../runtime/guest/kl_slink.h"
+#include "../steam/steamlink/runtime/guest/kl_slink.h"
 #include "../tests/t_mtl_provider.h"
 
 // Which guest, and where its libraries are. Both come from the target table

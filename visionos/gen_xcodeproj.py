@@ -43,8 +43,9 @@ NAME = KLT["product"]
 BUNDLE_ID = os.environ.get("KLEPTON_BUNDLE_ID", KLT["bundle"])
 STEAM_LOCAL = os.environ.get("KLEPTON_STEAM_LOCAL", "0") == "1"
 if STEAM_LOCAL:
-    if KLT['name'] != 'walkabout-57013':
-        raise ValueError('KLEPTON_STEAM_LOCAL currently requires walkabout-57013')
+    if not KLT.get('steam_local', False):
+        raise ValueError('KLEPTON_STEAM_LOCAL requires a target with an audited Steam profile')
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../steam/visionos"))
     import mksteam
     mksteam.verify_staged()
 
@@ -198,7 +199,7 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonChroma.swift", "KleptonMic.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift"]
 if STEAM_LOCAL:
-    SWIFT += ['kl_steam_host.c', '../build/SteamLocal/SteamHostLogin.swift']
+    SWIFT += ['../../steam/visionos/Sources/kl_steam_host.c', '../build/SteamLocal/SteamHostLogin.swift']
 swift = [{"name": s, "ref": oid(f"FS{i}"), "bld": oid(f"BS{i}")} for i, s in enumerate(SWIFT)]
 
 swift_buildfiles = "\n".join(
@@ -292,6 +293,9 @@ COMMON = f"""
 					"$(SRCROOT)/../runtime/media",
 					"$(SRCROOT)/../runtime/guest",
 					"$(SRCROOT)/../runtime/diag",
+                    "$(SRCROOT)/../steam/runtime",
+                    "$(SRCROOT)/../steam/steamlink/runtime/guest",
+                    "$(SRCROOT)/../steam/steamlink/runtime/libc",
 					"$(inherited)",
 				);
 				// Two levels of escaping, and the first attempt had one. The
