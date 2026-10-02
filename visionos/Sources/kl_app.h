@@ -103,6 +103,9 @@ void kl_app_lifecycle_report(void);
 // the time the caller continues.
 int  kl_app_guest_start(void);
 void kl_app_guest_publish(void);
+// Park frame production without terminating the guest. A subsequent display
+// publish resumes it; guest state, graphics resources and saves remain live.
+void kl_app_guest_suspend(void);
 void kl_app_guest_stop(void);
 
 // Where the guest thread has got to. 0 = still in _begin (nothing to present

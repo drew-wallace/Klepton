@@ -95,6 +95,57 @@ established that AMFI accepts a `klepton-ld` dylib inside a bundle we signed,
 and established nothing at all about one pushed into Documents afterwards.
 Assets carry no code, so they have no such constraint.
 
+## Returning from Home
+
+Walkabout builds generated with `KLEPTON_STEAM_LOCAL=0` include no Steam backend
+and default to offline diagnostics on every launch, including Home launches
+after Quit. The window labels this mode. `KLEPTON_STEAM_LOCAL=1` keeps real Steam
+authentication as its default. An explicit `KL_STEAM_OFFLINE` launch override
+still takes precedence. Simulator camera height defaults to a standing 1.6 m;
+`KL_SIM_HEAD_HEIGHT` overrides it without changing physical-headset tracking.
+
+Home retains the current guest session by default. The immersive display can
+be destroyed by visionOS, so Klepton parks guest frame production and attaches
+a fresh display when the app is reopened. It keeps the guest's textures and
+GPU fence, restores tracking and audio, and does not run boot again. If the
+system cancels opening the immersive space, use **Resume session** in the app
+window. `KL_EXIT_ON_BACKGROUND=1` restores cold launches for diagnostics.
+The Klepton window stays open on cold boot and after re-entry so settings and
+Quit remain accessible beside the game. `KL_BOOT_WINDOW=0` explicitly closes
+it after immersion opens for diagnostics; the default is `1`.
+
+**Quit Klepton** at the bottom of the window closes the immersive display,
+stops the guest frame thread, and terminates Klepton along with all remaining
+game threads. It is available before boot and after returning to the settings
+window. Reopening after Quit starts a fresh game; going Home still retains the
+current session. An unresponsive guest cannot indefinitely block Quit.
+
+This restores an in-memory session; force-quitting or visionOS reclaiming the
+process still requires a fresh launch. Validate on a headset by going Home
+from a running game, reopening, and repeating several times. The log should
+show one guest startup and multiple compositor layers, with no second boot.
+
+The frame-clock regression test runs without game assets:
+`python3 tests/test_visionos_session.py`.
+
+With an updated Walkabout simulator build installed, the UI regression test
+presses Home and reactivates the app three times, checking that the settings
+window stays available and the game resumes automatically. It also checks Quit
+before boot, Quit with a running game, and a fresh launch after Quit:
+
+```bash
+xcodebuild -project tests/visionos/SessionTests.xcodeproj -scheme SessionTests \
+  -destination 'platform=visionOS Simulator,id=<booted-simulator-udid>' \
+  -derivedDataPath visionos/build/session-ui-tests/dd CODE_SIGNING_ALLOWED=NO test
+```
+
+When running `testHomeAndReopen` alone, check `Documents/klepton-boot.log`: it should contain one guest
+frame-thread startup, four compositor layers, and presented frames after each
+reopen. Run these UI tests with the diagnostic simulator build installed. They
+use the app's normal launch defaults, without Steam-mode or camera overrides.
+Window/presentation checks do not establish that the game's menu loaded; also
+inspect the visible game after the splash and check the log for startup errors.
+
 ## Language boundary
 
 Swift owns the App, and will own the ImmersiveSpace, Compositor Services,
