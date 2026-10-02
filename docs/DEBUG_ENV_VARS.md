@@ -2224,14 +2224,22 @@ except its own control vars (next section).
   so existing scripts (`visionos/run.sh`) are unchanged. Mechanism:
   `visionos/gen_xcodeproj.py` adds the `KL_CUSTOM_LAUNCHER` Swift active-compilation
   condition, which `klLauncherTitle()` in KleptonLauncher.swift gates on.
-- `KL_EXIT_ON_BACKGROUND=0` — stay alive when the app is backgrounded. The
-  **default is to `exit(0)`**, ALVR's shape: everything the guest holds across a
-  suspend (the ARKit session, the Compositor Services layer, ANGLE's context and
-  the eye swapchain, FMOD's player, a Unity engine that does not expect the
-  display to leave) is either unresumable or expensive to re-establish, so every
-  launch is made a first launch. Set `=0` when the headset has to come off with a
-  capture or a debugger still attached. Either way the phase change is logged
-  (`[app] scene phase -> …`).
+- `KL_EXIT_ON_BACKGROUND=1` — opt into the old `exit(0)` behavior for cold-boot
+  diagnostics. **Default off:** Home retains the running guest and parks its
+  frame clock. Reopening restores the immersive display using the same guest,
+  eye textures and GPU fence; it does not boot again. Phase changes are logged
+  (`[app] scene phase -> …`). Retention lasts while visionOS keeps the process
+  alive; force-quitting or memory-pressure termination still needs a fresh boot.
+- `KL_BOOT_WINDOW=1` — keep the startup/report window beside the immersive
+  guest on cold boot and re-entry. **Default on:** settings and Quit stay
+  available. `=0` closes it after immersion opens for diagnostics.
+- `KL_SIM_HEAD_HEIGHT` — simulator-only standing camera lift in metres.
+  **Default `1.6`:** a Home launch has the same standing view as a scripted
+  launch. `0` disables the lift; physical-headset tracking is unaffected.
+- `KL_STEAM_OFFLINE` — explicit offline-diagnostic bootstrap override. For
+  targets with an audited Steam profile, a build generated with
+  `KLEPTON_STEAM_LOCAL=0` defaults this to `1`, including launches from Home.
+  Builds with `KLEPTON_STEAM_LOCAL=1` retain real authentication by default.
 - `KL_SYNC_GUEST=1` — drive the guest inline on the compositor thread, i.e.
   P5b's shape before the guest moved to its own thread. The clock P5.4's device numbers were taken
   against, and the A/B for anything that looks like a pacing regression.

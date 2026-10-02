@@ -29,6 +29,20 @@ enum KleptonAudio {
     nonisolated(unsafe) private static var started = false
     nonisolated(unsafe) private static var observers: [NSObjectProtocol] = []
 
+    /// A foreground transition can deactivate the session as well as its
+    /// output unit. Reactivate first, then rebuild C's output against that route.
+    static func resume() {
+        guard started else { return }
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setActive(true)
+            try directStereo(session)
+            kl_audio_resume()
+        } catch {
+            NSLog("[au] session resume failed: \(error)")
+        }
+    }
+
     /// Configure and activate the session, then tell the C side what the
     /// hardware rate turned out to be. Safe to call more than once.
     static func start() {

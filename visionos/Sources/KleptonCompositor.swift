@@ -206,7 +206,35 @@ private func klEyePixelFormat(_ glInternal: UInt32) -> MTLPixelFormat? {
 }
 
 final class KleptonCompositor {
-    private let layerRenderer: LayerRenderer
+    // The guest's texture providers hold an unretained pointer to this object.
+    // Keep one compositor for the process, including while Home has no layer.
+    private static let sessionLock = NSLock()
+    nonisolated(unsafe) private static var session: KleptonCompositor?
+    private let rendererCondition = NSCondition()
+    private var pendingRenderer: LayerRenderer?
+    private var layerRenderer: LayerRenderer!
+    private var guestStarted = false
+
+    static func present(_ renderer: LayerRenderer) {
+        sessionLock.lock()
+        if let session {
+            session.enqueue(renderer)
+        } else {
+            let compositor = KleptonCompositor(renderer)
+            session = compositor
+            compositor.startRenderLoop()
+        }
+        sessionLock.unlock()
+    }
+
+    private func enqueue(_ renderer: LayerRenderer) {
+        rendererCondition.lock()
+        if renderer !== layerRenderer && renderer !== pendingRenderer {
+            pendingRenderer = renderer
+            rendererCondition.signal()
+        }
+        rendererCondition.unlock()
+    }
     private var device: MTLDevice!
     // Optional, not implicitly unwrapped, and that is the whole fix for one
     // crash: when ANGLE has no MTLDevice this used to stay nil while the loop
@@ -328,8 +356,8 @@ final class KleptonCompositor {
     // the host. Nothing below the seam changes — kl_ovrp still reports node 9
     // for the head and nodes 3/4 for the hands.
     private let arSession = ARKitSession()
-    private let worldTracking = WorldTrackingProvider()
-    private let handTracking = HandTrackingProvider()
+    private var worldTracking = WorldTrackingProvider()
+    private var handTracking = HandTrackingProvider()
     private let controllers = KleptonControllers()
     private var arRunning = false
 
@@ -511,8 +539,10 @@ final class KleptonCompositor {
     private var bailNoPipeline = 0
 
     init(_ layerRenderer: LayerRenderer) {
-        self.layerRenderer = layerRenderer
+        pendingRenderer = layerRenderer
+    }
 
+    private func configureSpatialEvents() {
         // The system's own pinch, rather than our arithmetic on two fingertip
         // joints. `onSpatialEvent` is how a fully-immersive Metal app is told
         // that the user selected something — the same recogniser the rest of
@@ -539,8 +569,15 @@ final class KleptonCompositor {
     /// again with a rebuilt list. That is not a restart — the session is not
     /// stopped first, world and hand tracking carry straight on, and this is
     /// how reconnects are meant to be handled.
-    private func runARKit() async {
+    @MainActor private func runARKit() async {
         do {
+            // Providers stopped by dismissal cannot be run again. The guest's
+            // graphics survive, but tracking belongs to the new immersive space.
+            if worldTracking.state == .stopped {
+                worldTracking = WorldTrackingProvider()
+                handTracking = HandTrackingProvider()
+                controllers.forgetAccessoryPoses()
+            }
             // Hand tracking is requested separately because it is the half
             // that can be refused: world tracking is available to any full
             // immersive space, hand tracking needs the user's consent. A
@@ -1324,7 +1361,29 @@ final class KleptonCompositor {
     // MARK: - The frame loop
 
     func startRenderLoop() {
-        let t = Thread { self.renderLoop() }
+        let t = Thread {
+            while true {
+                self.rendererCondition.lock()
+                while self.pendingRenderer == nil { self.rendererCondition.wait() }
+                self.layerRenderer = self.pendingRenderer
+                self.pendingRenderer = nil
+                let rendererID = ObjectIdentifier(self.layerRenderer)
+                self.rendererCondition.unlock()
+                self.configureSpatialEvents()
+                DispatchQueue.main.async {
+                    KleptonSession.shared.rendererStarted(rendererID)
+                }
+                self.renderLoop(resuming: self.guestStarted)
+                kl_app_guest_suspend()
+                self.rendererCondition.lock()
+                self.layerRenderer.onSpatialEvent = { _ in }
+                self.layerRenderer = nil
+                self.rendererCondition.unlock()
+                DispatchQueue.main.async {
+                    KleptonSession.shared.rendererEnded(rendererID)
+                }
+            }
+        }
         t.name = "Klepton Compositor"
         // The guest blocks — Baselib futexes, IL2CPP's GC suspending the world —
         // and this thread now calls into it, so it must not be the main thread.
@@ -1387,8 +1446,9 @@ final class KleptonCompositor {
         NSLog("[cp] minimal loop ended after \(n) frames")
     }
 
-    private func renderLoop() {
+    private func renderLoop(resuming: Bool) {
         layerRenderer.waitUntilRunning()
+        guard layerRenderer.state != .invalidated else { return }
         if probe == 9 {
             // The system default device, exactly as Apple's template uses —
             // not ANGLE's. Nothing here samples a guest texture, so there is no
@@ -1398,14 +1458,25 @@ final class KleptonCompositor {
             minimalLoop()
             return
         }
-        installProvider()
+        if resuming {
+            // Preserve the guest's eye allocations and GPU fence. Replacing
+            // either would leave its existing swapchains pointing at old storage.
+            buildPipeline()
+            lastPresentation = 0
+            lastGoodOriginFromDevice = nil
+            arRunning = false
+            KleptonAudio.resume()
+        } else {
+            installProvider()
+        }
         applyRenderQuality()
         startARKit()
 
         // Before the guest, not after: the frustum and the display rate can
         // only be read from a drawable, and the guest reads both exactly once
         // during the lifecycle below. See primeDisplay().
-        primeDisplay()
+        if !resuming { primeDisplay() }
+        guard layerRenderer.state != .invalidated else { return }
 
         // Bring the guest up, on its own thread. _begin is
         // once per process and does the /proc report, nativeRecreateGfxState,
@@ -1417,16 +1488,17 @@ final class KleptonCompositor {
         // The device measurement was taken against it and the device has
         // never been run with either. It is the A/B for anything that looks
         // like a pacing regression.
-        if syncGuest {
+        if !resuming, syncGuest {
             NSLog("[cp] KL_SYNC_GUEST — driving the guest inline on this thread")
             if kl_app_lifecycle_begin() != 0 {
                 NSLog("[cp] lifecycle_begin failed: \(String(cString: kl_app_status()))")
                 return
             }
-        } else if kl_app_guest_start() != 0 {
+        } else if !resuming, kl_app_guest_start() != 0 {
             NSLog("[cp] guest thread failed to start: \(String(cString: kl_app_status()))")
             return
         }
+        guestStarted = true
 
         // This loop's own liveness, logged on a wall clock rather than a frame
         // count. The device kills an immersive app that stops presenting, and
@@ -1445,6 +1517,7 @@ final class KleptonCompositor {
             case .invalidated:
                 break loop
             case .paused:
+                kl_app_guest_suspend()
                 NSLog("[cp] layer paused at iteration \(iterations) — waiting")
                 layerRenderer.waitUntilRunning()
                 NSLog("[cp] layer running again")
@@ -1460,7 +1533,7 @@ final class KleptonCompositor {
                 // restart). kl_audio's own heartbeat finds it too, about a
                 // second later; this is the half that knows the exact moment,
                 // and a second of dropped music is the difference.
-                kl_audio_resume()
+                KleptonAudio.resume()
                 continue loop
             default:
                 autoreleasepool { presented += renderFrame() }
@@ -1486,10 +1559,8 @@ final class KleptonCompositor {
         }
         NSLog("[cp] render loop ended after \(presented) presented frames, "
               + "\(iterations) iterations, state=\(String(describing: layerRenderer.state))")
-        // Ends the guest's loop and joins it, so its report — which is the
-        // lifecycle report, and belongs to the guest's end of the run rather than
-        // to this one — has been written before this returns.
-        if syncGuest { kl_app_lifecycle_report() } else { kl_app_guest_stop() }
+        // Home ends the display, not the guest. The outer loop waits for a
+        // fresh renderer and reuses these textures and the once-booted engine.
     }
 
     /// What each swapchain stage actually holds, per report interval.
@@ -3459,8 +3530,9 @@ final class KleptonCompositor {
         t.columns.3 = SIMD4<Float>(m.x, m.y, m.z, 1)
         var head = originFromDevice * t
         #if targetEnvironment(simulator)
-        // The simulator may start its camera at floor height. An opt-in lift
-        // lets floor-origin games be tested without a tracked physical head.
+        // The simulator may start its camera at floor height. A standing lift
+        // lets floor-origin games be tested without a tracked physical head,
+        // including cold launches from Home with no debugger environment.
         // Apply it to both guest sampling and composite/headAt math.
         head.columns.3.y += simHeadHeight
         #endif
@@ -3468,8 +3540,7 @@ final class KleptonCompositor {
     }
 
     #if targetEnvironment(simulator)
-    private static let simHeadHeight: Float =
-        Float(ProcessInfo.processInfo.environment["KL_SIM_HEAD_HEIGHT"] ?? "0") ?? 0
+    private static let simHeadHeight: Float = klEnvFloat("KL_SIM_HEAD_HEIGHT", 1.6)
     #endif
 
     /// `head_from_view` from `device_from_view` — the drawable's own per-eye

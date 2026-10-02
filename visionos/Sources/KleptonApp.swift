@@ -105,22 +105,54 @@ enum Immersive {
     }
 }
 
-/// What backgrounding means for this process: the end of it.
-///
-/// ALVR's shape, and for the same reason. Everything the guest is holding when
-/// the app goes away is either unresumable or expensive to re-establish — the
-/// ARKit session, the Compositor Services layer, the ANGLE context and the eye
-/// swapchain behind it, FMOD's OpenSL player, and a Unity engine that has been
-/// told it is on a Quest and never expects the display to leave. Resuming that
-/// correctly is a project of its own; resuming it *incorrectly* is a class of
-/// bug that reports itself as "the second run is broken" long after the cause.
-/// Exiting makes every launch the first launch.
-///
-/// `KL_EXIT_ON_BACKGROUND=0` keeps the old behaviour, which is what a debugging
-/// session wants when the headset comes off with a capture still open.
+/// In-memory session state survives both backgrounding and a recreated window.
+/// The guest boots once; returning from Home restores only its presentation.
+@MainActor final class KleptonSession: ObservableObject {
+    static let shared = KleptonSession()
+    @Published var log = ""
+    @Published var status = "idle"
+    @Published var running = false
+    @Published var finished = false
+    @Published var succeeded = false
+    @Published var openedSpace = false
+    @Published var handedOff = false
+    @Published var wantsImmersive = false
+    @Published var openingSpace = false
+    @Published var restorationBlocked = false
+    @Published var canRestoreAutomatically = true
+    @Published var phase: ScenePhase = .inactive
+    @Published var quitting = false
+#if KL_STEAM_GAME_HOST
+    @Published var steamReady = false
+#endif
+    private var rendererID: ObjectIdentifier?
+
+    func rendererStarted(_ id: ObjectIdentifier) {
+        guard !quitting else { return }
+        rendererID = id
+        openedSpace = true
+        wantsImmersive = true
+        canRestoreAutomatically = false
+    }
+
+    func rendererEnded(_ id: ObjectIdentifier) {
+        guard rendererID == id else { return }
+        rendererID = nil
+        openedSpace = false
+    }
+}
+
+/// Retain the guest on Home. The opt-in exit remains useful for cold-boot probes.
+@MainActor
 enum Lifecycle {
     static func scenePhaseChanged(to phase: ScenePhase) {
         NSLog("[app] scene phase -> \(phase)")
+        KleptonSession.shared.phase = phase
+        guard !KleptonSession.shared.quitting else { return }
+        if phase == .active {
+            KleptonSession.shared.restorationBlocked = false
+            KleptonSession.shared.canRestoreAutomatically = true
+        }
         // Coming back is the audio's cue, and it needs one: this OS silently
         // stops calling CoreAudio's render callback across a scene transition —
         // the boot window being closed while the immersive space runs is one,
@@ -133,10 +165,11 @@ enum Lifecycle {
         // healthy unit costs a few milliseconds of silence and cannot go wrong;
         // the state that would let us skip it is precisely the state this
         // platform lies about.
-        if phase == .active { kl_audio_resume() }
+        if phase == .active { KleptonAudio.resume() }
         guard phase == .background else { return }
-        guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: true) else {
-            NSLog("[app] backgrounded; KL_EXIT_ON_BACKGROUND=0, staying alive")
+        kl_app_guest_suspend()
+        guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: false) else {
+            NSLog("[app] backgrounded; retaining session for resume")
             return
         }
         NSLog("[app] backgrounded — exiting (KL_EXIT_ON_BACKGROUND)")
@@ -149,6 +182,33 @@ enum Lifecycle {
         fflush(nil)
         exit(0)
     }
+
+    static func beginQuit() -> Bool {
+        let session = KleptonSession.shared
+        guard !session.quitting else { return false }
+        session.quitting = true
+        session.wantsImmersive = false
+        session.restorationBlocked = true
+        session.status = "Quitting…"
+        NSLog("[app] Quit Klepton requested")
+        // A stuck guest or scene dismissal must not prevent an explicit quit.
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 12) {
+            _exit(0)
+        }
+        return true
+    }
+
+    static func finishQuit() {
+        // The guest stop can wait up to ten seconds. Keep the window responsive
+        // while it finishes its current frame and writes its lifecycle report.
+        Thread.detachNewThread {
+            kl_app_guest_stop()
+            fflush(nil)
+            // Terminate every guest thread without running guest destructors,
+            // which can wait forever on threads that have already stopped.
+            _exit(0)
+        }
+    }
 }
 
 @main
@@ -159,14 +219,22 @@ struct KleptonApp: App {
     /// singleton the panel edits, not a second copy.
     @ObservedObject private var chroma = KleptonChroma.shared
 
+    init() {
+#if KL_STEAM_DIAGNOSTICS
+        // This build has no Steam backend. Match scripted diagnostic launches
+        // on a cold launch from Home too, while honoring an explicit override.
+        setenv("KL_STEAM_OFFLINE", "1", 0)
+#endif
+    }
+
     var body: some Scene {
-        WindowGroup { BootView() }
+        WindowGroup(id: "main") { BootView() }
             .defaultSize(width: 1280, height: 800)
             // On the app's phase, not this window's: closing the boot window
             // while the immersive space is up is not backgrounding, and must
             // not be treated as it. The log line above every decision is what
             // makes that distinction checkable on a device rather than assumed.
-            .onChange(of: scenePhase) { _, phase in Lifecycle.scenePhaseChanged(to: phase) }
+            .onChange(of: scenePhase, initial: true) { _, phase in Lifecycle.scenePhaseChanged(to: phase) }
 
         // The on-demand text-entry window (KL_KBD_WINDOW). Additive: it exists in
         // the scene graph but nothing opens it unless the flag is on and the guest
@@ -186,7 +254,7 @@ struct KleptonApp: App {
                 // that nobody sees.
                 NSLog("[cp] CompositorLayer closure #\(Immersive.bump()) "
                       + "renderer=\(ObjectIdentifier(layerRenderer))")
-                KleptonCompositor(layerRenderer).startRenderLoop()
+                KleptonCompositor.present(layerRenderer)
             }
         }
         // .mixed vs .full is read from the observed chroma object (set by boot
@@ -275,18 +343,37 @@ struct KeyboardEntryView: View {
 }
 
 struct BootView: View {
-    @State private var log = ""
-    @State private var status = "idle"
-    @State private var running = false
-    @State private var finished = false
-    @State private var succeeded = false
-    @State private var openedSpace = false
+    @ObservedObject private var session = KleptonSession.shared
+    @Environment(\.scenePhase) private var windowPhase
+    private var log: String {
+        get { session.log }
+        nonmutating set { session.log = newValue }
+    }
+    private var status: String {
+        get { session.status }
+        nonmutating set { session.status = newValue }
+    }
+    private var running: Bool {
+        get { session.running }
+        nonmutating set { session.running = newValue }
+    }
+    private var finished: Bool {
+        get { session.finished }
+        nonmutating set { session.finished = newValue }
+    }
+    private var succeeded: Bool {
+        get { session.succeeded }
+        nonmutating set { session.succeeded = newValue }
+    }
     // The flat guest's picture, and the handoff that ends it. Polled rather
     // than pushed: both are C state written by a guest thread, and a callback
     // out of one into SwiftUI would be a main-actor hop from a thread that is
     // mid-frame. A timer at 5 Hz costs nothing and cannot deadlock.
     @State private var showShell = false
-    @State private var handedOff = false
+    private var handedOff: Bool {
+        get { session.handedOff }
+        nonmutating set { session.handedOff = newValue }
+    }
     // The visionOS system keyboard for an immersive guest: there is no on-screen
     // keyboard in an immersive space, so when the guest asks for text entry
     // (kl_mono_text_input_wanted, set by SDLActivity.showTextInput) we focus a
@@ -296,6 +383,8 @@ struct BootView: View {
     @State private var kbSuppress = false
     @FocusState private var kbFocused: Bool
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
+    @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.openWindow) private var openWindow
     // The game-facing builds (hl1/hl2/portal) show a launcher: a chosen game
     // folder plus per-title options, and boot on a button rather than on their own.
@@ -304,7 +393,10 @@ struct BootView: View {
     @ObservedObject private var files = klActiveFiles() ?? LauncherFiles(bookmarkKey: "none", expected: "")
     private var isLauncher: Bool { klIsLauncher() }
 #if KL_STEAM_GAME_HOST
-    @State private var steamReady = false
+    private var steamReady: Bool {
+        get { session.steamReady }
+        nonmutating set { session.steamReady = newValue }
+    }
     private var steamOfflineDiagnostics: Bool {
         klEnvOn("KL_STEAM_OFFLINE", default: false)
     }
@@ -315,32 +407,68 @@ struct BootView: View {
     }
 
     var body: some View {
-        Group {
-#if KL_STEAM_GAME_HOST
-        if steamOfflineDiagnostics {
-            VStack {
-                Text("Offline Steam diagnostics")
-                    .foregroundStyle(.orange)
-                if showShell { ShellWindow() } else { bootReport }
-            }
-        } else {
-        HStack {
-            SteamLoginProbeView {
-                steamReady = true
-                boot()
-            }
+        VStack(spacing: 0) {
             Group {
-                if showShell { ShellWindow() } else { bootReport }
+#if KL_STEAM_GAME_HOST
+                if steamOfflineDiagnostics {
+                    VStack {
+                        Text("Offline Steam diagnostics")
+                            .foregroundStyle(.orange)
+                        if showShell { ShellWindow() } else { bootReport }
+                    }
+                } else {
+                    HStack {
+                        SteamLoginProbeView {
+                            steamReady = true
+                            boot()
+                        }
+                        Group {
+                            if showShell { ShellWindow() } else { bootReport }
+                        }
+                    }
+                }
+#else
+#if KL_STEAM_DIAGNOSTICS
+                VStack {
+                    Text("Offline Steam diagnostics")
+                        .foregroundStyle(.orange)
+                    if showShell { ShellWindow() } else { bootReport }
+                }
+#else
+                Group {
+                    if showShell { ShellWindow() } else { bootReport }
+                }
+#endif
+#endif
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Quit Klepton", role: .destructive) { quit() }
+                    .accessibilityIdentifier("quitKlepton")
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+        }
+        .disabled(session.quitting)
+        .task { await watchPresentation() }
+        .onChange(of: windowPhase, initial: true) { _, phase in
+            if phase == .active, !session.quitting {
+                session.canRestoreAutomatically = true
+                session.restorationBlocked = false
             }
         }
+    }
+
+    @MainActor private func quit() {
+        guard Lifecycle.beginQuit() else { return }
+        kbFocused = false
+        Task {
+            if session.openedSpace || session.openingSpace {
+                await dismissImmersiveSpace()
+            }
+            Lifecycle.finishQuit()
         }
-#else
-        Group {
-            if showShell { ShellWindow() } else { bootReport }
-        }
-#endif
-        }
-        .task { await watchPresentation() }
     }
 
     /// Which of the two things the window can be showing, decided by what the
@@ -351,7 +479,7 @@ struct BootView: View {
     /// rather than according to a flag someone remembered to set. The 2D->VR
     /// handoff is the transition kl_present.h was written for.
     private func watchPresentation() async {
-        while !Task.isCancelled {
+        while !Task.isCancelled, !session.quitting {
             let mono = kl_present_mode_now() == KL_PRESENT_MONO
             if mono != showShell { showShell = mono }
 
@@ -394,13 +522,39 @@ struct BootView: View {
                 // just been handed the one thing the VR half cannot start
                 // without. openedSpace is shared with boot() so the two paths
                 // cannot both open it.
-                if !openedSpace {
-                    openedSpace = true
-                    let r = await openImmersiveSpace(id: Immersive.id)
-                    NSLog("[cp] openImmersiveSpace (after handoff) -> \(r)")
-                }
+                session.wantsImmersive = true
+            }
+            if session.phase == .active, windowPhase == .active,
+               session.wantsImmersive, !session.openedSpace,
+               !session.openingSpace, !session.restorationBlocked,
+               session.canRestoreAutomatically {
+                await presentImmersiveSession()
             }
             try? await Task.sleep(for: .milliseconds(200))
+        }
+    }
+
+    @MainActor private func presentImmersiveSession() async {
+        guard !session.quitting, !session.openedSpace, !session.openingSpace else { return }
+        session.wantsImmersive = true
+        session.openingSpace = true
+        let result = await openImmersiveSpace(id: Immersive.id)
+        session.openingSpace = false
+        NSLog("[cp] openImmersiveSpace (session) -> \(result)")
+        guard !session.quitting else { return }
+        switch result {
+        case .opened:
+            session.openedSpace = true
+            session.restorationBlocked = false
+            // Keep settings and Quit available on cold boot as well as re-entry.
+            if !klEnvOn("KL_BOOT_WINDOW", default: true) { dismissWindow(id: "main") }
+        case .userCancelled:
+            session.restorationBlocked = true
+        case .error:
+            session.restorationBlocked = true
+            status = "Could not restore the immersive view. Tap Resume session to try again."
+        @unknown default:
+            session.restorationBlocked = true
         }
     }
 
@@ -479,7 +633,13 @@ struct BootView: View {
                     if isLauncher, !klLauncherApply() { return }
                     boot()
                 }
-                .disabled(running || (isLauncher && !files.canLaunch))
+                .disabled(running || finished || (isLauncher && !files.canLaunch))
+                if session.wantsImmersive, !session.openedSpace {
+                    Button("Resume session") {
+                        Task { await presentImmersiveSession() }
+                    }
+                    .disabled(session.openingSpace)
+                }
                 if running { ProgressView() }
                 if finished, !log.isEmpty {
                     ShareLink(item: log) { Label("Export log", systemImage: "square.and.arrow.up") }
@@ -548,7 +708,7 @@ struct BootView: View {
         // numbers stop being comparable to the host's. Disabling the button
         // while running is not enough: the run *finishes*, and the obvious
         // next thing to do with a finished run is press Boot again.
-        guard !running, !finished else { return }
+        guard !session.quitting, !running, !finished else { return }
         running = true; log = ""
 #if KL_STEAM_GAME_HOST
         if steamOfflineDiagnostics { captureSteamHostContext() }
@@ -696,16 +856,15 @@ struct BootView: View {
                 // that kl_app_boot creates. Opening it in parallel with boot
                 // would be a race whose losing side reports "kl_app_boot must
                 // run first" and reads like a missing binding.
-                if result == 0, Immersive.wanted, !openedSpace {
-                    openedSpace = true
+                if result == 0, Immersive.wanted, !session.openedSpace {
+                    session.wantsImmersive = true
                     // The result is logged rather than discarded: `.error` and
                     // `.userCancelled` both leave the app alive with no
                     // compositor, which is indistinguishable in the log from a
                     // compositor that came up and died — and those want
                     // completely different next moves.
                     Task {
-                        let r = await openImmersiveSpace(id: Immersive.id)
-                        NSLog("[cp] openImmersiveSpace -> \(r)")
+                        if session.phase == .active { await presentImmersiveSession() }
                     }
                 }
             }

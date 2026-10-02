@@ -250,7 +250,13 @@ _display = (_launcher_display.get(KLT['name'], KLT['display']) if _launcher_on
 # Trailing newline, glued at line-start to the next setting — the same shape as
 # ENTITLEMENTS_SETTING / ASSETCATALOG_SETTING above, so it lands on its own line in
 # the output and expands to nothing (no blank line) when the flag is off.
-_conditions = (['KL_CUSTOM_LAUNCHER'] if _launcher_on else []) + (['KL_STEAM_GAME_HOST'] if STEAM_LOCAL else [])
+_conditions = (['KL_CUSTOM_LAUNCHER'] if _launcher_on else [])
+if STEAM_LOCAL:
+    _conditions += ['KL_STEAM_GAME_HOST']
+elif KLT.get('steam_local', False):
+    # A game with no bundled backend is a diagnostic build. Make its offline
+    # bootstrap survive Home launches, which do not inherit run.sh/test env.
+    _conditions += ['KL_STEAM_DIAGNOSTICS']
 LAUNCHER_COND = ('\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "'+ ' '.join(_conditions)+' $(inherited)";\n'
                  if _conditions else "")
 STEAM_C_COND = ('\t\t\t\tARCHS = arm64;\n' if STEAM_LOCAL else '')

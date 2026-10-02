@@ -1,0 +1,23 @@
+// !$*UTF8*$!
+{
+ archiveVersion = 1;
+ classes = {};
+ objectVersion = 56;
+ objects = {
+  100000000000000000000001 = {isa = PBXBuildFile; fileRef = 100000000000000000000002; };
+  100000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTests.swift; sourceTree = "<group>"; };
+  100000000000000000000003 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = SessionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+  100000000000000000000004 = {isa = PBXGroup; children = (100000000000000000000002,100000000000000000000005); sourceTree = "<group>"; };
+  100000000000000000000005 = {isa = PBXGroup; children = (100000000000000000000003); name = Products; sourceTree = "<group>"; };
+  100000000000000000000006 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001); runOnlyForDeploymentPostprocessing = 0; };
+  100000000000000000000007 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+  100000000000000000000008 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+  100000000000000000000009 = {isa = PBXNativeTarget; buildConfigurationList = 100000000000000000000010; buildPhases = (100000000000000000000006,100000000000000000000007,100000000000000000000008); buildRules = (); dependencies = (); name = SessionTests; productName = SessionTests; productReference = 100000000000000000000003; productType = "com.apple.product-type.bundle.ui-testing"; };
+  100000000000000000000010 = {isa = XCConfigurationList; buildConfigurations = (100000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+  100000000000000000000011 = {isa = XCBuildConfiguration; name = Debug; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = dev.klepton.session-uitests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = xros; SUPPORTED_PLATFORMS = "xros xrsimulator"; SWIFT_VERSION = 5.0; XROS_DEPLOYMENT_TARGET = 26.0; TARGETED_DEVICE_FAMILY = 7; CODE_SIGNING_ALLOWED = NO; }; };
+  100000000000000000000012 = {isa = PBXProject; attributes = {LastUpgradeCheck = 2700; TargetAttributes = {100000000000000000000009 = {CreatedOnToolsVersion = 27.0; }; }; }; buildConfigurationList = 100000000000000000000013; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en,Base); mainGroup = 100000000000000000000004; productRefGroup = 100000000000000000000005; projectDirPath = ""; projectRoot = ""; targets = (100000000000000000000009); };
+  100000000000000000000013 = {isa = XCConfigurationList; buildConfigurations = (100000000000000000000014); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+  100000000000000000000014 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {}; };
+ };
+ rootObject = 100000000000000000000012;
+}

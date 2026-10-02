@@ -931,8 +931,18 @@ static struct {
     int             state;        // kl_app_guest_state()
     int             running;      // has the thread been spawned and not joined?
     int             finished;     // has it left its loop and written the report?
+    int             suspended;    // immersive display is away; retain the session
     pthread_t       thread;
 } g_guest = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
+
+void kl_app_guest_suspend(void) {
+    pthread_mutex_lock(&g_guest.mu);
+    g_guest.suspended = 1;
+    // Discard an outstanding display tick rather than rendering it on Home.
+    g_guest.consumed = g_guest.published;
+    pthread_cond_broadcast(&g_guest.cv);
+    pthread_mutex_unlock(&g_guest.mu);
+}
 
 int kl_app_guest_state(void) {
     pthread_mutex_lock(&g_guest.mu);
@@ -965,14 +975,24 @@ static void guest_finished(void) {
 // Timed, not indefinite: a compositor that stops publishing must make the guest
 // render against the last pose it had, not wedge it. A wedged guest is
 // indistinguishable from a crashed one in a device log, and this is exactly the
-// path a backgrounded app takes.
+// path a stalled active display takes. An explicitly suspended guest instead
+// waits without a timeout until a new display publishes or teardown wakes it.
 static void guest_pace_wait(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += 1;
     pthread_mutex_lock(&g_guest.mu);
-    while (!g_guest.stop && g_guest.published == g_guest.consumed)
-        if (pthread_cond_timedwait(&g_guest.cv, &g_guest.mu, &ts) == ETIMEDOUT) break;
+    while (!g_guest.stop && (g_guest.suspended || g_guest.published == g_guest.consumed)) {
+        if (g_guest.suspended) {
+            // Home is a suspension, not a stalled display. Do not let the
+            // timeout advance the guest's GPU work against an absent layer.
+            pthread_cond_wait(&g_guest.cv, &g_guest.mu);
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 1;
+        } else if (pthread_cond_timedwait(&g_guest.cv, &g_guest.mu, &ts) == ETIMEDOUT) {
+            break;
+        }
+    }
     // Coalesce, do not queue: everything published since the last frame is one
     // turn. A guest that is behind then skips frames — which reprojection covers
     // — rather than being owed a backlog it can never work off.
@@ -1015,8 +1035,8 @@ static void *guest_thread(void *unused) {
     // where the XR API puts it (xrWaitFrame, ovrp_WaitToBeginFrame), which blocks
     // on the same published pose through guest_pace_wait. One clock either way.
     //
-    // Unbounded here, unlike the window path: the immersive space's own dismissal
-    // is what ends the run, through g_guest_quit.
+    // Unbounded here, unlike the window path: only explicit guest teardown ends
+    // the run through g_guest_quit. Home suspends its clock and retains the pump.
     if (kl_app_target_owns_frame_loop()) {
         printf("\n=== guest thread pumping the activity's looper ===\n");
         fflush(NULL);
@@ -1033,7 +1053,7 @@ static void *guest_thread(void *unused) {
 
     for (;;) {
         pthread_mutex_lock(&g_guest.mu);
-        while (!g_guest.stop && g_guest.published == g_guest.consumed)
+        while (!g_guest.stop && (g_guest.suspended || g_guest.published == g_guest.consumed))
             pthread_cond_wait(&g_guest.cv, &g_guest.mu);
         int stop = g_guest.stop;
         // Coalesce, do not queue: take everything published since the last
@@ -1084,10 +1104,10 @@ int kl_app_guest_start(void) {
     // ...and the OpenJK guest takes the same one, because it is the same API:
     // its frame clock is xrWaitFrame, wherever the engine calls it from. Which
     // pacer a guest wants is a property of the XR RUNTIME it drives, not of the
-    // door it came through — Steam Link and JKXR are both OpenXR, RE4 is
-    // OVRPlugin, and pairing a door with the wrong one is a guest that blocks
-    // forever on a pose nobody publishes to it.
-    if (kl_app_target_is_steamlink() || target_is_jkxr())
+    // door it came through. Any independently driven guest can use OpenXR;
+    // install its pacer so those guests also park while the display is away.
+    // Unity is already paced by nativeRender and must not wait a second time.
+    if (kl_app_target_owns_frame_loop())
         kl_openxr_set_frame_pacer(guest_pace_wait);
     // ...and the same clock on the OVRPlugin side, for the other guest that
     // owns its loop. ovrp_WaitToBeginFrame is this API's xrWaitFrame. It is
@@ -1117,6 +1137,9 @@ int kl_app_guest_start(void) {
 
 void kl_app_guest_publish(void) {
     pthread_mutex_lock(&g_guest.mu);
+    // Only a real display frame resumes the guest. Foregrounding the boot
+    // window alone must not wake rendering before its immersive layer exists.
+    g_guest.suspended = 0;
     g_guest.published++;
     pthread_cond_signal(&g_guest.cv);
     pthread_mutex_unlock(&g_guest.mu);
