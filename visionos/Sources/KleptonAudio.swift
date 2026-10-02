@@ -173,11 +173,11 @@ enum KleptonAudio {
         NSLog("[au] direct stereo: system spatialisation bypassed, 2 ch preferred")
     }
 
-    /// Set the session category from the microphone toggle. OFF → .playback
-    /// (the default this app has always used). ON → .playAndRecord with
-    /// .voiceChat mode, which is what a guest capturing for voice chat wants and
-    /// what enables the input bus kl_audio.c's capture unit binds. Mirrors ALVR,
-    /// which takes exactly this pair for SteamVR's microphone.
+    /// Keep game audio mixable with other apps, including Discord calls.
+    /// OFF → playback only, leaving microphone capture to the calling app.
+    /// ON → playAndRecord for guest voice chat; mixing does not guarantee that
+    /// two apps can capture the microphone at the same time. Use .default mode
+    /// because the C capture unit provides its own voice processing.
     static func setCategoryForMic(_ session: AVAudioSession, _ mic: Bool) throws {
         if mic {
             // mode .default, NOT .voiceChat — and this is deliberate even though the
@@ -190,9 +190,10 @@ enum KleptonAudio {
             // applies its own noise-suppression/AGC (unit-level, not mode-gated) for
             // clean voice, and a RemoteIO fallback is raw but working — never silent.
             try session.setCategory(.playAndRecord, mode: .default,
-                                    options: [.allowBluetooth, .defaultToSpeaker])
+                                    options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
         } else {
-            try session.setCategory(.playback, mode: .default)
+            try session.setCategory(.playback, mode: .default,
+                                    options: [.mixWithOthers])
         }
     }
 

@@ -146,6 +146,33 @@ use the app's normal launch defaults, without Steam-mode or camera overrides.
 Window/presentation checks do not establish that the game's menu loaded; also
 inspect the visible game after the splash and check the log for startup errors.
 
+## Discord voice chat while playing
+
+Klepton configures game audio with `AVAudioSession.CategoryOptions.mixWithOthers`
+so activating its audio session does not interrupt a call in another app. This
+applies at startup, when changing the game microphone toggle, and after an audio
+services reset. Foreground reactivation retains the same category options.
+
+For Discord on Vision Pro, leave Klepton's **Microphone → Allow microphone**
+toggle off. That toggle is for voice chat inside the guest game; Discord captures
+the microphone itself. Audio mixing does not guarantee simultaneous microphone
+capture by both apps, or keep a calling app alive if visionOS suspends it.
+
+After installing a build with this change, validate on a physical headset:
+
+1. Join a Discord voice channel and confirm speech works in both directions.
+2. Launch Klepton with **Allow microphone** off and start a game. Confirm both
+   directions still work and game audio remains audible in immersion.
+3. Go Home, reopen Klepton, and confirm the call and game audio still work.
+4. Repeat with the speakers or headphones you normally use, since calls can
+   change the audio route and sample rate.
+
+If the call still stops, check whether it works while Klepton's settings window
+is open before entering immersion (`KL_AUTOBOOT=0` for a diagnostic launch).
+This helps distinguish audio-session interruption from Discord's behavior when
+its window is hidden. Discord and visionOS behavior must be verified on-device;
+a simulator build cannot establish that the call survives.
+
 ## Language boundary
 
 Swift owns the App, and will own the ImmersiveSpace, Compositor Services,

@@ -72,9 +72,9 @@ struct MicView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Microphone").font(.headline)
             Text("Allow this game to use the headset microphone for voice chat. "
-                 + "Off by default. Turning it on asks for "
-                 + "microphone permission and switches audio to play-and-record, "
-                 + "which lets the silent switch mute app audio.")
+                 + "Off by default. For Discord or another calling app, leave "
+                 + "this off so that app can use the microphone. Game audio "
+                 + "can play alongside the call.")
                 .font(.caption).foregroundStyle(.secondary)
 
             Toggle("Allow microphone", isOn: $mic.settings.enabled)
