@@ -62,3 +62,28 @@ const unsigned char *kl_cacert_at(int i, size_t *len) {
     if (len) *len = kl_cacert_span[i].len;
     return kl_cacert_der + kl_cacert_span[i].off;
 }
+
+int kl_cacerts_write_pem(FILE *output) {
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    if (!output) return -1;
+    for (int i = 0; i < kl_cacert_count(); i++) {
+        size_t length;
+        const unsigned char *bytes = kl_cacert_at(i, &length);
+        if (fputs("-----BEGIN CERTIFICATE-----\n", output) == EOF) return -1;
+        unsigned column = 0;
+        for (size_t j = 0; j < length; j += 3) {
+            size_t remain = length - j;
+            unsigned value = (unsigned)bytes[j] << 16;
+            if (remain > 1) value |= (unsigned)bytes[j + 1] << 8;
+            if (remain > 2) value |= bytes[j + 2];
+            char encoded[] = { alphabet[(value >> 18) & 63], alphabet[(value >> 12) & 63],
+                remain > 1 ? alphabet[(value >> 6) & 63] : '=', remain > 2 ? alphabet[value & 63] : '=' };
+            if (fwrite(encoded, 1, 4, output) != 4) return -1;
+            column += 4;
+            if (column == 64) { if (fputc('\n', output) == EOF) return -1; column = 0; }
+        }
+        if (column && fputc('\n', output) == EOF) return -1;
+        if (fputs("-----END CERTIFICATE-----\n", output) == EOF) return -1;
+    }
+    return ferror(output) ? -1 : 0;
+}

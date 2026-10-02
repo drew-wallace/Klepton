@@ -52,6 +52,9 @@ void *kl_ndk_asset_manager(void);
 // ANativeActivity_onCreate — see the note at the definition for what it costs
 // not to.
 void kl_ndk_prepare_looper(void);
+void *kl_ndk_input_queue(void);
+void kl_ndk_input_key(int32_t action, int32_t keycode, int32_t flags, int32_t meta);
+void kl_ndk_input_motion(int32_t action, float x, float y, int32_t buttons);
 
 // Does the CALLING thread have one? The native half of Java's
 // Looper.myLooper(), which is the same question asked from the other side of

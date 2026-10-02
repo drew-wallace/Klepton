@@ -207,6 +207,11 @@ typedef struct kl_sl_player {
     struct { const void *buf; SLuint32 size; } q[KL_SL_QUEUE];
     unsigned head, tail, count;
     unsigned generation;                    // bumped on every re-creation
+    unsigned queue_epoch;                   // invalidates a buffer on Clear
+    uint64_t played_frames;
+    unsigned in_flight, position_queries;
+    void *pcm_copy;
+    size_t pcm_capacity;
 
     unsigned rate, channels, bits;          // from the PCM format
     int      mixes;                          // 1: feed kl_audio; 0: usleep-pace only
@@ -332,12 +337,27 @@ static void *feeder(void *arg) {
         }
         const void *buf = p->q[p->head].buf;
         SLuint32 size = p->q[p->head].size;
+        // Clear/STOP can return while the audio sink is still pacing this
+        // buffer. Own its bytes before releasing the queue lock, so freeing a
+        // guest buffer during a level transition cannot race the conversion.
+        if (buf && p->mixes) {
+            if (size > p->pcm_capacity) {
+                void *copy = realloc(p->pcm_copy, size);
+                if (copy) { p->pcm_copy = copy; p->pcm_capacity = size; }
+            }
+            if (size <= p->pcm_capacity) {
+                memcpy(p->pcm_copy, buf, size);
+                buf = p->pcm_copy;
+            } else buf = NULL; // allocation failure: keep pacing, never borrow
+        }
         p->head = (p->head + 1) % KL_SL_QUEUE;
         p->count--;
+        p->in_flight = 1;
         unsigned frame = (p->channels * p->bits) / 8;
         if (!frame) frame = 4;
         unsigned rate = p->rate ? p->rate : 48000;
         unsigned generation = p->generation;
+        unsigned queue_epoch = p->queue_epoch;
         pthread_mutex_unlock(&p->lock);
 
         // Hand the PCM to the device, and let it be the clock. The buffer is
@@ -370,15 +390,18 @@ static void *feeder(void *arg) {
         // Oculus spatializer rather than as our own race.
         pthread_mutex_lock(&p->lock);
         if (!p->running || generation != p->generation) break;
+        p->in_flight = 0;
+        if (queue_epoch != p->queue_epoch) continue;
         if (p->state != SL_PLAYSTATE_PLAYING) continue;   // stopped or paused mid-buffer
         void (*cb)(SLBufferQueueItf, void *) = p->cb;
         void *cb_ctx = p->cb_ctx;
         // Held across the callback so a concurrent SetPlayState(STOPPED) or
         // Destroy waits for it to return rather than freeing underneath it.
         p->in_cb = 1;
+        p->played_frames += size / frame;
+        p->consumed++;
         pthread_mutex_unlock(&p->lock);
 
-        p->consumed++;
         g_buffers_consumed++;
         if (cb) cb((SLBufferQueueItf)&p->bq_vt, cb_ctx);
 
@@ -486,6 +509,7 @@ static SLresult play_SetPlayState(SLPlayItf self, SLuint32 state) {
     if (state != SL_PLAYSTATE_PLAYING) kl_audio_pause();
     pthread_mutex_lock(&p->lock);
     p->state = state;
+    if (state == SL_PLAYSTATE_STOPPED) p->played_frames = 0;
     pthread_cond_signal(&p->wake);
     // Stopping is synchronous: do not return until the guest's callback is off
     // the stack, or it will run against buffers the guest is about to release.
@@ -508,12 +532,28 @@ static SLresult play_GetPlayState(SLPlayItf s, SLuint32 *st) {
     if (st) *st = KL_SL_PLAY_P(s)->state; return SL_RESULT_SUCCESS;
 }
 static SLresult play_GetU32(SLPlayItf s, SLuint32 *v) { (void)s; if (v) *v = 0; return SL_RESULT_SUCCESS; }
+static SLresult play_GetDuration(SLPlayItf s, SLuint32 *v) {
+    (void)s;
+    // A streaming buffer queue has no finite duration (SL_TIME_UNKNOWN).
+    if (v) *v = UINT32_MAX;
+    return SL_RESULT_SUCCESS;
+}
+static SLresult play_GetPosition(SLPlayItf s, SLuint32 *v) {
+    kl_sl_player *p = KL_SL_PLAY_P(s);
+    pthread_mutex_lock(&p->lock);
+    if (v) *v = (SLuint32)(p->played_frames * 1000 / (p->rate ? p->rate : 48000));
+    if (kl_env_on("KL_SL_TRACE", 0) && p->position_queries++ < 8)
+        fprintf(stderr, "  [sl] player #%ld GetPosition -> %u ms\n",
+                p - g_players, v ? *v : 0);
+    pthread_mutex_unlock(&p->lock);
+    return SL_RESULT_SUCCESS;
+}
 static SLresult play_Reg(SLPlayItf s, void *c, void *x) { (void)s; (void)c; (void)x; return SL_RESULT_SUCCESS; }
 static SLresult play_SetU32(SLPlayItf s, SLuint32 v) { (void)s; (void)v; return SL_RESULT_SUCCESS; }
 static SLresult play_Clear(SLPlayItf s) { (void)s; return SL_RESULT_SUCCESS; }
 
 static const struct SLPlayItf_ g_play_vt = {
-    play_SetPlayState, play_GetPlayState, play_GetU32, play_GetU32, play_Reg,
+    play_SetPlayState, play_GetPlayState, play_GetDuration, play_GetPosition, play_Reg,
     play_SetU32, play_GetU32, play_SetU32, play_Clear, play_GetU32,
     play_SetU32, play_GetU32,
 };
@@ -522,7 +562,7 @@ static const struct SLPlayItf_ g_play_vt = {
 static SLresult bq_Enqueue(SLBufferQueueItf self, const void *buf, SLuint32 size) {
     kl_sl_player *p = KL_SL_BQ_P(self);
     pthread_mutex_lock(&p->lock);
-    if (p->count == KL_SL_QUEUE) {
+    if (p->count + p->in_flight == KL_SL_QUEUE) {
         pthread_mutex_unlock(&p->lock);
         return SL_RESULT_FEATURE_UNSUPPORTED;   // queue full; FMOD retries
     }
@@ -538,12 +578,17 @@ static SLresult bq_Clear(SLBufferQueueItf self) {
     kl_sl_player *p = KL_SL_BQ_P(self);
     pthread_mutex_lock(&p->lock);
     p->head = p->tail = p->count = 0;
+    p->queue_epoch++;
+    p->consumed = 0;
+    p->in_flight = 0;
     pthread_mutex_unlock(&p->lock);
     return SL_RESULT_SUCCESS;
 }
 static SLresult bq_GetState(SLBufferQueueItf self, SLBufferQueueState *st) {
     kl_sl_player *p = KL_SL_BQ_P(self);
-    if (st) { st->count = p->count; st->index = (SLuint32)p->consumed; }
+    pthread_mutex_lock(&p->lock);
+    if (st) { st->count = p->count + p->in_flight; st->index = (SLuint32)p->consumed; }
+    pthread_mutex_unlock(&p->lock);
     return SL_RESULT_SUCCESS;
 }
 static SLresult bq_RegisterCallback(SLBufferQueueItf self,
@@ -594,6 +639,9 @@ static void player_stop(kl_sl_player *p) {
     pthread_mutex_unlock(&p->lock);
     pthread_join(p->thread, NULL);
     p->started = 0;
+    free(p->pcm_copy);
+    p->pcm_copy = NULL;
+    p->pcm_capacity = 0;
     // The device is shared: close it only when the LAST player is gone, and if
     // others remain, un-pause it so their feeders resume (the pause above hit
     // every feeder, not just this one's).

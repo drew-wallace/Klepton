@@ -573,10 +573,23 @@ static const char *const g_absent_hardware_permissions[] = {
 // The <meta-data> parser's attribute helper; both readers of AndroidManifest.xml
 // share it so they cannot disagree about how an attribute is spelled.
 
+static const char **g_declared_permissions;
+static size_t g_declared_permission_count;
+static int g_declared_permissions_tried;
+
+void klj_reset_guest_permissions(void) {
+    for (size_t i = 0; i < g_declared_permission_count; i++)
+        free((void *)g_declared_permissions[i]);
+    free(g_declared_permissions);
+    g_declared_permissions = NULL;
+    g_declared_permission_count = 0;
+    g_declared_permissions_tried = 0;
+}
+
 static const char *const *klj_declared_permissions(size_t *count) {
-    static const char **list;
-    static size_t n;
-    static int tried;
+    const char **list = g_declared_permissions;
+    size_t n = g_declared_permission_count;
+    int tried = g_declared_permissions_tried;
     if (!tried) {
         tried = 1;
         char path[1024];
@@ -607,6 +620,9 @@ static const char *const *klj_declared_permissions(size_t *count) {
         if (n) KLJ_LOG("manifest <uses-permission>: %zu declared", n);
         else   KLJ_LOG("no readable <uses-permission> beside %s — using the union "
                        "list, which is every guest's permissions at once", g_assets_dir);
+        g_declared_permissions = list;
+        g_declared_permission_count = n;
+        g_declared_permissions_tried = tried;
     }
     if (n) { *count = n; return list; }
     *count = sizeof g_manifest_permissions / sizeof *g_manifest_permissions;

@@ -162,7 +162,7 @@ uint64_t kl_x18_ctr_value(void);
 
 // Longest veneer, in instructions. Public because klepton-ld sizes its pool from
 // the site count before it emits anything.
-#define KLX_VEN_MAX_INSN 8
+#define KLX_VEN_MAX_INSN 10
 
 typedef struct {
     unsigned sites;     // instructions found naming x18
@@ -229,6 +229,8 @@ int  kl_x18_patch(void *code, size_t size, void *arena, size_t arena_size,
 // the loader acts on. `index` is a WORD index into `code`; the window is
 // clamped to the buffer, so pass the same chunk the scanner is walking.
 int kl_x18_is_data(const void *code, size_t size, size_t index);
+// TLS-specific classification with a guarded, measured prologue exception.
+int kl_x18_tls_is_data(const void *code, size_t size, size_t index);
 
 // Count sites that will need a VENEER — x18 sites plus the CTR_EL0 reads
 // — without emitting anything. klepton-ld sizes its pool with it, so it has to

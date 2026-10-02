@@ -904,7 +904,8 @@ static const struct { const char *name; uint32_t version; int gate; } g_extensio
     // environment, and the guest's screens render on top through the
     // projection layer. Graduates to a real body if the background must show.
     { "XR_FB_passthrough",                    1, KLXR_GATE_ALWAYS },
-    { "XR_META_performance_metrics",          2, KLXR_GATE_ALWAYS },
+    // Advertise this only after its required xrEnumeratePerformanceMetrics*
+    // and xrQueryPerformanceMetricsCounterMETA entry points are implemented.
     { "XR_EXT_user_presence",                 1, KLXR_GATE_USER_PRESENCE },
 };
 #define KLXR_EXT_ALL ((uint32_t)(sizeof g_extensions / sizeof g_extensions[0]))

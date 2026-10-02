@@ -266,6 +266,14 @@ void kl_jni_pin_object(void *obj) {
 }
 
 
+// Release a host-owned global reference; JNI local ownership is unchanged.
+void kl_jni_unpin_object(void *obj) {
+    pthread_mutex_lock(&g_lock);
+    klj_object *o = klj_as_object(obj);
+    if (o && o->pinned) o->pinned--;
+    pthread_mutex_unlock(&g_lock);
+}
+
 // Same as kl_jni_new_object, but carries a payload. Used for the object
 // kinds the host has to *construct* rather than merely hand back: JNIBridge
 // proxies, android/os/Message, and the java.lang.reflect.Method/Field objects
@@ -564,14 +572,12 @@ static void  klj_DeleteLocalRef(void *env, void *obj) {
 }
 static void *klj_NewGlobalRef(void *env, void *obj) {
     (void)env;
-    klj_object *o = klj_as_object(obj);
-    if (o) o->pinned++;
+    kl_jni_pin_object(obj);
     return obj;
 }
 static void  klj_DeleteGlobalRef(void *env, void *obj) {
     (void)env;
-    klj_object *o = klj_as_object(obj);
-    if (o && o->pinned) o->pinned--;
+    kl_jni_unpin_object(obj);
 }
 static void  klj_ref_release(void *env, void *obj)        { (void)env; (void)obj; }
 static kl_jint klj_IsSameObject(void *env, void *a, void *b) { (void)env; return a == b; }
@@ -853,6 +859,18 @@ static void *klj_FromReflectedMethod(void *env, void *method) {
 
 
 
+// An array is one reference regardless of its element type or dimensions.
+// Consume its complete descriptor before selecting the GP/reference argument.
+static const char *klj_array_end(const char *p) {
+    while (*p == '[') p++;
+    if (*p == 'L') {
+        const char *end = strchr(p + 1, ';');
+        if (!end || end == p + 1 || memchr(p + 1, ')', (size_t)(end - p - 1))) return NULL;
+        return end + 1;
+    }
+    return *p && strchr("ZBCSIJFD", *p) ? p + 1 : NULL;
+}
+
 // Walk the argument list of a JNI signature, pulling each one from the guest
 // va_list in the right register bank. Returns argc, or -1 on a malformed sig.
 static int klj_decode_args(const char *sig, kl_va *va, klj_val *argv) {
@@ -860,7 +878,12 @@ static int klj_decode_args(const char *sig, kl_va *va, klj_val *argv) {
     int argc = 0;
     for (const char *p = sig + 1; *p && *p != ')'; ) {
         if (argc == KLJ_MAX_ARGS) return -1;
-        while (*p == '[') p++;                       // arrays are references
+        if (*p == '[') {
+            p = klj_array_end(p);
+            if (!p) return -1;
+            argv[argc++].l = (void *)(uintptr_t)kl_va_gp(va);
+            continue;
+        }
         switch (*p) {
         case 'L':                                     // fully-qualified object
             while (*p && *p != ';') p++;
@@ -904,7 +927,13 @@ static int klj_decode_args_a(const char *sig, const klj_jvalue *args, klj_val *a
         // something to read. Rejecting it outright turned every zero-argument
         // A-call into "cannot decode signature".
         if (argc == KLJ_MAX_ARGS || !args) return -1;
-        while (*p == '[') p++;                       // arrays are references
+        if (*p == '[') {
+            p = klj_array_end(p);
+            if (!p) return -1;
+            argv[argc].l = args[argc].l;
+            argc++;
+            continue;
+        }
         switch (*p) {
         case 'L':
             while (*p && *p != ';') p++;
@@ -2001,6 +2030,7 @@ const klj_binding *const klj_binding_tables[] = {
     klj_bind_net,
     klj_bind_softinput,
     klj_bind_services,
+    klj_bind_photon,
     klj_bind_io,
     klj_bind_prefs,
     klj_bind_sdl,

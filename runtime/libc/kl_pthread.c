@@ -1047,7 +1047,11 @@ int klb_pthread_key_create(int *out, void (*dtor)(void *)) {
         for (int j = 0; j < KL_MAX_KEYS; j++) live += (atomic_load(&g_key_seq[j]) & 1);
         if (live > atomic_load(&g_nkeys_hw)) atomic_store(&g_nkeys_hw, live);
         pthread_mutex_unlock(&g_key_lock);
-        *out = k;                                    // ...only ever on success
+        // Android marks opaque keys with bit 31. Valve's TLS wrapper treats
+        // unflagged zero as uninitialized; returning a bare slot breaks that
+        // contract even though POSIX permits opaque keys with value zero.
+        // https://android.googlesource.com/platform/bionic/+/main/libc/bionic/pthread_key.cpp
+        *out = (int)(UINT32_C(0x80000000) | (uint32_t)k);
         static int trace = -1;
         if (trace < 0) trace = kl_env_on("KL_TRACE_TSD", 0);
         if (trace)
@@ -1064,7 +1068,12 @@ int klb_pthread_key_create(int *out, void (*dtor)(void *)) {
                     "NULL getspecific later\n", KL_MAX_KEYS);
     return kl_errno_to_linux(EAGAIN);
 }
+static int guest_key_index(int key) {
+    uint32_t index = (uint32_t)key ^ UINT32_C(0x80000000);
+    return index < KL_MAX_KEYS ? (int)index : -1;
+}
 int klb_pthread_key_delete(int k) {
+    k = guest_key_index(k);
     pthread_mutex_lock(&g_key_lock);
     if (!key_live(k, NULL)) { pthread_mutex_unlock(&g_key_lock); return kl_errno_to_linux(EINVAL); }
     g_key_dtor[k] = NULL;
@@ -1073,12 +1082,14 @@ int klb_pthread_key_delete(int k) {
     return 0;
 }
 void *klb_pthread_getspecific(int k) {
+    k = guest_key_index(k);
     uint32_t seq;
     if (!key_live(k, &seq)) return NULL;
     kl_tsd_slot *s = tsd_table(0);
     return (s && s[k].seq == seq) ? s[k].val : NULL;
 }
 int klb_pthread_setspecific(int k, const void *v) {
+    k = guest_key_index(k);
     uint32_t seq;
     if (!key_live(k, &seq)) return kl_errno_to_linux(EINVAL);
     kl_tsd_slot *s = tsd_table(1);
@@ -1216,6 +1227,26 @@ typedef struct { void *(*fn)(void *); void *arg; } tramp;
 static void *thread_tramp(void *p) {
     tramp t = *(tramp *)p; free(p);
     kl_thread_init();
+#ifdef __APPLE__
+    // Simulator experiment for the measured Walkabout GC barrier. Restrict it
+    // to translated Unity/IL2CPP workers; Valve workers keep their own masks.
+    if (kl_env_on("KL_UNITY_GC_THREAD_SIGNALS", 0)) {
+        Dl_info info = {0};
+        if (dladdr((void *)t.fn, &info) && info.dli_fname &&
+            (strstr(info.dli_fname, "/libunity.framework/") || strstr(info.dli_fname, "/libil2cpp.framework/"))) {
+            sigset_t signals = 0;
+            sigaddset(&signals, 30); sigaddset(&signals, 24);
+            int result = pthread_sigmask(SIG_UNBLOCK, &signals, NULL);
+            fprintf(stderr, "  [sigmask] Unity worker GC unblock result=%d\n", result);
+        }
+    }
+#endif
+    if (kl_env_on("KL_TRACE_SIGMASK", 0)) {
+        sigset_t current = 0;
+        pthread_sigmask(SIG_SETMASK, NULL, &current);
+        fprintf(stderr, "  [sigmask] thread_entry thread=%p current=%#x start=%p\n",
+                (void *)pthread_self(), current, (void *)t.fn);
+    }
     // KL_GUEST_QOS=1: every guest thread at USER_INITIATED instead of default.
     // On visionOS a default-QoS thread is scheduled behind the compositor's
     // work, and for Steam Link that thread set includes the UDP receive and
@@ -1310,11 +1341,9 @@ void  klb_pthread_exit(void *r)                { thread_unregister(pthread_self(
 pthread_t klb_pthread_self(void)               { return pthread_self(); }
 int   klb_pthread_equal(pthread_t a, pthread_t b) { return pthread_equal(a, b); }
 int   klb_pthread_kill(pthread_t t, int sig)   {
-    int r = px(pthread_kill(t, sig));
-    if (kl_env_on("KL_TRACE_SIG", 0))
-        fprintf(stderr, "  [sig] pthread_kill(%p, %d) -> %d%s\n", (void *)t, sig, r,
-                r ? " FAILED" : "");
-    return r;
+    // A GC target can be suspended while holding the environment or stdio
+    // lock. The collector must not acquire either between suspend and resume.
+    return px(pthread_kill(t, sig));
 }
 // Same names, different numbers, and the consequence is invisible: Linux
 // numbers SIG_BLOCK/UNBLOCK/SETMASK 0/1/2, Darwin 1/2/3. Forwarded raw, a guest
@@ -1344,6 +1373,13 @@ int klb_pthread_sigmask(int how, const uint64_t *s, uint64_t *o) {
     if (s) din = (sigset_t)(*s & 0xFFFFFFFFu);
     int r = pthread_sigmask(kl_sigmask_how(how), s ? &din : NULL, o ? &dout : NULL);
     if (!r && o) *o = dout;
+    if (kl_env_on("KL_TRACE_SIGMASK", 0)) {
+        sigset_t current = 0;
+        pthread_sigmask(SIG_SETMASK, NULL, &current);
+        fprintf(stderr, "  [sigmask] how=%d supplied=%d requested=%#llx result=%d current=%#x caller=%p\n",
+                how, s != NULL, (unsigned long long)(s ? *s : 0), r,
+                current, __builtin_return_address(0));
+    }
     return r;
 }
 
@@ -1452,12 +1488,9 @@ int klb_sem_destroy(int *s) {
 int klb_sem_post(int *s) {
     kl_sem *k = sem_of(s);
     if (!k) { errno = EINVAL; return -1; }
-    if (kl_env_on("KL_TRACE_SIG", 0)) {
-        static _Atomic int n;
-        if (atomic_fetch_add(&n, 1) < 12)
-            fprintf(stderr, "  [sig] sem_post slot %d (count now %d)\n",
-                    *s, atomic_load(&k->count) + 1);
-    }
+    // Unity acknowledges GC suspension from a signal handler. getenv and
+    // stdio can lock resources held by the interrupted thread, even when the
+    // trace is disabled. Keep the valid post path free of both operations.
     atomic_fetch_add(&k->count, 1);
     dispatch_semaphore_signal(k->d);
     return 0;

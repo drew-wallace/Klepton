@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include "kl_eventfd.h"
 #include <stdarg.h>
 #include <string.h>
 #include <strings.h>
@@ -24,6 +25,7 @@
 #include <dirent.h>
 #include <signal.h>
 #include <setjmp.h>
+#include "../kl_jump.h"
 #include <locale.h>
 #include <xlocale.h>
 #include <libgen.h>
@@ -672,6 +674,16 @@ static void kl_grow_sock_buffers(int fd) {
 static int kl_socket(int domain, int type, int protocol) {
     // bionic AF_INET6=10 -> Darwin 30; SOCK_* types agree.
     if (domain == 10) domain = AF_INET6;
+    // Linux encodes SOCK_NONBLOCK and SOCK_CLOEXEC in the socket type passed to
+    // socket(2). Darwin does not use those Linux bits as type flags; forwarding
+    // e.g. SOCK_STREAM|SOCK_NONBLOCK (2049) makes socket() fail with
+    // EPROTOTYPE, which is exactly what Unity/PlayFab's HTTPS connections were
+    // hitting. Strip the guest bits, then apply their effects after creation.
+    const int lx_nonblock = 0x800;
+    const int lx_cloexec  = 0x80000;
+    int want_nonblock = type & lx_nonblock;
+    int want_cloexec  = type & lx_cloexec;
+    type &= ~(lx_nonblock | lx_cloexec);
     // AF_NETLINK (16) has no Darwin equivalent, and socket() refusing it is NOT
     // the harmless gap it reads as. Steam Link's SVLDataLinkUber opens a
     // NETLINK_ROUTE socket only to WATCH for interface changes — but the routine
@@ -696,7 +708,11 @@ static int kl_socket(int domain, int type, int protocol) {
         return fd;
     }
     int fd = socket(domain, type, protocol);
-    if (fd >= 0) kl_grow_sock_buffers(fd);
+    if (fd >= 0) {
+        if (want_nonblock) fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+        if (want_cloexec) fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
+        kl_grow_sock_buffers(fd);
+    }
     // Darwin traffic-class marking for the guest's UDP sockets. Steam Link's
     // AV stream is plain UDP; stamped NET_SERVICE_TYPE_RV ("responsive
     // multimedia - interactive media such as screen sharing", Apple's own
@@ -1674,7 +1690,9 @@ static int kl_fd_is_regular(int fd) {
 }
 
 ssize_t kl_shim_read(int fd, void *buf, size_t n) {
-    int handled; ssize_t vr = kl_obbmap_read(fd, buf, n, &handled);
+    int handled; ssize_t vr = kl_eventfd_read(fd, buf, n, &handled);
+    if (handled) return vr;
+    vr = kl_obbmap_read(fd, buf, n, &handled);
     if (handled) return vr;   // OBB read-through fd — served from the archive
     ssize_t r = read(fd, buf, n);
     if (r >= 0 && (size_t)r < n && r != 0 && kl_fd_is_regular(fd)) {
@@ -1876,7 +1894,8 @@ X(klv_open) X(klv_fcntl) X(klv_ioctl) X(klv_strtold) X(klv_wcstold) X(klv_strtol
 X(klb_errno) X(klb_gettid) X(klb_sysprop_find) X(klb_sysprop_get) X(klb_sysprop_read)
 X(klb_prctl) X(klb_sched_getaffinity) X(klb_sched_setaffinity)
 X(klb___sched_cpucount) X(klb___libc_current_sigrtmin) X(klb___libc_current_sigrtmax)
-X(klb_stat) X(klb_lstat) X(klb_fstat) X(klb_statfs) X(klb_uname) X(klb_sigaction)
+X(klb___sched_cpualloc) X(klb___sched_cpufree)
+X(klb_stat) X(klb_lstat) X(klb_fstat) X(klb_statfs) X(klb_uname) X(klb_sigaction) X(klb_posix_fadvise)
 X(klb_opendir) X(klb_readdir) X(klb_closedir) X(klb_scandir) X(klb_alphasort)
 X(klb_FD_ISSET_chk) X(klb_FD_SET_chk) X(klb_ctype_mb_cur_max) X(klb_lseek64)
 X(klb_close) X(klb_lseek) X(klb_pread)
@@ -1908,7 +1927,7 @@ X(klb_sem_timedwait) X(klb_sem_getvalue) X(klb_sem_trywait)
 X(klb_sem_open) X(klb_sem_close)
 X(klb_pthread_getschedparam) X(klb_pthread_setschedparam)
 X(klb_dlopen) X(klb_dlsym) X(klb_dlclose) X(klb_dlerror) X(klb_dladdr)
-X(klb_clock_gettime) X(klb_clock_getres) X(klb_gettimeofday)
+X(klb_clock_gettime) X(klb_clock_getres) X(klb_clock_nanosleep) X(klb_gettimeofday)
 // kl_libc_slink.c — the surface Steam Link reaches for and Beat Saber does not.
 X(klb_getauxval)
 X(klb_fegetenv) X(klb_fesetenv) X(klb_feholdexcept) X(klb_feupdateenv)
@@ -1928,7 +1947,7 @@ X(klb_ungetwc) X(klb_fputwc) X(klb_putwc) X(klb_fwide)
 X(klb_pthread_rwlock_tryrdlock) X(klb_pthread_rwlock_trywrlock)
 X(klb___register_atfork) X(klb___gnu_strerror_r) X(klb___write_chk)
 // ...and what the 2D frontend (libshell + Qt6) adds on top of it.
-X(klb_eventfd) X(klb_eventfd_read) X(klb_eventfd_write) X(klb_ppoll)
+X(klb_ppoll)
 X(klb_accept4) X(klb_pipe2) X(klb_dup2) X(klb_dup3) X(klb_memfd_create) X(klb_clone)
 X(klb_inotify_init) X(klb_inotify_init1)
 X(klb_inotify_add_watch) X(klb_inotify_rm_watch)
@@ -1990,7 +2009,9 @@ static const kl_entry g_shim[] = {
     E("__android_log_print", klv_android_log_print),
     E("open", klv_open), E("fcntl", klv_fcntl), E("ioctl", klv_ioctl),
     E("setsockopt", kl_setsockopt), E("getsockopt", kl_getsockopt),
-    E("read", kl_shim_read), E("usleep", kl_usleep),
+    E("read", kl_shim_read), E("write", klb_write),
+    E("readv", klb_readv), E("writev", klb_writev), E("dup", klb_dup),
+    E("usleep", kl_usleep),
     E("close", klb_close), E("lseek", klb_lseek), E("pread", klb_pread),
     E("getaddrinfo", kl_getaddrinfo), E("connect", kl_connect),
     E("socket", kl_socket),
@@ -2028,6 +2049,7 @@ static const kl_entry g_shim[] = {
     E("timer_getoverrun", klb_timer_getoverrun),
     E("__stack_chk_guard", &klb_stack_chk_guard),   // Source/Portal data import
     E("stat", klb_stat), E("lstat", klb_lstat), E("fstat", klb_fstat), E("statfs", klb_statfs),
+    E("posix_fadvise", klb_posix_fadvise),
     E("uname", klb_uname), E("sigaction", klb_sigaction),
     E("sysconf", klb_sysconf),
     E("fopen", klb_fopen), E("access", klb_access),
@@ -2062,6 +2084,9 @@ static const kl_entry g_shim[] = {
     // the GENERATED table until 2026-08-08, where the next `gen_libc_table.py`
     // run would have silently turned them back into direct forwards.
     E("clock_gettime", klb_clock_gettime), E("clock_getres", klb_clock_getres),
+    E("clock_nanosleep", klb_clock_nanosleep),
+    E("compress", compress), E("fesetround", fesetround),
+    E("timezone", &timezone),
     E("gettimeofday", klb_gettimeofday),
 
     // ---- kl_libc_slink.c: the surface Steam Link adds ----
@@ -2109,6 +2134,7 @@ static const kl_entry g_shim[] = {
     E("getcwd", klb_getcwd),
     E("realpath", klb_realpath),
     E("__sched_cpucount", klb___sched_cpucount),
+    E("__sched_cpualloc", klb___sched_cpualloc), E("__sched_cpufree", klb___sched_cpufree),
     E("__libc_current_sigrtmin", klb___libc_current_sigrtmin),
     E("__libc_current_sigrtmax", klb___libc_current_sigrtmax),
     E("sincosf", klb_sincosf), E("sincos", klb_sincos),
@@ -2157,10 +2183,12 @@ static const kl_entry g_shim[] = {
     // Darwin's stat — same struct divergence as `stat` itself.
     E("stat64", klb_stat), E("lstat64", klb_lstat), E("fstat64", klb_fstat),
 
-    // setjmp/longjmp forward directly: bionic's jmp_buf (256B) is LARGER than
-    // Darwin's (192B), so the guest's buffer is safe, and registering the host
-    // function itself avoids interposing a stack frame that longjmp would destroy.
-    E("setjmp", setjmp), E("longjmp", longjmp),
+    // Preserve Bionic's thread-local mask restoration. Darwin's ordinary
+    // longjmp restores a process-wide mask; the assembly save entries retain
+    // the caller's register context while the C restore uses pthread_sigmask.
+    E("setjmp", klb_setjmp), E("_setjmp", klb__setjmp),
+    E("sigsetjmp", klb_sigsetjmp), E("longjmp", klb_longjmp),
+    E("_longjmp", klb_longjmp), E("siglongjmp", klb_longjmp),
 
     // pthread / sem (bionic layouts)
     E("pthread_mutex_init", klb_pthread_mutex_init),
@@ -2391,5 +2419,8 @@ void *kl_shim_lookup(const char *name) {
     // `ovrp_` must not be claimed here.
     if (!strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5))
         return kl_ovrplat_sym(name);
+    // Robo Recall links OVRPlugin directly; use the same resolver as dlsym.
+    if (!strncmp(name, "ovrp_", 5))
+        return kl_ovrp_sym(name);
     return NULL;
 }

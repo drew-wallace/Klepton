@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <libkern/OSCacheControl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <mach/mach.h>
 // vm_*, not mach_vm_*: <mach/mach_vm.h> is `#error unsupported` on both the
 // xrOS and xrsimulator SDKs, while <mach/vm_map.h> exists on all three and the
@@ -25,6 +26,8 @@
 #include "klepton.h"
 #include "kl_x18.h"
 #include "kl_guestpatch.h"
+#include "kl_steam.h"
+#include "kl_env.h"
 
 
 // ---------- ELF64 subset ----------
@@ -46,6 +49,7 @@ typedef struct { uint32_t sh_name, sh_type; uint64_t sh_flags, sh_addr, sh_offse
 #define SHT_NOBITS 8
 #define PT_LOAD 1
 #define PT_DYNAMIC 2
+#define PT_TLS 7
 #define PT_GNU_RELRO 0x6474e552
 #define PF_X 1
 #define PF_W 2
@@ -87,6 +91,7 @@ typedef struct { uint32_t sh_name, sh_type; uint64_t sh_flags, sh_addr, sh_offse
 #define R_AARCH64_GLOB_DAT  1025
 #define R_AARCH64_JUMP_SLOT 1026
 #define R_AARCH64_RELATIVE  1027
+#define R_AARCH64_TLSDESC   1031
 #define STB_WEAK 2
 
 struct kl_image {
@@ -114,7 +119,53 @@ struct kl_image {
     unsigned    weak_n, weak_cap;
     void       *dl_handle;     // set when the image arrived as a translated
                                // Mach-O dylib; then dyld owns the mapping
+    const uint8_t *tls_template;
+    size_t tls_filesz, tls_memsz, tls_align;
+    pthread_key_t tls_key;
+    int tls_key_ready;
+    struct kl_tlsdesc_arg *tls_descriptors;
 };
+
+typedef struct kl_tlsdesc_arg {
+    struct kl_tlsdesc_arg *next;
+    kl_image *image;
+    uint64_t offset;
+} kl_tlsdesc_arg;
+
+extern ptrdiff_t kl_tlsdesc_entry(void *descriptor);
+
+// Called only through kl_tlsdesc_entry, which saves the complete register set
+// mandated by the AArch64 TLSDESC ABI. The guest adds the returned offset to
+// TPIDR_EL0; Klepton rewrites that read to Darwin's TPIDRRO_EL0.
+ptrdiff_t kl_tlsdesc_resolve(const uint64_t *descriptor) {
+    kl_tlsdesc_arg *arg = (kl_tlsdesc_arg *)(uintptr_t)descriptor[1];
+    kl_image *img = arg->image;
+    uint8_t *block = pthread_getspecific(img->tls_key);
+    if (!block) {
+        size_t align = img->tls_align < sizeof(void *) ? sizeof(void *) : img->tls_align;
+        if (posix_memalign((void **)&block, align, img->tls_memsz) != 0) abort();
+        memset(block, 0, img->tls_memsz);
+        memcpy(block, img->tls_template, img->tls_filesz);
+        if (pthread_setspecific(img->tls_key, block) != 0) abort();
+    }
+    uintptr_t tp;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(tp));
+    return (ptrdiff_t)((uintptr_t)block + arg->offset - tp);
+}
+
+static int setup_tls(kl_image *img, const Elf64_Phdr *ph, int nph, uint64_t lo) {
+    for (int i = 0; i < nph; i++) {
+        if (ph[i].p_type != PT_TLS) continue;
+        if (ph[i].p_filesz > ph[i].p_memsz) return -1;
+        img->tls_template = img->base + ph[i].p_vaddr - lo;
+        img->tls_filesz = (size_t)ph[i].p_filesz;
+        img->tls_memsz = (size_t)ph[i].p_memsz;
+        img->tls_align = (size_t)ph[i].p_align;
+        if (img->tls_align && (img->tls_align & (img->tls_align - 1))) return -1;
+        return 0;
+    }
+    return 0;
+}
 
 static void record_missing(kl_image *img, const char *nm) {
     if (!nm) return;
@@ -286,13 +337,17 @@ static void *unresolved_stub(const char *nm) {
     return kl_named_stub(nm, (void *)kl_unresolved_named);
 }
 
-static char g_err[512];
+// dyld errors include every fallback path it tried. 512 bytes cut off the
+// useful suffix (usually the actual platform/signature reason), leaving only
+// "tried: /private/var/..." in the simulator boot log.
+static char g_err[4096];
 static void err(const char *fmt, ...) {
     va_list a; va_start(a, fmt); vsnprintf(g_err, sizeof g_err, fmt, a); va_end(a);
 }
 const char *kl_error(void) { return g_err; }
 void  *kl_base(kl_image *i) { return i->base; }
 size_t kl_span(kl_image *i) { return i->span; }
+const char *kl_image_path(const kl_image *i) { return i ? i->path : NULL; }
 const kl_stats *kl_get_stats(kl_image *i) { return &i->stats; }
 
 // The mapped phdr array. Every guest lib here has a first PT_LOAD covering file
@@ -345,7 +400,7 @@ static void rewrite_tls(uint8_t *p, size_t n, uint64_t va, const char *path,
     size_t words = n / 4;
     for (size_t i = 0; i < words; i++) {
         if ((w[i] & 0xffffffe0u) == 0xd53bd040u) {
-            if (kl_x18_is_data(w, n, i)) {
+            if (kl_x18_tls_is_data(w, n, i)) {
                 st->tls_refused++;
                 fprintf(stderr, "  [klepton] %s: TLS site at +0x%llx left alone — its "
                                 "neighbourhood reads as data. If it IS code, "
@@ -440,6 +495,34 @@ static int apply_relocs(kl_image *img, const Elf64_Rela *r, size_t count) {
             if (type == R_AARCH64_ABS64) img->stats.abs64++;
             else if (type == R_AARCH64_GLOB_DAT) img->stats.glob_dat++;
             else img->stats.jump_slot++;
+            break;
+        }
+        case R_AARCH64_TLSDESC: {
+            if (!img->tls_template || !img->tls_memsz ||
+                (sidx && img->symtab[sidx].st_shndx == 0)) {
+                err("unsupported external or absent TLS module at %#llx",
+                    (unsigned long long)r->r_offset);
+                return -1;
+            }
+            uint64_t off = (uint64_t)r->r_addend +
+                           (sidx ? img->symtab[sidx].st_value : 0);
+            if (off >= img->tls_memsz) {
+                err("TLS offset %#llx beyond module size %#zx",
+                    (unsigned long long)off, img->tls_memsz);
+                return -1;
+            }
+            if (!img->tls_key_ready) {
+                if (pthread_key_create(&img->tls_key, free) != 0) return -1;
+                img->tls_key_ready = 1;
+            }
+            kl_tlsdesc_arg *arg = calloc(1, sizeof *arg);
+            if (!arg) return -1;
+            arg->image = img;
+            arg->offset = off;
+            arg->next = img->tls_descriptors;
+            img->tls_descriptors = arg;
+            slot[0] = (uint64_t)(uintptr_t)kl_tlsdesc_entry;
+            slot[1] = (uint64_t)(uintptr_t)arg;
             break;
         }
         default:
@@ -636,7 +719,8 @@ kl_image *kl_load_dylib(const char *path) {
                             free(img); dlclose(h); return NULL; }
     img->span = (size_t)(hi - lo);
 
-    if (bind_dynamic(img, ph, eh->e_phnum, lo) != 0) { free(img); dlclose(h); return NULL; }
+    if (setup_tls(img, ph, eh->e_phnum, lo) != 0 ||
+        bind_dynamic(img, ph, eh->e_phnum, lo) != 0) { free(img); dlclose(h); return NULL; }
 
     // The TLS rewrite and the x18 veneers were applied offline, so there is
     // nothing left in this image to count — which is precisely why klepton-ld
@@ -995,7 +1079,8 @@ kl_image *kl_load(const char *path) {
 
     kl_image *img = calloc(1, sizeof *img);
     img->span = (size_t)(hi - lo);
-    snprintf(img->path, sizeof img->path, "%s", path);
+    char resolved[PATH_MAX];
+    snprintf(img->path, sizeof img->path, "%s", realpath(path, resolved) ? resolved : path);
 
     // Section headers are read here rather than at the rewrite passes below
     // because the placement decision needs them too: rule 1 asks which pages
@@ -1063,7 +1148,8 @@ kl_image *kl_load(const char *path) {
 
     // ---- PT_DYNAMIC, then relocate ----
     // Every relocation target is in the RW segment; __TEXT is never written.
-    if (bind_dynamic(img, ph, eh->e_phnum, lo) != 0) {
+    if (setup_tls(img, ph, eh->e_phnum, lo) != 0 ||
+        bind_dynamic(img, ph, eh->e_phnum, lo) != 0) {
         munmap(file, sb.st_size); return NULL;
     }
 
@@ -1197,8 +1283,19 @@ kl_image *kl_load(const char *path) {
 }
 
 void kl_run_init(kl_image *img) {
-    for (size_t i = 0; i < img->init_count; i++)
-        if (img->init_array[i]) img->init_array[i]();
+    int trace = kl_env_on("KL_TRACE_SIGMASK", 0);
+    for (size_t i = 0; i < img->init_count; i++) {
+        if (!img->init_array[i]) continue;
+        sigset_t before = 0, after = 0;
+        if (trace) pthread_sigmask(SIG_SETMASK, NULL, &before);
+        img->init_array[i]();
+        if (trace) {
+            pthread_sigmask(SIG_SETMASK, NULL, &after);
+            if (before != after)
+                fprintf(stderr, "  [sigmask] constructor image=%s index=%zu thread=%p before=%#x after=%#x\n",
+                    img->path, i, (void *)pthread_self(), before, after);
+        }
+    }
 }
 
 void *kl_sym(kl_image *img, const char *name) {
@@ -1229,14 +1326,32 @@ void *kl_sym(kl_image *img, const char *name) {
         if (s->st_shndx == 0 || !s->st_name) continue;
         const char *nm = img->strtab + s->st_name;
         if (nm < lo_p || nm >= hi_p) continue;               // not a real name
-        if (strcmp(nm, name) == 0)
-            return img->base + s->st_value;
+        if (strcmp(nm, name) == 0) {
+            void *real = img->base + s->st_value;
+            // Steamworks exports are often resolved from the translated image
+            // itself (rather than through klb_dlsym), so the dlsym-only seam in
+            // kl_dl.c misses SteamAPI_Init. Apply the same opt-in wrapper to
+            // defined exports before handing the address to relocation or a
+            // managed P/Invoke resolver.
+            void *wrap = kl_steam_interpose(name, real);
+            return wrap ? wrap : real;
+        }
     }
     return NULL;
 }
 
 void kl_unload(kl_image *img) {
     if (!img) return;
+    if (img->tls_key_ready) {
+        free(pthread_getspecific(img->tls_key));
+        pthread_setspecific(img->tls_key, NULL);
+        pthread_key_delete(img->tls_key);
+    }
+    for (kl_tlsdesc_arg *arg = img->tls_descriptors; arg;) {
+        kl_tlsdesc_arg *next = arg->next;
+        free(arg);
+        arg = next;
+    }
     if (img->dl_handle) dlclose(img->dl_handle);   // translated: dyld owns it
     else                munmap(img->base - img->map_off,
                                img->map_size + img->x18_arena_size);

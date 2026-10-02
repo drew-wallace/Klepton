@@ -1409,6 +1409,48 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
                     }
                 }
             }
+            // UE4's HLSLCC emits explicit locations on both sides of each
+            // varying. ESSL 3.00 permits them on vertex inputs and fragment
+            // outputs, but not vertex outputs or fragment inputs. Keep the
+            // valid attribute/output locations and remove only the two
+            // invalid varying qualifiers before ANGLE compiles the source.
+            int varying_locations_removed = 0;
+            if (!g_real_GetShaderiv) g_real_GetShaderiv = (void *)asym("glGetShaderiv");
+            int32_t shader_type = 0;
+            if (g_real_GetShaderiv) g_real_GetShaderiv(shader, 0x8B4F /* GL_SHADER_TYPE */,
+                                                       &shader_type);
+            const char *varying = shader_type == 0x8B31 /* GL_VERTEX_SHADER */ ? "out" :
+                                  shader_type == 0x8B30 /* GL_FRAGMENT_SHADER */ ? "in" : NULL;
+            if (varying) {
+                for (char *p = buf; (p = strstr(p, "INTERFACE_LOCATION(")); ) {
+                    char *end = strchr(p, ')');
+                    if (!end) break;
+                    char *q = end + 1;
+                    while (*q == ' ' || *q == '\t') q++;
+                    size_t vn = strlen(varying);
+                    if (!strncmp(q, varying, vn) && !KLFB_IDENT(q[vn])) {
+                        memmove(p, q, strlen(q) + 1);
+                        varying_locations_removed++;
+                    } else p = end + 1;
+                }
+            }
+            // HLSLCC paired these stages by location, not by identifier:
+            // vertex `var_TEXCOORD0` feeds fragment `in_TEXCOORD0`. Once the
+            // forbidden ESSL 3.00 varying locations are removed, give both
+            // sides the same name so ANGLE can link them by identifier.
+            if (shader_type == 0x8B30 && varying_locations_removed) {
+                for (char *p = buf; (p = strstr(p, "in_")); ) {
+                    if ((p == buf || !KLFB_IDENT(p[-1])) &&
+                        p[3] >= 'A' && p[3] <= 'Z' && strlen(buf) + 1 < cap) {
+                        memmove(p + 4, p + 3, strlen(p + 3) + 1);
+                        memcpy(p, "var_", 4);
+                        p += 4;
+                    } else p += 3;
+                }
+            }
+            if (varying_locations_removed)
+                fprintf(stderr, "  [glfb] shader %u: removed %d invalid ESSL 3.00 "
+                                "varying locations\n", shader, varying_locations_removed);
             char *rewritten = klfb_rewrite_glsl(buf, cap, shader);
             int stored = 0;
             if (g_fb_nshaders < KLFB_MAX_SHADERS) {
@@ -1419,7 +1461,7 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
                 pthread_mutex_unlock(&g_compile_lock);
                 stored = 1;
             }
-            if (rewritten || dbg_modified) {
+            if (rewritten || dbg_modified || varying_locations_removed) {
                 if (g_real_ShaderSource) {
                     const char *s = buf;
                     g_real_ShaderSource(shader, 1, &s, NULL);
@@ -3180,6 +3222,25 @@ void *kl_glfb_eye_mtl_texture(int eye, int stage, int *out_slice) {
     return g_eye_mtl[eye][stage].tex;
 }
 
+int kl_glfb_alias_eye_mtl_texture(int eye, int stage, int source_eye) {
+    if (eye < 0 || eye > 1 || source_eye < 0 || source_eye > 1 ||
+        eye == source_eye || stage < 0 || stage >= KL_MTL_MAX_STAGES)
+        return 0;
+    if (!g_eye_mtl[source_eye][stage].tex) return 0;
+    // One GL name can refer to only one EGLImage. The DoubleWide guest renders
+    // both eye viewports into that one image; the second compositor view must
+    // sample the same slice, without taking ownership of the GL name or image.
+    if (g_eye_mtl[eye][stage].image || g_eye_mtl[eye][stage].gl_tex)
+        kl_glfb_release_eye_texture(eye, stage);
+    g_eye_mtl[eye][stage] = g_eye_mtl[source_eye][stage];
+    g_eye_mtl[eye][stage].image = NULL;
+    g_eye_mtl[eye][stage].gl_tex = 0;
+    fprintf(stderr, "  [glfb] eye=%d stage=%d aliases eye=%d Metal slice %d "
+                    "(DoubleWide GL texture %u)\n", eye, stage, source_eye,
+            g_eye_mtl[eye][stage].slice, g_eye_mtl[source_eye][stage].gl_tex);
+    return 1;
+}
+
 // The Vulkan path's way into the same table — see kl_glfb.h. There is no
 // EGLImage and no GL name on that path, so those two fields stay zero and
 // kl_glfb_release_eye_texture has nothing of its own to drop; the VkImage is
@@ -3241,7 +3302,13 @@ void kl_glfb_release_eye_texture(int eye, int stage) {
     }
     uint32_t gl_tex = g_eye_mtl[eye][stage].gl_tex;
     void    *img    = g_eye_mtl[eye][stage].image;
-    if (!gl_tex && !img) return;                 // never bound, or already gone
+    if (!gl_tex && !img) {
+        // A DoubleWide view is a non-owning alias of the other eye's image.
+        // It still needs clearing when the swapchain is torn down.
+        if (g_eye_mtl[eye][stage].tex)
+            g_eye_mtl[eye][stage] = (typeof(g_eye_mtl[0][0])){0};
+        return;
+    }
 
     // Unbind the map first. The registry RETAINS the texture it is keyed on, so
     // a binding left behind here outlives the storage it describes — and worse,
@@ -3265,6 +3332,10 @@ void kl_glfb_release_eye_texture(int eye, int stage) {
         klfb_vram_forget(KLC_TEX, gl_tex);
         klfb_census_killed(KLC_TEX, 1);
     }
+    int other = eye ^ 1;
+    if (g_eye_mtl[other][stage].tex == g_eye_mtl[eye][stage].tex &&
+        !g_eye_mtl[other][stage].image && !g_eye_mtl[other][stage].gl_tex)
+        g_eye_mtl[other][stage] = (typeof(g_eye_mtl[0][0])){0};
     g_eye_mtl[eye][stage] = (typeof(g_eye_mtl[0][0])){0};
     fprintf(stderr, "  [glfb] eye=%d stage=%d released (GL texture %u, image %p)\n",
             eye, stage, gl_tex, img);

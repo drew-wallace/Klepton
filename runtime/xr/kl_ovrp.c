@@ -5424,7 +5424,12 @@ static uint64_t klovrp_CalculateLayerDesc(int shape, int layout,
     out->sample_count = sample_count;
     out->format       = format;
     out->layer_flags  = layer_flags;
-    fprintf(stderr, "  [ovrp] CalculateLayerDesc: shape=%d layout=%d %dx%d "
+    // UE4 calculates its splash descriptors every tick. Unbounded logging here
+    // produced over 100,000 lines in one device run (and a disk-write resource
+    // report). Keep startup samples; the explicit full trace still sees all.
+    static unsigned logged;
+    if (logged++ < 16 || kl_env_on("KL_OVRP_LAYER_TRACE", 0))
+        fprintf(stderr, "  [ovrp] CalculateLayerDesc: shape=%d layout=%d %dx%d "
                     "mips=%d samples=%d fmt=%d flags=%#x\n",
             shape, layout, sz.w, sz.h, out->mip_levels, sample_count,
             format, (unsigned)layer_flags);
@@ -5898,8 +5903,8 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
             if (l->desc.layout == KLOVRP_LAYOUT_DOUBLEWIDE) {
                 l->tex[stage][1] = name;
                 kl_glfb_note_eye_texture(1, stage, name);
-                if (kl_glfb_has_mtl_provider())
-                    kl_glfb_bind_eye_mtl_texture(1, stage, name, w, h, glfmt);
+                if (mtl_backed)
+                    kl_glfb_alias_eye_mtl_texture(1, stage, 0);
             }
         }
         if (!mtl_backed && gl_BindTexture && gl_TexStorage2D) {
@@ -5923,13 +5928,8 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
     if (canon != eye) {
         l->tex[stage][eye] = *slot;
         kl_glfb_note_eye_texture(eye, stage, *slot);
-        if (kl_glfb_has_mtl_provider()) {
-            const char *fn = NULL;
-            uint32_t gf = klovrp_gl_format(l->desc.format, &fn);
-            if (!gf) gf = KL_OVRP_TEXFMT_EYE;
-            kl_glfb_bind_eye_mtl_texture(eye, stage, *slot,
-                l->desc.texture_size.w, l->desc.texture_size.h, gf);
-        }
+        if (kl_glfb_has_mtl_provider())
+            kl_glfb_alias_eye_mtl_texture(eye, stage, canon);
         fprintf(stderr, "  [ovrp] GetLayerTexture2: DoubleWide eye %d stage %d shares "
                         "wide texture %u with eye 0\n", eye, stage, *slot);
     }

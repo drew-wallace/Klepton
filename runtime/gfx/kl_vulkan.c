@@ -19,6 +19,9 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#if __has_include(<TargetConditionals.h>)
+#include <TargetConditionals.h>
+#endif
 
 #include "kl_vulkan.h"
 #include "kl_env.h"
@@ -57,6 +60,8 @@ void *kl_vulkan_lookup(const char *n) { (void)n; return NULL; }
 int   kl_vulkan_available(void) { return 0; }
 void  kl_vulkan_stats(unsigned *p, unsigned *c) { if (p) *p = 0; if (c) *c = 0; }
 int   kl_vulkan_guest_active(void) { return 0; }
+int   kl_vulkan_display_luid(uint8_t out[8]) { (void)out; return 0; }
+void  kl_vulkan_capture_layers(void) {}
 unsigned long long kl_vulkan_eye_image(int s, int e, unsigned w, unsigned h, int srgb) {
     (void)s; (void)e; (void)w; (void)h; (void)srgb; return 0;
 }
@@ -266,6 +271,7 @@ typedef struct {
 typedef struct {
     VkDevice          dev;
     VkPhysicalDevice  phys;
+    int               native_base_vertex; // -1 unknown, 0 unsupported, 1 supported
     uint32_t          queue_family;
     VkQueue           queue;          // for the acquire signal + the capture submit
     PFN_vkGetDeviceQueue              GetDeviceQueue;
@@ -629,6 +635,19 @@ static VkResult klvk_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInf
     if (!d) return VK_ERROR_OUT_OF_HOST_MEMORY;
     d->dev = *out;
     d->phys = phys;
+    // MoltenVK's append-only feature ABI permits requesting this three-word
+    // prefix. VK_INCOMPLETE means a different total size, not invalid fields.
+    struct { uint32_t msl_version, indirect_drawing, base_vertex; } metal = {0};
+    typedef VkResult (*metal_features_fn)(VkPhysicalDevice, void *, size_t *);
+    metal_features_fn features = (metal_features_fn)mvk_sym("vkGetPhysicalDeviceMetalFeaturesMVK");
+    size_t metal_size = sizeof metal;
+    d->native_base_vertex = -1;
+    if (features) {
+        VkResult feature_result = features(phys, &metal, &metal_size);
+        if ((feature_result == VK_SUCCESS || feature_result == VK_INCOMPLETE) && metal_size >= sizeof metal)
+            d->native_base_vertex = !!metal.base_vertex;
+    }
+    VKI("native base vertex support=%d\n", d->native_base_vertex);
     d->queue_family = ci && ci->queueCreateInfoCount ? ci->pQueueCreateInfos[0].queueFamilyIndex : 0;
     dev_resolve(d);
     // A queue of our own, for the acquire signal and the capture submit. Taken
@@ -1806,16 +1825,40 @@ static void *klvk_overlay_mtl_texture(VkImage img) {
 // Image dimensions/format come from a side table filled by klvk_CreateImage —
 // the registry alone holds bare handles.
 #define KLVK_IMG_INFO_MAX 4096
-static struct { VkImage img; VkFormat fmt; uint32_t w, h; } g_img_info[KLVK_IMG_INFO_MAX];
+static struct {
+    VkImage img;
+    VkFormat fmt;
+    uint32_t w, h, layers;
+    VkImageUsageFlags usage;
+} g_img_info[KLVK_IMG_INFO_MAX];
 static pthread_mutex_t g_img_info_lock = PTHREAD_MUTEX_INITIALIZER;
-static void klvk_img_info_add(VkImage img, VkFormat fmt, uint32_t w, uint32_t h) {
+static void klvk_img_info_add(VkImage img, VkFormat fmt, uint32_t w, uint32_t h,
+                              uint32_t layers, VkImageUsageFlags usage) {
     pthread_mutex_lock(&g_img_info_lock);
     for (int i = 0; i < KLVK_IMG_INFO_MAX; i++)
         if (!g_img_info[i].img || g_img_info[i].img == img) {
             g_img_info[i].img = img; g_img_info[i].fmt = fmt;
-            g_img_info[i].w = w; g_img_info[i].h = h; break;
+            g_img_info[i].w = w; g_img_info[i].h = h;
+            g_img_info[i].layers = layers; g_img_info[i].usage = usage;
+            break;
         }
     pthread_mutex_unlock(&g_img_info_lock);
+}
+static int klvk_img_desc(VkImage img, VkFormat *fmt, uint32_t *w, uint32_t *h,
+                         uint32_t *layers, VkImageUsageFlags *usage) {
+    int ok = 0;
+    pthread_mutex_lock(&g_img_info_lock);
+    for (int i = 0; i < KLVK_IMG_INFO_MAX; i++)
+        if (g_img_info[i].img == img) {
+            if (fmt) *fmt = g_img_info[i].fmt;
+            if (w) *w = g_img_info[i].w;
+            if (h) *h = g_img_info[i].h;
+            if (layers) *layers = g_img_info[i].layers;
+            if (usage) *usage = g_img_info[i].usage;
+            ok = 1; break;
+        }
+    pthread_mutex_unlock(&g_img_info_lock);
+    return ok;
 }
 static int klvk_img_info_get(VkImage img, VkFormat *fmt, uint32_t *w, uint32_t *h) {
     int ok = 0;
@@ -2927,7 +2970,8 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     }
     if (r == VK_SUCCESS && out) klvk_img_reg_add(*out);
     if (r == VK_SUCCESS && out && ci)
-        klvk_img_info_add(*out, ci->format, ci->extent.width, ci->extent.height);
+        klvk_img_info_add(*out, ci->format, ci->extent.width, ci->extent.height,
+                          ci->arrayLayers, ci->usage);
     if (r == VK_SUCCESS && out && *out && did_astc_sub) klvk_astc_sub_add(*out);
     if (klvk_trace() && ci && (ci->extent.width >= 480 || ci->extent.height >= 480)
         && (ci->usage & 0x30u))   // colour or depth attachment == a render target
@@ -3087,7 +3131,78 @@ static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
     if (ci && klvk_is_astc(ci->format) && kl_env_on("KL_VK_ASTC_RGBA8", 0)) {
         ivmod = *ci; ivmod.format = VK_FORMAT_R8G8B8A8_UNORM; ci = &ivmod;
     }
+
+    // Unity's shadow-mask shader declares unity_ShadowMasks as a 2D array. On
+    // the simulator, Unity sometimes asks Vulkan for a small R8 2D view of
+    // the same sampled image, which makes the subsequent material assignment
+    // fail with "2D texture to 2DArray". Promote the sampled shadow/lightmap
+    // views to an array view. A one-layer 2D_ARRAY is valid for a one-layer
+    // image and preserves the underlying pixels; attachment images are left
+    // alone because their view type is part of framebuffer compatibility.
+    static int shadow_array = -1;
+    if (shadow_array < 0) {
+        const char *target = kl_driver_target_name();
+        shadow_array = kl_env_on("KL_VK_SHADOWMASK_ARRAY",
+                                target && !strcmp(target, "walkabout-57013"));
+    }
+    VkImageViewCreateInfo shadow_iv;
+    VkFormat shadow_fmt = VK_FORMAT_UNDEFINED;
+    uint32_t shadow_w = 0, shadow_h = 0, shadow_layers = 0;
+    VkImageUsageFlags shadow_usage = 0;
+    int shadow_desc = ci && ci->image &&
+        klvk_img_desc(ci->image, &shadow_fmt, &shadow_w, &shadow_h,
+                      &shadow_layers, &shadow_usage);
+    int shadow_r8 = ci && ci->format == VK_FORMAT_R8_UNORM &&
+        ((!shadow_desc) || (shadow_w >= 128 && shadow_h >= 128 &&
+          shadow_w <= 512 && shadow_h <= 512));
+    int shadow_candidate = shadow_array && ci && ci->image &&
+        ci->viewType == VK_IMAGE_VIEW_TYPE_2D && shadow_r8 &&
+        ((!shadow_desc) || ((shadow_usage & VK_IMAGE_USAGE_SAMPLED_BIT) &&
+          !(shadow_usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))));
+    if (shadow_candidate) {
+        shadow_iv = *ci;
+        shadow_iv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        VkResult sr = real(dev, &shadow_iv, alloc, out);
+        if (sr == VK_SUCCESS) {
+            static unsigned promoted;
+            if (promoted < 32) {
+                promoted++;
+                VKI("vkCreateImageView: promoted sampled format %d %ux%u 2D view "
+                    "to 2D_ARRAY (layers %u, image %#llx)\n",
+                    (int)ci->format, shadow_w, shadow_h, shadow_layers,
+                    (unsigned long long)(uintptr_t)ci->image);
+            }
+            if (out) klvk_view_map_add(*out, ci->image);
+            return sr;
+        }
+        static unsigned failed;
+        if (failed < 8) {
+            failed++;
+            VKI("vkCreateImageView: sampled shadow 2D->2D_ARRAY promotion "
+                "failed (%d) for %ux%u; using original view\n",
+                (int)sr, shadow_w, shadow_h);
+        }
+    }
     VkResult klvk_ivr = real(dev, ci, alloc, out);
+    // The xrOS simulator's MoltenVK device can expose two-layer images but
+    // rejects a 2D-array attachment view with VK_ERROR_FEATURE_NOT_PRESENT.
+    // Unity treats that as a missing framebuffer image and later dereferences
+    // the null view on its render worker. Keep the render path alive by
+    // supplying a valid single-slice view of layer 0; the compositor still
+    // owns the stereo presentation and this fallback is only used when the
+    // device explicitly rejects the layered view.
+    if (klvk_ivr == VK_ERROR_FEATURE_NOT_PRESENT && ci && out &&
+        ci->viewType == VK_IMAGE_VIEW_TYPE_2D_ARRAY &&
+        ci->subresourceRange.layerCount > 1) {
+        VkImageViewCreateInfo one = *ci;
+        one.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        one.subresourceRange.baseArrayLayer = 0;
+        one.subresourceRange.layerCount = 1;
+        klvk_ivr = real(dev, &one, alloc, out);
+        if (klvk_ivr == VK_SUCCESS)
+            VKI("vkCreateImageView: layered attachment rejected; using layer-0 2D view\n");
+    }
     if (klvk_ivr==VK_SUCCESS && out && ci) klvk_view_map_add(*out, ci->image);
     return klvk_ivr;
 }
@@ -3117,6 +3232,46 @@ static void kl_pipe_report(const char *kind, unsigned n, double dt_ms) {
             "%.1f s in the compiler so far (last %s batch of %u took %.0f ms)\n",
             g_pipe_gfx, g_pipe_comp, tot, (double)g_pipe_ns / 1e9, kind, n, dt_ms);
     }
+}
+
+// MoltenVK on the visionOS simulator cannot issue a Metal indexed draw with a
+// non-zero base vertex. Walkabout uses that core Vulkan feature for batched
+// meshes, so remember the pipeline's vertex strides and emulate the offset at
+// bind time (see klvk_CmdDrawIndexed) when the simulator target is active.
+#define KLVK_PIPE_META_MAX 4096
+#define KLVK_VTX_BINDINGS 16
+typedef struct {
+    VkPipeline pipeline;
+    uint32_t nbind;
+    VkVertexInputBindingDescription bind[KLVK_VTX_BINDINGS];
+} klvk_pipe_meta;
+static klvk_pipe_meta g_pipe_meta[KLVK_PIPE_META_MAX];
+static unsigned g_pipe_meta_n;
+static pthread_mutex_t g_pipe_meta_lock = PTHREAD_MUTEX_INITIALIZER;
+static void klvk_pipe_meta_add(VkPipeline p, const VkPipelineVertexInputStateCreateInfo *vi) {
+    if (!p || !vi) return;
+    pthread_mutex_lock(&g_pipe_meta_lock);
+    if (g_pipe_meta_n < KLVK_PIPE_META_MAX) {
+        klvk_pipe_meta *m = &g_pipe_meta[g_pipe_meta_n++];
+        memset(m, 0, sizeof *m);
+        m->pipeline = p;
+        m->nbind = vi->vertexBindingDescriptionCount < KLVK_VTX_BINDINGS
+                 ? vi->vertexBindingDescriptionCount : KLVK_VTX_BINDINGS;
+        if (m->nbind && vi->pVertexBindingDescriptions)
+            memcpy(m->bind, vi->pVertexBindingDescriptions,
+                   m->nbind * sizeof m->bind[0]);
+    }
+    pthread_mutex_unlock(&g_pipe_meta_lock);
+}
+static int klvk_pipe_meta_get(VkPipeline p, klvk_pipe_meta *out) {
+    int found = 0;
+    pthread_mutex_lock(&g_pipe_meta_lock);
+    for (unsigned i = 0; i < g_pipe_meta_n; i++) if (g_pipe_meta[i].pipeline == p) {
+        if (out) *out = g_pipe_meta[i];
+        found = 1; break;
+    }
+    pthread_mutex_unlock(&g_pipe_meta_lock);
+    return found;
 }
 static VkResult VKAPI_CALL klvk_CreateGraphicsPipelines(VkDevice dev,
         VkPipelineCache cache, uint32_t n, const VkGraphicsPipelineCreateInfo *ci,
@@ -3198,6 +3353,9 @@ static VkResult VKAPI_CALL klvk_CreateGraphicsPipelines(VkDevice dev,
         VKI("CreateGraphicsPipelines: forced primitiveRestartEnable=TRUE on %d "
             "strip pipeline(s) MoltenVK would otherwise reject (invisible "
             "geometry)\n", fixed); } }
+    if (r == VK_SUCCESS && out && use)
+        for (uint32_t i = 0; i < n; i++)
+            klvk_pipe_meta_add(out[i], use[i].pVertexInputState);
     g_pipe_gfx += n;
     kl_pipe_report("gfx", n, kl_pipe_ms() - t0);
     return r;
@@ -4147,20 +4305,72 @@ static VkResult VKAPI_CALL klvk_EnumeratePhysicalDevices(
 // UE4's in-flight command buffers with room to spare; a table miss simply loses
 // the guard for that one buffer, it never forwards a draw we know to be bad.
 #define KLVK_CB_SLOTS 64
-static struct { void *cb; uint64_t idxbuf; } g_cb_idx[KLVK_CB_SLOTS];
+typedef struct {
+    void    *cb;
+    uint64_t idxbuf;
+    uint64_t vbuf[KLVK_VTX_BINDINGS];
+    uint64_t voff[KLVK_VTX_BINDINGS];
+    VkPipeline pipeline;
+} klvk_cb_state;
+static klvk_cb_state g_cb_idx[KLVK_CB_SLOTS];
+static pthread_mutex_t g_cb_idx_lock = PTHREAD_MUTEX_INITIALIZER;
 static void klvk_cb_set_idx(void *cb, uint64_t buf) {
     if (!cb) return;
+    pthread_mutex_lock(&g_cb_idx_lock);
     int freei = -1;
     for (int i = 0; i < KLVK_CB_SLOTS; i++) {
-        if (g_cb_idx[i].cb == cb) { g_cb_idx[i].idxbuf = buf; return; }
+        if (g_cb_idx[i].cb == cb) { g_cb_idx[i].idxbuf = buf; pthread_mutex_unlock(&g_cb_idx_lock); return; }
         if (freei < 0 && !g_cb_idx[i].cb) freei = i;
     }
     if (freei >= 0) { g_cb_idx[freei].cb = cb; g_cb_idx[freei].idxbuf = buf; }
+    pthread_mutex_unlock(&g_cb_idx_lock);
 }
 static uint64_t klvk_cb_get_idx(void *cb) {
+    uint64_t out = 0;
+    pthread_mutex_lock(&g_cb_idx_lock);
     for (int i = 0; i < KLVK_CB_SLOTS; i++)
-        if (g_cb_idx[i].cb == cb) return g_cb_idx[i].idxbuf;
-    return 0;
+        if (g_cb_idx[i].cb == cb) { out = g_cb_idx[i].idxbuf; break; }
+    pthread_mutex_unlock(&g_cb_idx_lock);
+    return out;
+}
+static void klvk_cb_snapshot(void *cb, klvk_cb_state *out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    pthread_mutex_lock(&g_cb_idx_lock);
+    for (int i = 0; i < KLVK_CB_SLOTS; i++)
+        if (g_cb_idx[i].cb == cb) { *out = g_cb_idx[i]; break; }
+    pthread_mutex_unlock(&g_cb_idx_lock);
+}
+static void klvk_cb_reset(void *cb) {
+    pthread_mutex_lock(&g_cb_idx_lock);
+    for (int i = 0; i < KLVK_CB_SLOTS; i++) if (g_cb_idx[i].cb == cb) {
+        void *owner = g_cb_idx[i].cb;
+        memset(&g_cb_idx[i], 0, sizeof g_cb_idx[i]);
+        g_cb_idx[i].cb = owner;
+        break;
+    }
+    pthread_mutex_unlock(&g_cb_idx_lock);
+}
+static void klvk_cb_set_pipeline(void *cb, VkPipeline p) {
+    pthread_mutex_lock(&g_cb_idx_lock);
+    for (int i = 0; i < KLVK_CB_SLOTS; i++) if (g_cb_idx[i].cb == cb) {
+        g_cb_idx[i].pipeline = p; break;
+    }
+    pthread_mutex_unlock(&g_cb_idx_lock);
+}
+static void klvk_cb_set_vertices(void *cb, uint32_t first, uint32_t count,
+                                  const uint64_t *buffers, const uint64_t *offsets) {
+    if (first >= KLVK_VTX_BINDINGS) return;
+    if (count > KLVK_VTX_BINDINGS - first) count = KLVK_VTX_BINDINGS - first;
+    pthread_mutex_lock(&g_cb_idx_lock);
+    for (int j = 0; j < KLVK_CB_SLOTS; j++) if (g_cb_idx[j].cb == cb) {
+        for (uint32_t i = 0; i < count; i++) {
+            g_cb_idx[j].vbuf[first + i] = buffers ? buffers[i] : 0;
+            g_cb_idx[j].voff[first + i] = offsets ? offsets[i] : 0;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_cb_idx_lock);
 }
 // Ask MoltenVK for the MTLBuffer backing a VkBuffer. Returns NULL when the
 // buffer has no memory bound yet (the state that feeds the nil-indexBuffer
@@ -4187,6 +4397,7 @@ static VkResult VKAPI_CALL klvk_BeginCommandBuffer(void *cb, const void *bi) {
     if (!real && real_gdpa) real = (VkResult (*)(void *, const void *))
         real_gdpa(g_devs[0] ? g_devs[0]->dev : NULL, "vkBeginCommandBuffer");
     klvk_cb_set_idx(cb, 0);
+    klvk_cb_reset(cb);
     return real ? real(cb, bi) : VK_ERROR_INITIALIZATION_FAILED;
 }
 static void VKAPI_CALL klvk_CmdBindIndexBuffer(void *cb, uint64_t buffer,
@@ -4251,6 +4462,80 @@ static void VKAPI_CALL klvk_CmdDrawIndexed(void *cb, uint32_t indexCount,
             return;
         }
     }
+    // The xrOS simulator's MoltenVK reports base-vertex unsupported even though
+    // Vulkan guests are allowed to use it. Rebase each per-vertex binding by
+    // vertexOffset*stride and submit a zero-base draw. Per-instance bindings
+    // are left untouched. This preserves the guest's vertex selection without
+    // requiring a shader rewrite or a CPU copy of the index buffer.
+    static int emulate = -1;
+    if (emulate < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        int unsupported = g_devs[0] && g_devs[0]->native_base_vertex == 0;
+#if defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR
+        if (!g_devs[0] || g_devs[0]->native_base_vertex < 0) unsupported = 1;
+#endif
+        // On supported GPUs preserve the original vertexOffset: rebasing
+        // attribute buffers alone changes shader VertexIndex/BaseVertex and
+        // corrupts procedural or vertex-pulling decoration meshes.
+        int def = unsupported && t && strcmp(t, "walkabout-57013") == 0;
+        emulate = kl_env_on("KL_VK_EMULATE_BASE_VERTEX", def);
+    }
+    if (emulate && vertexOffset != 0 && real) {
+        klvk_cb_state st;
+        klvk_pipe_meta pm;
+        klvk_cb_snapshot(cb, &st);
+        if (st.pipeline && klvk_pipe_meta_get(st.pipeline, &pm)) {
+            uint64_t bufs[KLVK_VTX_BINDINGS], offs[KLVK_VTX_BINDINGS];
+            uint32_t n = 0;
+            int ok = 1;
+            for (uint32_t b = 0; b < pm.nbind; b++) {
+                if (pm.bind[b].binding >= KLVK_VTX_BINDINGS ||
+                    pm.bind[b].inputRate != VK_VERTEX_INPUT_RATE_VERTEX ||
+                    !st.vbuf[pm.bind[b].binding]) continue;
+                int64_t delta = (int64_t)vertexOffset * (int64_t)pm.bind[b].stride;
+                int64_t base = (int64_t)st.voff[pm.bind[b].binding];
+                if (delta < 0 && base < -delta) { ok = 0; break; }
+                bufs[n] = st.vbuf[pm.bind[b].binding];
+                offs[n] = (uint64_t)(base + delta);
+                n++;
+            }
+            if (ok && n) {
+                static void (*bind)(void *, uint32_t, uint32_t, const uint64_t *, const uint64_t *);
+                if (!bind && real_gdpa)
+                    bind = (void (*)(void *, uint32_t, uint32_t, const uint64_t *, const uint64_t *))
+                        real_gdpa(g_devs[0] ? g_devs[0]->dev : NULL, "vkCmdBindVertexBuffers");
+                if (bind) {
+                    // The bindings may be sparse. Rebind one at a time so each
+                    // original binding number is preserved.
+                    uint32_t k = 0;
+                    for (uint32_t b = 0; b < pm.nbind; b++) {
+                        if (pm.bind[b].binding >= KLVK_VTX_BINDINGS ||
+                            pm.bind[b].inputRate != VK_VERTEX_INPUT_RATE_VERTEX ||
+                            !st.vbuf[pm.bind[b].binding]) continue;
+                        bind(cb, pm.bind[b].binding, 1, &bufs[k], &offs[k]);
+                        k++;
+                    }
+                    if (kl_env_on("KL_TRACE_VK_DRAWS", 0)) {
+                        static unsigned said;
+                        if (said++ < 32)
+                            VKI("vkCmdDrawIndexed: emulated base vertex %d across %u binding(s)\n",
+                                vertexOffset, n);
+                    }
+                    real(cb, indexCount, instanceCount, firstIndex, 0, firstInstance);
+                    // Restore command-buffer state for subsequent draws.
+                    for (uint32_t b = 0; b < pm.nbind; b++) {
+                        if (pm.bind[b].binding >= KLVK_VTX_BINDINGS ||
+                            pm.bind[b].inputRate != VK_VERTEX_INPUT_RATE_VERTEX ||
+                            !st.vbuf[pm.bind[b].binding]) continue;
+                        uint64_t orig = st.voff[pm.bind[b].binding];
+                        bind(cb, pm.bind[b].binding, 1, &st.vbuf[pm.bind[b].binding], &orig);
+                    }
+                    return;
+                }
+            }
+        }
+    }
     if (real) real(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 static void VKAPI_CALL klvk_CmdBindPipeline(void *cb, uint32_t bindPoint, uint64_t pipeline) {
@@ -4260,6 +4545,8 @@ static void VKAPI_CALL klvk_CmdBindPipeline(void *cb, uint32_t bindPoint, uint64
     if (!pipeline) { static int said; if (said < 8) { said++;
         VKI("vkCmdBindPipeline: NULL pipeline bound (bindPoint %u) — a following "
             "draw will dereference null in MoltenVK\n", bindPoint); } }
+    if (bindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+        klvk_cb_set_pipeline(cb, (VkPipeline)(uintptr_t)pipeline);
     if (real) real(cb, bindPoint, pipeline);
 }
 // Defined in the 2D-mirror block below; used here to record the bind-time GPU copy.
@@ -4304,6 +4591,7 @@ static void VKAPI_CALL klvk_CmdBindVertexBuffers(void *cb, uint32_t first,
                 "using it will dereference null in MoltenVK\n", first + i); }
         break;
     }
+    klvk_cb_set_vertices(cb, first, count, buffers, offsets);
     if (real) real(cb, first, count, buffers, offsets);
 }
 

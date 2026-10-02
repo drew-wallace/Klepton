@@ -191,6 +191,7 @@ extern const klj_binding klj_bind_electra[];
 extern const klj_binding klj_bind_fmod[];
 extern const klj_binding klj_bind_jkxr[];
 extern const klj_binding klj_bind_services[];
+extern const klj_binding klj_bind_photon[];
 extern const klj_binding *const klj_binding_tables[];
 
 
@@ -263,7 +264,7 @@ extern const klj_binding *const klj_binding_tables[];
 
 typedef struct { char *url; char *path; int found, logged; } klj_webdoc;
 typedef struct { void **items; int count; } klj_list;
-typedef struct { int64_t native_ptr; void *classes; int disabled; } klj_proxy;
+typedef struct { int64_t native_ptr; void *classes; int disabled, reflection_helper; } klj_proxy;
 typedef struct { void *looper, *callback; } klj_handler;
 typedef struct { int32_t what, arg1, arg2; void *obj, *target; } klj_message;
 typedef struct {
@@ -302,6 +303,8 @@ void         klj_stream_free(void *p);
 void        *klj_proxy_invoke(void *proxy, const char *iface,
                               const char *name, const char *sig, void *args);
 void        *klj_FromReflectedField(void *env, void *field);
+const char  *klj_photon_reflected_signature(const char *cls, const char *name,
+                                           const char *sig, int is_static);
 int          klj_permission_state(const char *p, const char **why);
 
 // Bindings one family answers on behalf of another family's class.
@@ -322,5 +325,7 @@ unsigned klj_drain_soft_input(void);
 void *klj_box_int(int32_t v);
 void klj_deliver_message(void *message);
 void klj_guest_version(long *code, const char **name);
+void klj_reset_guest_metadata(void);
+void klj_reset_guest_permissions(void);
 
 #endif /* KL_JNI_INT_H */

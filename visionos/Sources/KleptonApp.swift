@@ -1,6 +1,14 @@
 import SwiftUI
 import Foundation
 import CompositorServices
+#if KL_STEAM_GAME_HOST
+@_silgen_name("kl_steam_host_capture_context")
+func captureSteamHostContext()
+@_silgen_name("kl_steam_host_prepare_game")
+func prepareSteamHostGame() -> Int32
+@_silgen_name("kl_steam_host_trace_context")
+func traceSteamHostContext(_ stage: UnsafePointer<CChar>)
+#endif
 
 // The visionOS host app (Swift for the platform layer).
 //
@@ -295,15 +303,42 @@ struct BootView: View {
     // the fallback is inert (no such bookmark) for the runtime-debugging targets.
     @ObservedObject private var files = klActiveFiles() ?? LauncherFiles(bookmarkKey: "none", expected: "")
     private var isLauncher: Bool { klIsLauncher() }
-    // The microphone dial only appears where voice is actually used: Steam Link's
-    // stream and the Xash titles that name a local server. Every other build hides it.
+#if KL_STEAM_GAME_HOST
+    @State private var steamReady = false
+    private var steamOfflineDiagnostics: Bool {
+        klEnvOn("KL_STEAM_OFFLINE", default: false)
+    }
+#endif
+    // Show microphone opt-in for targets with a voice capture path.
     private var showMic: Bool {
-        ["steamlink-vr", "hl1", "cs1"].contains(klTargetName())
+        ["steamlink-vr", "hl1", "cs1", "walkabout-57013"].contains(klTargetName())
     }
 
     var body: some View {
         Group {
+#if KL_STEAM_GAME_HOST
+        if steamOfflineDiagnostics {
+            VStack {
+                Text("Offline Steam diagnostics")
+                    .foregroundStyle(.orange)
+                if showShell { ShellWindow() } else { bootReport }
+            }
+        } else {
+        HStack {
+            SteamLoginProbeView {
+                steamReady = true
+                boot()
+            }
+            Group {
+                if showShell { ShellWindow() } else { bootReport }
+            }
+        }
+        }
+#else
+        Group {
             if showShell { ShellWindow() } else { bootReport }
+        }
+#endif
         }
         .task { await watchPresentation() }
     }
@@ -430,8 +465,7 @@ struct BootView: View {
             // Off unless a person turns it on: it is the one dial that opens a
             // privacy surface and changes the audio session out from under the
             // music, so it never engages on its own. Hidden entirely except on the
-            // targets that actually use voice — Steam Link and the Xash titles that
-            // name a local server — so no other build shows a mic control it can't use.
+            // targets with a voice capture path, including Walkabout.
             if showMic {
                 DisclosureGroup("Microphone") { MicView() }
                     .font(.callout)
@@ -503,6 +537,11 @@ struct BootView: View {
     }
 
     private func boot() {
+#if KL_STEAM_GAME_HOST
+        guard steamReady || steamOfflineDiagnostics else {
+            status = "Sign in to Steam before starting Walkabout."; return
+        }
+#endif
         // Guarded on this side too, not only in kl_app.c. The guest boots
         // once per process — the runtime's JNI tables are process-global, so a
         // second run re-registers every native onto the same table and the
@@ -511,13 +550,29 @@ struct BootView: View {
         // next thing to do with a finished run is press Boot again.
         guard !running, !finished else { return }
         running = true; log = ""
+#if KL_STEAM_GAME_HOST
+        if steamOfflineDiagnostics { captureSteamHostContext() }
+#endif
 
         // Off the main thread: the guest blocks — Unity's Baselib waits on
         // futexes, IL2CPP's GC suspends the world — and a blocked main thread
         // is a watchdog kill on this platform, which would present as a crash
         // with no report rather than as the hang it is.
         Thread.detachNewThread {
+#if KL_STEAM_GAME_HOST
+            let prepared = prepareSteamHostGame()
+            guard prepared == 0 else {
+                DispatchQueue.main.async {
+                    status = "Steam host startup comparison failed: \(prepared)"
+                    running = false; finished = true; succeeded = false
+                }
+                return
+            }
+#endif
             let rc = kl_app_configure(Paths.resources, Paths.container)
+#if KL_STEAM_GAME_HOST
+            "configured".withCString { traceSteamHostContext($0) }
+#endif
             if rc != 0 {
                 // To the SYSTEM log as well as the window, because this is the
                 // one failure that happens before there is a klepton-boot.log to
@@ -561,6 +616,9 @@ struct BootView: View {
             }
             RunLoop.current.add(poll, forMode: .common)
 
+#if KL_STEAM_GAME_HOST
+            "before_boot".withCString { traceSteamHostContext($0) }
+#endif
             var result = kl_app_boot()
 
             // The audio session, and the placement is deliberate on both sides.

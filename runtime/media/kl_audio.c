@@ -122,7 +122,7 @@ static unsigned long    g_silent_buffers;
 // thread: kl_audio_mic_read_i16 hands back exactly what the hardware gave, at
 // kl_audio_mic_rate() / kl_audio_mic_channels().
 static AudioUnit        g_cap_unit;
-static int              g_mic_enabled;    // the KleptonMic toggle
+static _Atomic int      g_mic_enabled;    // the KleptonMic toggle
 static int              g_mic_open;       // a capture unit exists and is running
 static unsigned         g_mic_rate;       // the CLIENT rate the ring holds (== guest rate when the converter took it)
 static unsigned         g_mic_dev_rate;   // the hardware's own capture rate, for the log / fallback
@@ -1274,7 +1274,13 @@ unsigned kl_audio_mic_rate(void)     { return g_mic_rate; }
 unsigned kl_audio_mic_channels(void) { return g_mic_ch; }
 
 int kl_audio_mic_read_i16(int16_t *buf, int frames) {
-    if (!g_mic_open || !g_mic_enabled || !buf || frames <= 0 || !g_mic_ring) return 0;
+    if (!buf || frames <= 0) return 0;
+    // Consumers run off the render thread. Serialize ring access with disable /
+    // close so a live Photon worker cannot read storage being freed by the UI.
+    pthread_mutex_lock(&g_mic_lock);
+    if (!g_mic_open || !g_mic_enabled || !g_mic_ring) {
+        pthread_mutex_unlock(&g_mic_lock); return 0;
+    }
     size_t r = atomic_load_explicit(&g_mic_r, memory_order_relaxed);
     size_t w = atomic_load_explicit(&g_mic_w, memory_order_acquire);
     size_t have = w - r;
@@ -1289,5 +1295,6 @@ int kl_audio_mic_read_i16(int16_t *buf, int frames) {
     }
     atomic_store_explicit(&g_mic_r, r + take, memory_order_release);
     atomic_fetch_add_explicit(&g_mic_frames_read, take, memory_order_relaxed);
+    pthread_mutex_unlock(&g_mic_lock);
     return (int)take;
 }

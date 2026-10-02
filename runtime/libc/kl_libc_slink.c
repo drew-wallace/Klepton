@@ -18,6 +18,7 @@
 // Direct forwards for this target live in the generated table as usual.
 #include <ctype.h>
 #include <errno.h>
+#include "kl_eventfd.h"
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,6 +43,7 @@
 #include <wchar.h>
 #include "klepton.h"
 #include "kl_va.h"
+#include "kl_file.h"
 
 FILE *kl_host_file(void *guest);            // kl_shim.c
 int   kl_open_flags(int linux_flags);       // kl_libc.c
@@ -433,7 +435,7 @@ int klb_openat(int dirfd, const char *path, int flags, int mode) {
     // one of ours. No-op for every other guest (empty index).
     int vfd = kl_obbmap_open(_p, kl_open_flags(flags));
     if (vfd >= 0) { kl_fs_trace_open(_p, flags, vfd); return vfd; }
-    int fd = openat(dirfd, _p, kl_open_flags(flags), (mode_t)mode);
+    int fd = kl_open_mapped(dirfd, _p, flags, mode);
     kl_fs_trace_open(_p, flags, fd);
     return fd;
 }
@@ -750,7 +752,7 @@ __attribute__((constructor)) static void kl_build_ctype(void) {
 // FORTIFY's write, the counterpart to __read_chk above.
 ssize_t klb___write_chk(int fd, const void *buf, size_t n, size_t cap) {
     if (n > cap) chk_fail("__write_chk", n, cap);
-    return write(fd, buf, n);
+    return klb_write(fd, buf, n);
 }
 
 // bionic's atfork registration, which libc++ and the pthread shims funnel
@@ -799,78 +801,7 @@ int   klb_fwide(void *f, int mode)         { return fwide(kl_host_file(f), mode)
 // already handles, because Qt has a fallback for every one of these and taking
 // the fallback is a better outcome than pretending.
 
-// ---- eventfd ----
-//
-// Qt uses it for exactly one thing: waking a blocked event dispatcher from
-// another thread (QEventDispatcherUNIXPrivate's wakeup channel). That is the
-// self-pipe trick with a nicer API, so a self-connected AF_UNIX datagram socket
-// reproduces it faithfully with the property that matters — ONE descriptor,
-// readable as soon as it has been written, closable with plain close().
-//
-// The socketpair alternative needs a side table to find the write end and leaks
-// the partner when the guest closes the fd; this has neither problem.
-//
-// What is NOT reproduced is the 64-bit counter: eventfd accumulates, this
-// queues datagrams. eventfd_read below drains everything pending and sums it,
-// which matches for every use Qt makes of it. A guest using eventfd as a
-// SEMAPHORE (EFD_SEMAPHORE) would see different behaviour — none does, and the
-// flag is refused below rather than ignored.
-#define LX_EFD_SEMAPHORE 1
-#define LX_EFD_CLOEXEC   0x80000
-#define LX_EFD_NONBLOCK  0x800
-
-int klb_eventfd(unsigned int initval, int flags) {
-    if (flags & LX_EFD_SEMAPHORE) {   // see above: we do not implement counting
-        errno = EINVAL;
-        return -1;
-    }
-    int s = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (s < 0) return -1;
-
-    // A name is needed only long enough to bind and connect; the connection
-    // outlives the unlink, so nothing is left in the filesystem.
-    static _Atomic unsigned seq;
-    struct sockaddr_un a = { .sun_family = AF_UNIX };
-    const char *tmp = getenv("TMPDIR"); if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(a.sun_path, sizeof a.sun_path, "%s/kl-efd-%d-%u",
-             tmp, (int)getpid(), atomic_fetch_add(&seq, 1));
-    unlink(a.sun_path);
-    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0
-        || connect(s, (struct sockaddr *)&a, sizeof a) < 0) {
-        int e = errno; unlink(a.sun_path); close(s); errno = e;
-        return -1;
-    }
-    unlink(a.sun_path);
-
-    if (flags & LX_EFD_CLOEXEC)  fcntl(s, F_SETFD, FD_CLOEXEC);
-    if (flags & LX_EFD_NONBLOCK) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
-    for (unsigned i = 0; i < initval; i++) {   // initval is 0 in every real use
-        uint64_t one = 1;
-        if (send(s, &one, sizeof one, 0) < 0) break;
-    }
-    return s;
-}
-
-int klb_eventfd_read(int fd, uint64_t *value) {
-    uint64_t total = 0, v;
-    ssize_t r = recv(fd, &v, sizeof v, 0);       // honours the fd's blocking mode
-    if (r != (ssize_t)sizeof v) return -1;
-    total = v;
-    // Drain the rest without blocking, so one read clears the channel the way a
-    // real eventfd does rather than leaving it spuriously readable.
-    for (;;) {
-        r = recv(fd, &v, sizeof v, MSG_DONTWAIT);
-        if (r != (ssize_t)sizeof v) break;
-        total += v;
-    }
-    if (value) *value = total;
-    return 0;
-}
-
-int klb_eventfd_write(int fd, uint64_t value) {
-    ssize_t w = send(fd, &value, sizeof value, 0);
-    return w == (ssize_t)sizeof value ? 0 : -1;
-}
+// Counting eventfd, including EFD_SEMAPHORE, lives in kl_eventfd.c.
 
 // ---- ppoll ----
 //
@@ -968,7 +899,7 @@ static int kl_fd_hijack_refused(int to) {
 
 int klb_dup2(int from, int to) {
     if (kl_fd_hijack_refused(to)) return to;
-    return dup2(from, to);
+    return kl_eventfd_dup(from, to, 0, 0);
 }
 
 int klb_dup3(int from, int to, int flags) {
@@ -976,8 +907,8 @@ int klb_dup3(int from, int to, int flags) {
     // error rather than a no-op when the two descriptors are equal.
     if (from == to) { errno = EINVAL; return -1; }
     if (kl_fd_hijack_refused(to)) return to;
-    if (dup2(from, to) < 0) return -1;
-    return apply_linux_fd_flags(to, flags);
+    if (flags & ~LX_SOCK_CLOEXEC) { errno = EINVAL; return -1; }
+    return kl_eventfd_dup(from, to, 0, !!(flags & LX_SOCK_CLOEXEC));
 }
 
 // ---- memfd_create ----

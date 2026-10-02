@@ -531,6 +531,28 @@ int kl_x18_is_data(const void *code, size_t size, size_t index) {
     return klx_looks_like_data((const uint32_t *)code, size / 4, index);
 }
 
+// Measured TLS false positives in Valve client 1788652215 and the Steam Frame
+// 0.3.0 recovery client (Android SHA-256 4b1318ea): an OpenSSL
+// attribution string ends immediately before a stack-protected function.
+// Require the complete observed prologue and canary load, rather than lowering
+// the data threshold for arbitrary constants. Shared by AOT and ELF rewriting.
+int kl_x18_tls_is_data(const void *code, size_t size, size_t index) {
+    const uint32_t *w = code;
+    static const uint32_t prologues[][10] = {
+        {0xd10183ff, 0xa9027bfd, 0xa9035ff8, 0xa90457f6,
+         0xa9054ff4, 0x910083fd, 0xd53bd058, 0x900028c9,
+         0xaa0403f3, 0xf9401708},
+        {0xd10183ff, 0xa9027bfd, 0xa9035ff8, 0xa90457f6,
+         0xa9054ff4, 0x910083fd, 0xd53bd058, 0xf0002989,
+         0xaa0403f3, 0xf9401708}
+    };
+    if (index >= 6 && index < size / 4 && size / 4 - index >= 4) {
+        for (unsigned i = 0; i < sizeof prologues / sizeof prologues[0]; i++)
+            if (!memcmp(w + index - 6, prologues[i], sizeof prologues[i])) return 0;
+    }
+    return kl_x18_is_data(code, size, index);
+}
+
 // One survey feeding both the count and the emitter, so a chunk with no real
 // sites still reports its data words. The emitter returns early in that case —
 // correctly, there is nothing to veneer — and counting there alone silently
@@ -619,6 +641,25 @@ static uint32_t reenc_adrp(uint32_t w, uint64_t oldpc, uint64_t newpc, int *ok) 
     *ok = 1;
     uint32_t v = (uint32_t)((uint64_t)d & 0x1fffff);
     return (w & ~((0x7ffffu << 5) | (3u << 29))) | ((v >> 2) << 5) | ((v & 3) << 29);
+}
+
+static uint64_t adr_target(uint32_t w, uint64_t pc) {
+    int64_t imm = (int64_t)((((w >> 5) & 0x7ffff) << 2) | ((w >> 29) & 3));
+    imm = (imm << 43) >> 43;
+    return pc + (uint64_t)imm;
+}
+
+// ADR's target must be formed relative to the veneer at runtime. Materialising
+// its link-time address with movz/movk loses dyld's slide in translated dylibs.
+static uint32_t enc_adrp_to(unsigned t, uint64_t pc, uint64_t target, int *ok) {
+    int64_t d = ((int64_t)(target & ~0xFFFULL) -
+                 (int64_t)(pc & ~0xFFFULL)) >> 12;
+    if (d < -(1LL << 20) || d >= (1LL << 20)) { *ok = 0; return 0; }
+    uint32_t v = (uint32_t)((uint64_t)d & 0x1fffff);
+    return 0x90000000u | ((v & 3u) << 29) | ((v >> 2) << 5) | t;
+}
+static uint32_t enc_add_imm12(unsigned t, unsigned n, unsigned imm) {
+    return 0x91000000u | (imm << 10) | (n << 5) | t;
 }
 
 static uint64_t br_target(uint32_t w, uint64_t pc, unsigned kind) {
@@ -828,7 +869,7 @@ int kl_x18_emit(void *code, size_t size, uint64_t code_va,
             continue;
         }
 
-        if (in.hazard || in.pcrel == KLX_PC_ADR || in.pcrel == KLX_PC_LITERAL ||
+        if (in.hazard || in.pcrel == KLX_PC_LITERAL ||
             out + VEN_MAX_INSN > pool_end) { note_refusal(word); st->refused++; continue; }
 
         unsigned a, b;
@@ -841,7 +882,17 @@ int kl_x18_emit(void *code, size_t size, uint64_t code_va,
         body[k++] = enc_stp(a, b, -16);
         body[k++] = enc_mrs_tpidrro(a);
 
-        if (in.pcrel == KLX_PC_CBZ || in.pcrel == KLX_PC_TBZ) {
+        if (in.pcrel == KLX_PC_ADR) {
+            // ADR reaches only +/-1 MB, but ADRP reaches the whole translated
+            // image. Its PC-relative page plus the original low 12 bits keeps
+            // the target correct after dyld slides this dylib at load time.
+            uint64_t target = adr_target(word, spc);
+            body[k] = enc_adrp_to(b, vpc + k * 4, target, &ok); k++;
+            body[k++] = enc_add_imm12(b, b, (unsigned)(target & 0xFFFu));
+            body[k++] = enc_str(b, a, (unsigned)KLX_TSD_SLOT * 8);
+            body[k++] = enc_ldp(a, b, -16);
+            ok &= enc_b(vpc + k * 4, spc + 4, &body[k]); k++;
+        } else if (in.pcrel == KLX_PC_CBZ || in.pcrel == KLX_PC_TBZ) {
             uint64_t target = br_target(word, spc, in.pcrel);
             body[k++] = enc_ldr(b, a, (unsigned)KLX_TSD_SLOT * 8);
             // Inverted (bit 24 flips cbz<->cbnz and tbz<->tbnz) so the taken

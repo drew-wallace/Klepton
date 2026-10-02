@@ -23,6 +23,12 @@
 #include "kl_glfb.h"      // kl_glfb_release_current — the handoff hands the context on
 #include "kl_x18.h"       // claim the veneers' TSD slot before anything else can
 #include "kl_env.h"
+#if KL_STEAM_GAME_HOST
+extern void kl_steam_host_trace_context(const char *stage);
+#define STEAM_HOST_CONTEXT(stage) kl_steam_host_trace_context(stage)
+#else
+#define STEAM_HOST_CONTEXT(stage) ((void)0)
+#endif
 
 // --- Which guest ------------------------------------------------------------
 //
@@ -395,6 +401,19 @@ int kl_app_configure(const char *resources, const char *container) {
 // unimplemented JNI call aborts by design, a launch from the Home View has no
 // console at all, and the in-window boot report is read back out of this path.
 static int open_log(void) {
+    // A Home View relaunch used to truncate the only evidence of a failed
+    // level load. Keep one previous run, and retire its crash file too so an
+    // old fault is not reported as belonging to the new process.
+    char previous[1200], crash[1200], old_crash[1240];
+    snprintf(previous, sizeof previous, "%s.previous", g_log);
+    rename(g_log, previous);
+    snprintf(crash, sizeof crash, "%s", g_log);
+    char *base = strrchr(crash, '/');
+    if (base) {
+        snprintf(base + 1, sizeof crash - (size_t)(base + 1 - crash), "klepton-crash.log");
+        snprintf(old_crash, sizeof old_crash, "%s.previous", crash);
+        rename(crash, old_crash);
+    }
     if (!kl_env_on("KL_LOG_FILE", 1)) {
         // Same buffering discipline either way. The reason is unchanged — a
         // fully-buffered stream loses the report when the process dies on a
@@ -672,6 +691,7 @@ int kl_app_boot(void) {
 
     if (!*g_libdir) return fail("kl_app_configure was not called");
     if (open_log()) return fail("could not open the log file");
+    STEAM_HOST_CONTEXT("boot_log_open");
 
     // Every thread that runs guest code must seed bionic's stack-guard canary
     // into TSD slot 5 first, and this is the thread the whole boot runs on.
@@ -682,12 +702,15 @@ int kl_app_boot(void) {
     // it on a thread that already has one is free.
     kl_thread_init();
 
+    STEAM_HOST_CONTEXT("boot_thread_init");
+
     heartbeat_start();
     kl_fault_install();
     // Subscribe to the OS's memory-pressure signal before the guest allocates
     // anything. On this platform it is the only warning that arrives ahead of
     // jetsam, and jetsam is a kill with no log line of its own.
     kl_mem_pressure_init();
+    STEAM_HOST_CONTEXT("boot_platform_ready");
     // Strict: an unimplemented *call* is fatal, so the run stops exactly where
     // the surface genuinely ends. Lookups are not — the guest resolves plenty
     // it never calls.
@@ -726,6 +749,7 @@ int kl_app_boot(void) {
     // a Unity guest. It stops before the guest is STARTED, which is what makes
     // "the guest loaded" and "the guest ran" two reports rather than one.
     if (kl_driver_boot(stdout) != 0) return fail(kl_driver_error());
+    STEAM_HOST_CONTEXT("boot_driver_ready");
     if (kl_app_target_is_steamlink()) {
         if (g_door == KL_SLINK_VR) {
             g_vr_loaded = 1;
@@ -789,6 +813,7 @@ static void report_proc(void) {
 }
 
 int kl_app_lifecycle_begin(void) {
+    STEAM_HOST_CONTEXT("lifecycle_entry");
     // Separate from kl_app_boot rather than folded into it, because boot is a
     // gate and refuses a second entry: keeping them apart lets the UI run the
     // gate, read its numbers, and only then go further.
@@ -822,6 +847,7 @@ int kl_app_lifecycle_begin(void) {
     // ALooper_forThread() inside onCreate and hang their callbacks off exactly
     // that looper.
     if (kl_driver_lifecycle_begin(stdout) != 0) return fail(kl_driver_error());
+    STEAM_HOST_CONTEXT("lifecycle_ready");
     return 0;
 }
 

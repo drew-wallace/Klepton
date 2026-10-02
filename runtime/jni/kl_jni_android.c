@@ -58,6 +58,8 @@
  const char *g_assets_dir = "beatsaber/assets";
 void kl_jni_set_assets_dir(const char *dir) {
     g_assets_dir = klj_abspath(dir);
+    klj_reset_guest_metadata();
+    klj_reset_guest_permissions();
     // There are TWO doors onto the same directory and they have to agree:
     // AssetManager.open() over JNI (this file) and AAssetManager_open() in the
     // NDK (kl_ndk.c, its own g_asset_root). Beat Saber only ever uses the first
@@ -1202,7 +1204,13 @@ const char *kl_userdata_dir(const char *guest) {
     // NULL until something asks or something sets it. Resolved lazily because
 // kl_userdata_dir reads the environment, and a static initialiser cannot.
 static const char *g_files_dir;
-void kl_jni_set_files_dir(const char *dir) { g_files_dir = klj_abspath(dir); }
+// Derived paths must follow a new context. The Steam probe runs before game
+// configuration in the same process and can populate the OBB cache first.
+static char g_obb_path[1024];
+void kl_jni_set_files_dir(const char *dir) {
+    g_files_dir = klj_abspath(dir);
+    g_obb_path[0] = 0;
+}
 const char *kl_jni_files_dir(void) {
 // The DEFAULT target's key, not a literal: a driver that never called
     // kl_target_apply_host still gets the guest the rest of this file defaults
@@ -1276,6 +1284,17 @@ static klj_val klj_ClassLoader_findLibrary(void *env, void *self, const klj_val 
     // where kl_load_auto or the serving gateway resolves it, so there is one
     // resolver and not two.
     int found = kl_can_dlopen(path);
+    // A few Unity Android plugins pass a library name that already carries
+    // the `lib` prefix to System.loadLibrary(). Android's normal mapping then
+    // probes `liblibfoo.so` first, but the packaged file is still the usual
+    // `libfoo.so`. Keep the platform mapping as the primary answer and retry
+    // this narrow alias before reporting a missing optional plugin.
+    if (!found && strncmp(name, "lib", 3) == 0 &&
+        len > 3 && !(len >= 3 && strcmp(name + len - 3, ".so") == 0)) {
+        snprintf(path, sizeof path, "%s/%s.so", g_native_lib_dir, name);
+        found = kl_can_dlopen(path);
+        if (found) KLJ_LOG("ClassLoader.findLibrary(\"%s\") -> prefix alias %s", name, path);
+    }
     KLJ_LOG("ClassLoader.findLibrary(\"%s\") -> %s", name, found ? path : "null");
     return (klj_val){.l = found ? kl_jni_new_string(path) : NULL};
 }
@@ -1412,10 +1431,10 @@ static void klj_obb_census(const char *dir) {
 static char g_obb_rel[256];
 void kl_jni_set_obb_rel(const char *rel) {
     snprintf(g_obb_rel, sizeof g_obb_rel, "%s", rel && *rel ? rel : "");
+    g_obb_path[0] = 0;
 }
 const char *kl_jni_obb_dir(void) {
-    static char path[1024];
-    if (!*path) {
+    if (!*g_obb_path) {
         // The active target's own obb field, pushed in by whoever configured
         // the run. Only if nobody did — which does not happen on either the
         // device or host boot paths — fall back to resolving KL_TARGET, and
@@ -1428,11 +1447,11 @@ const char *kl_jni_obb_dir(void) {
             const kl_target *t = kl_target_resolve(NULL);
             rel = t && t->obb && *t->obb ? t->obb : "obb";
         }
-        snprintf(path, sizeof path, "%s/%s", kl_jni_files_dir(), rel);
-        klj_mkdir_p(path);
-        klj_obb_census(path);
+        snprintf(g_obb_path, sizeof g_obb_path, "%s/%s", kl_jni_files_dir(), rel);
+        klj_mkdir_p(g_obb_path);
+        klj_obb_census(g_obb_path);
     }
-    return path;
+    return g_obb_path;
 }
 static const char *klj_obb_dir(void) { return kl_jni_obb_dir(); }
 static klj_val klj_Context_getObbDirs(void *env, void *self, const klj_val *a, int n) {

@@ -71,8 +71,8 @@ struct MicView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Microphone").font(.headline)
-            Text("Let a guest use the headset microphone — for example Steam "
-                 + "Link's voice chat. Off by default. Turning it on asks for "
+            Text("Allow this game to use the headset microphone for voice chat. "
+                 + "Off by default. Turning it on asks for "
                  + "microphone permission and switches audio to play-and-record, "
                  + "which lets the silent switch mute app audio.")
                 .font(.caption).foregroundStyle(.secondary)

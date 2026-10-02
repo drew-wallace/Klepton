@@ -24,6 +24,7 @@
 #include <string.h>
 #include <time.h>
 #include "kl_ovrp.h"
+#include "klepton.h"
 
 static int fails;
 #define CHECK(cond, ...) do { \
@@ -73,7 +74,8 @@ int main(void) {
     get_desc      = kl_ovrp_sym("ovrp_GetControllerHapticsDesc");
     get_state     = kl_ovrp_sym("ovrp_GetControllerHapticsState");
     set_haptics   = kl_ovrp_sym("ovrp_SetControllerHaptics");
-    set_vibration = kl_ovrp_sym("ovrp_SetControllerVibration");
+    // Unreal also binds these at relocation time, without calling dlsym.
+    set_vibration = kl_shim_lookup("ovrp_SetControllerVibration");
     set_pcm       = kl_ovrp_sym("ovrp_SetControllerHapticsPcm");
     get_rate      = kl_ovrp_sym("ovrp_GetControllerSampleRateHz");
     if (!get_desc || !get_state || !set_haptics || !set_vibration

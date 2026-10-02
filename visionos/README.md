@@ -54,6 +54,19 @@ development team`, which reads like a broken project rather than a name already
 spoken for, and it takes the two memory entitlements with it because those need
 an explicit App ID.
 
+The current Personal Team provisions Increased Memory Limit, but Xcode rejects
+Extended Virtual Addressing and Low-Latency Streaming for that team. The project
+generator therefore keeps the increased-memory entitlement and filters the two
+optional keys by default. Use `KLEPTON_EXTENDED_VA=1` and/or
+`KLEPTON_LOW_LATENCY=1` only with a supporting team/profile. The latter applies to
+Foveated Streaming and is not needed for standalone games. The authored plist
+retains all three keys; there is no need to delete capabilities by hand.
+
+On a simulator whose camera starts at floor height, `KL_SIM_HEAD_HEIGHT=1.6`
+lifts the sampled/composited head for testing floor-origin games. It has no
+effect in a headset build. Boot and crash logs retain one prior run in
+`klepton-boot.log.previous` and `klepton-crash.log.previous`.
+
 `KLEPTON_BUNDLE_SCOPE` overrides the `$USER` part (an unset or empty one leaves
 the id unscoped rather than emitting a leading dot); `KLEPTON_BUNDLE_ID`
 overrides the whole id. **Changing the id orphans the container** — the assets,

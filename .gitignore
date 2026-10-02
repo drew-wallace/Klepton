@@ -93,3 +93,8 @@ visionos/*.xcodeproj/
 # Python bytecode from visionos/targets.py, imported by gen_xcodeproj.py
 visionos/__pycache__/
 tools/__pycache__/
+
+# Locally supplied ovrport APK trees
+/4xvr-*/
+/roborecall-*/
+/walkabout-*/

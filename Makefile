@@ -16,7 +16,7 @@ CFLAGS  := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(R
 # VideoToolbox/CoreMedia/CoreVideo are the video decoder (kl_vtdec.c), and they
 # are in the base LDLIBS rather than on one target because kl_vtdec is in
 # RUNTIME_SHIP — everything that links the runtime needs them.
-LDLIBS  := -lz -framework AudioToolbox \
+LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio \
            -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
            -framework CoreFoundation -framework AVFoundation -framework Foundation
 # The host/ship split is a source-list boundary, not a runtime getenv.
@@ -40,13 +40,13 @@ RUNTIME_JNI := runtime/kl_jni.c \
            runtime/jni/kl_jni_looper.c runtime/jni/kl_jni_display.c \
            runtime/jni/kl_jni_bridge.c runtime/jni/kl_jni_window.c \
            runtime/jni/kl_jni_net.c runtime/jni/kl_jni_softinput.c \
-           runtime/jni/kl_jni_services.c runtime/jni/kl_jni_io.c \
+           runtime/jni/kl_jni_services.c runtime/jni/kl_jni_photon.c runtime/jni/kl_jni_io.c \
            runtime/jni/kl_jni_prefs.c runtime/jni/kl_jni_sdl.c \
            runtime/jni/kl_jni_ue4.c runtime/jni/kl_jni_electra.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_jkxr.c
 
-RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_stub_cells.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
+RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_jump.c runtime/kl_jump_entries.S runtime/kl_tlsdesc.S runtime/kl_stub_cells.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
            runtime/libc/kl_va_handlers.c runtime/libc/kl_va_thunks.S \
-           runtime/libc/kl_libc.c runtime/libc/kl_libc_slink.c runtime/libc/kl_pthread.c runtime/kl_dl.c \
+           runtime/libc/kl_libc.c runtime/libc/kl_libc_slink.c runtime/libc/kl_eventfd.c runtime/libc/kl_pthread.c runtime/kl_dl.c runtime/kl_steam.c \
            runtime/guest/kl_ndk.c runtime/kl_x18.c runtime/kl_target.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c \
@@ -92,6 +92,38 @@ build/t_opus: tests/t_opus.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_opus.c $(RUNTIME) $(LDLIBS)
 
+build/t_opensl: tests/t_opensl.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_opensl.c $(RUNTIME) $(LDLIBS)
+
+build/t_photon_audio: tests/t_photon_audio.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_photon_audio.c $(RUNTIME) $(LDLIBS)
+
+build/t_jni_array_args: tests/t_jni_array_args.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_jni_array_args.c $(filter-out runtime/kl_jni.c,$(RUNTIME)) $(LDLIBS)
+
+.PHONY: jniarraycheck
+jniarraycheck: build/t_jni_array_args
+	./build/t_jni_array_args
+
+build/t_vk_base_vertex: tests/t_vk_base_vertex.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_vk_base_vertex.c $(filter-out runtime/gfx/kl_vulkan.c,$(RUNTIME)) $(LDLIBS)
+
+.PHONY: vkvertexcheck
+vkvertexcheck: build/t_vk_base_vertex
+	./build/t_vk_base_vertex 1
+	./build/t_vk_base_vertex 0
+	./build/t_vk_base_vertex -1
+
+.PHONY: openslcheck
+openslcheck: build/t_opensl build/t_photon_audio build/t_jni_array_args
+	./build/t_opensl
+	./build/t_photon_audio
+	./build/t_jni_array_args
+
 test: build/t_opus
 	./build/t_opus $(LIBS)/libunityopus.so
 
@@ -136,6 +168,93 @@ guestswap:
 build/t_load: tests/t_load.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_load.c $(RUNTIME) $(LDLIBS)
+
+build/steam_probe: tools/steam_probe.c tools/steam_probe_callbacks.h tools/steam_service_probe.h tools/steam_probe_login.h tools/steam_probe_session.h tools/steam_probe_mailbox.h tools/steam_probe_game_api.h tools/steam_probe_ticket_gate.h $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tools/steam_probe.c $(RUNTIME) $(LDLIBS)
+
+build/t_steam: tests/t_steam.c runtime/kl_steam.c runtime/kl_steam.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_steam.c runtime/kl_steam.c runtime/kl_env.c
+
+build/t_eventfd: tests/t_eventfd.c runtime/libc/kl_eventfd.c runtime/libc/kl_eventfd.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_eventfd.c runtime/libc/kl_eventfd.c
+
+build/t_steam_ipc: tests/t_steam_ipc.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_steam_ipc.c $(RUNTIME) $(LDLIBS)
+
+build/t_dladdr: tests/t_dladdr.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_dladdr.c $(RUNTIME) $(LDLIBS)
+
+build/t_fadvise: tests/t_fadvise.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_fadvise.c $(RUNTIME) $(LDLIBS)
+
+build/t_tls_classifier: tests/t_tls_classifier.c runtime/kl_x18.c runtime/kl_x18.h runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_tls_classifier.c runtime/kl_x18.c runtime/kl_env.c
+
+build/t_steam_ticket_gate: tests/t_steam_ticket_gate.c tools/steam_probe_ticket_gate.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_steam_ticket_gate.c
+
+build/t_steam_mailbox: tests/t_steam_mailbox.c tools/steam_probe_mailbox.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_steam_mailbox.c -lpthread
+
+.PHONY: steamcheck
+build/t_steam_callbacks: tests/t_steam_callbacks.c tools/steam_probe_callbacks.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_steam_callbacks.c
+
+build/t_steam_init_retry: tests/t_steam_init_retry.c tools/steam_probe_game_api.h tools/steam_probe_callbacks.h tools/steam_probe_ticket_gate.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_steam_init_retry.c -lpthread
+
+build/t_mprobe_gate: tests/t_mprobe_gate.c runtime/diag/kl_mprobe.c runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -Iruntime/diag -o $@ tests/t_mprobe_gate.c runtime/diag/kl_mprobe.c runtime/kl_env.c
+
+build/t_signal_wait: tests/t_signal_wait.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_signal_wait.c $(RUNTIME) $(LDLIBS)
+
+build/t_jump_mask: tests/t_jump_mask.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_jump_mask.c $(RUNTIME) $(LDLIBS)
+
+build/t_asset_handoff: tests/t_asset_handoff.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_asset_handoff.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: assetcheck
+assetcheck: build/t_asset_handoff
+	python3 tests/test_asset_handoff.py ./build/t_asset_handoff
+
+build/t_jni_refcache: tests/t_jni_refcache.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_jni_refcache.c $(RUNTIME) $(LDLIBS)
+
+steamcheck: assetcheck build/t_jni_refcache build/t_jump_mask build/t_signal_wait build/t_mprobe_gate build/t_steam_init_retry build/t_fadvise build/t_steam_callbacks build/t_steam_ticket_gate build/t_steam_mailbox build/t_steam build/t_eventfd build/t_tls_classifier build/t_steam_ipc build/t_dladdr
+	./build/t_jni_refcache
+	./build/t_jump_mask
+	./build/t_signal_wait
+	./build/t_mprobe_gate
+	./build/t_steam_init_retry
+	./build/t_fadvise
+	./build/t_steam_callbacks
+	./build/t_steam_ticket_gate
+	./build/t_steam_mailbox
+	./build/t_steam
+	./build/t_eventfd
+	./build/t_tls_classifier
+	./build/t_steam_ipc
+	./build/t_dladdr
+	python3 -m unittest discover -s tests -p 'test_steam*.py'
+	python3 -m unittest discover -s tests -p 'test_walkabout*.py'
 
 # Which guest the host gates run against. `make check TARGET=superhot` points
 # every one of them at another title's tree — the libraries, the assets and the
@@ -540,7 +659,16 @@ il2cpp: build/t_il2cpp
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_xrinput build/t_softinput build/t_ctr build/t_bcast build/t_fault build/t_glcaps
+build/t_tlsdesc: tests/t_tlsdesc.c tests/t_tlsdesc_probe.S runtime/kl_tlsdesc.S
+	$(CC) $(CFLAGS) -o $@ $^
+
+tlsdesc: build/t_tlsdesc
+	./build/t_tlsdesc
+
+check: steamcheck build/t_opensl build/t_photon_audio build/t_jni_array_args build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_xrinput build/t_softinput build/t_ctr build/t_tlsdesc build/t_bcast build/t_fault build/t_glcaps
+	@./build/t_opensl
+	@./build/t_photon_audio
+	@./build/t_jni_array_args
 	@echo "=== variadic ABI ===" && ./build/t_variadic
 	@echo "=== crash reporter ===" && ./build/t_fault
 	@echo "=== GL limits vs ANGLE ===" && ./build/t_glcaps vendor/out/Debug
@@ -554,6 +682,7 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@head -1 build/softinput.log && tail -1 build/softinput.log
 	@./build/t_ctr > build/ctr.log 2>&1 || { cat build/ctr.log; exit 1; }
 	@head -2 build/ctr.log && tail -1 build/ctr.log
+	@./build/t_tlsdesc
 	@./build/t_bcast > build/bcast.log 2>&1 || { cat build/bcast.log; exit 1; }
 	@head -1 build/bcast.log && tail -1 build/bcast.log
 	@./build/t_haptics > build/haptics.log 2>&1 || { cat build/haptics.log; exit 1; }
@@ -860,11 +989,14 @@ build/Klepton.xcframework: $(XROS_LIBS) $(RUNTIME_ALL_HDRS) build/.xcframework-s
 # way). ANGLE emits ios_framework_bundle on iOS, so the output is already the
 # .framework packaging the app bundle wants.
 .PHONY: angle-ios angle-ios-sim angle-xros
+# The pinned Chromium lld cannot parse Xcode 27's arm64e.x1 SDK stubs.
+# Use Apple's linker, which ships with the selected SDK.
+ANGLE_GN_ARGS ?= use_lld=false
 angle-ios: angle-fetch
 	cd vendor && export PATH="$$PWD/depot_tools:$$PATH" DEPOT_TOOLS_UPDATE=0 && \
 	  gn gen out/ios --args='is_debug=false target_os="ios" target_cpu="arm64" \
 	    target_environment="device" ios_enable_code_signing=false \
-	    angle_enable_vulkan=false angle_enable_swiftshader=false' && \
+	    angle_enable_vulkan=false angle_enable_swiftshader=false $(ANGLE_GN_ARGS)' && \
 	  autoninja -C out/ios libEGL libGLESv2
 
 # The simulator slice. Same trick one platform over: an iOS *simulator* build
@@ -876,7 +1008,7 @@ angle-ios-sim: angle-fetch
 	cd vendor && export PATH="$$PWD/depot_tools:$$PATH" DEPOT_TOOLS_UPDATE=0 && \
 	  gn gen out/ios-sim --args='is_debug=false target_os="ios" target_cpu="arm64" \
 	    target_environment="simulator" ios_enable_code_signing=false \
-	    angle_enable_vulkan=false angle_enable_swiftshader=false' && \
+	    angle_enable_vulkan=false angle_enable_swiftshader=false $(ANGLE_GN_ARGS)' && \
 	  autoninja -C out/ios-sim libEGL libGLESv2
 
 # The retarget itself is a script (tools/angle_retarget.sh) — it rewrites the
@@ -993,7 +1125,7 @@ ovrpabi:
 .PHONY: angle-debug
 angle-debug: angle-fetch
 	cd vendor && export PATH="$$PWD/depot_tools:$$PATH" DEPOT_TOOLS_UPDATE=0 && \
-	  gn gen out/Debug --args='is_debug=true target_cpu="arm64"' && \
+	  gn gen out/Debug --args='is_debug=true target_cpu="arm64" $(ANGLE_GN_ARGS)' && \
 	  autoninja -C out/Debug libEGL libGLESv2
 
 # ---- vendor/ — the ANGLE checkout, which we MODIFY ----
@@ -1035,6 +1167,10 @@ ANGLE_STAMP  := vendor/.klepton-synced
 
 .PHONY: angle-fetch angle-sync angle-save angle-status angle-all
 angle-fetch: $(ANGLE_STAMP)
+	@if [ ! -f vendor/depot_tools/python3_bin_reldir.txt ]; then \
+	  cd vendor && export PATH="$$PWD/depot_tools:$$PATH" DEPOT_TOOLS_UPDATE=0 && \
+	    "$$PWD/depot_tools/ensure_bootstrap"; \
+	fi
 
 # Everything ANGLE, in one command: pull + patch + all three slices. This is
 # the build-it-once target for someone who is not developing ANGLE itself.

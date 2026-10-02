@@ -195,9 +195,9 @@ def defined_symbols(path):
 # Hand-written elsewhere. Keep in sync with the E(...) entries in kl_shim.c.
 SPECIAL = set("""
 __errno environ gettid __system_property_find __system_property_get __system_property_read
-prctl sched_getaffinity sched_setaffinity stat fstat lstat statfs uname sigaction
+prctl sched_getaffinity sched_setaffinity __sched_cpualloc __sched_cpufree stat fstat lstat statfs uname sigaction
 __FD_ISSET_chk __FD_SET_chk __ctype_get_mb_cur_max lseek64 getpwuid getpwuid_r
-opendir readdir closedir setjmp longjmp strtold wcstold strtold_l
+opendir readdir closedir setjmp _setjmp sigsetjmp longjmp _longjmp siglongjmp strtold wcstold strtold_l
 swprintf vprintf vsscanf execl system syscall sysconf fopen access mkdir unlink rename
 dlopen dlsym dlclose dlerror dladdr dl_iterate_phdr
 memrchr memalign
@@ -207,7 +207,7 @@ __memcpy_chk __memset_chk __strcpy_chk __strlen_chk __strchr_chk __vsnprintf_chk
 __stack_chk_fail
 clock_gettime clock_getres gettimeofday
 
-getauxval fegetenv fesetenv feholdexcept feupdateenv statvfs fstatvfs sendfile
+getauxval fegetenv fesetenv feholdexcept feupdateenv statvfs fstatvfs sendfile posix_fadvise
 eventfd eventfd_read eventfd_write ppoll accept4 pipe2 dup3 memfd_create clone
 inotify_init inotify_init1 inotify_add_watch inotify_rm_watch
 __assert2 __FD_CLR_chk __fgets_chk __pthread_cleanup_push __pthread_cleanup_pop
@@ -217,7 +217,7 @@ sincosf sincos putchar getchar fdatasync __cmsg_nxthdr __cxa_thread_atexit_impl
 fileno fgetc ungetc getwc fgetwc ungetwc fputwc putwc fwide
 stat64 lstat64 fstat64
 stdout stderr stdin __register_atfork __gnu_strerror_r __write_chk _ctype_
-dup2 mprotect
+dup dup2 readv writev write mprotect
 vsprintf
 __google_potentially_blocking_region_begin __google_potentially_blocking_region_end
 getrandom isnan

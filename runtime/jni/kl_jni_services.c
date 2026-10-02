@@ -27,9 +27,22 @@
 #include "kl_avdec.h"
 #include "kl_egl.h"
 #include "kl_ndk.h"
+#include "kl_obbmap.h"
 #include "kl_va.h"
 #include <zlib.h>
 #include "kl_jni_int.h"
+
+// These describe the configured asset tree, which can change when the Steam
+// probe hands off to a game. Existing Java objects retain their payloads;
+// subsequent lookups must describe the new tree rather than the probe defaults.
+static long g_cached_version_code = -1;
+static char g_cached_version_name[64], g_cached_package[192];
+static void *g_metadata_bundle;
+void klj_reset_guest_metadata(void) {
+    g_cached_version_code = -1;
+    g_cached_package[0] = 0;
+    g_metadata_bundle = NULL;
+}
 
 // ---- org.fmod.FmodAndroidAudioManager — FMOD's Java device census ----
 //
@@ -656,6 +669,21 @@ static klj_val klj_Locale_toLanguageTag(void *env, void *self, const klj_val *a,
     return (klj_val){.l = kl_jni_new_string(tag)};
 }
 
+// Locale.toString() is the legacy Java spelling used by Unity's startup
+// diagnostics. It uses an underscore-separated language/region pair (for
+// example `en_US`), while toLanguageTag() above uses BCP-47 hyphens. Keep both
+// forms derived from the same host locale so callers cannot observe a split
+// configuration.
+static klj_val klj_Locale_toString(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    char lang[16], country[16], value[40];
+    klj_locale_parts(lang, sizeof lang, country, sizeof country);
+    if (*country) snprintf(value, sizeof value, "%s_%s", lang, country);
+    else          snprintf(value, sizeof value, "%s", lang);
+    KLJ_LOG("Locale.toString() -> %s", value);
+    return (klj_val){.l = kl_jni_new_string(value)};
+}
+
 // null means "this route is not presenting to a secondary display", which is the
 // ordinary case and the one Unity is checking for. Documented as nullable, so this
 // is the API's own answer rather than a stub standing in for one.
@@ -956,8 +984,7 @@ static const klj_kv *klj_manifest_metadata(void) {
 }
 
  klj_val klj_metaData_field(void) {
-    static void *bundle;
-    if (!bundle) {
+    if (!g_metadata_bundle) {
         const klj_kv *kv = klj_manifest_metadata();
         if (!kv) {
             kv = g_metadata;
@@ -965,9 +992,10 @@ static const klj_kv *klj_manifest_metadata(void) {
                     "transcribed <meta-data>, which may not be this guest's",
                     g_assets_dir);
         }
-        bundle = klj_new_object_data("android/os/Bundle", (void *)kv);
+        g_metadata_bundle = klj_new_object_data("android/os/Bundle", (void *)kv);
+        kl_jni_pin_object(g_metadata_bundle);
     }
-    return (klj_val){.l = bundle};
+    return (klj_val){.l = g_metadata_bundle};
 }
 
 // ...and the same table read from C, for a driver that has to stand in for the
@@ -1020,11 +1048,9 @@ static klj_val klj_Bundle_containsKey(void *env, void *self, const klj_val *a, i
 // libraries this run is already pointed at. Falling back to the constants keeps
 // a tree without one working, and says so rather than answering quietly.
 void klj_guest_version(long *code, const char **name) {
-    static long  cached_code = -1;
-    static char  cached_name[64];
-    if (cached_code < 0) {
-        cached_code = 545;                       // 1.28's, the historical default
-        snprintf(cached_name, sizeof cached_name, "1.28.0_4124311467");
+    if (g_cached_version_code < 0) {
+        g_cached_version_code = 545;                       // 1.28's, the historical default
+        snprintf(g_cached_version_name, sizeof g_cached_version_name, "1.28.0_4124311467");
         char path[1024];
         // apktool.yml sits beside assets/, one level up from the assets dir.
         snprintf(path, sizeof path, "%s/../apktool.yml", g_assets_dir);
@@ -1041,17 +1067,17 @@ void klj_guest_version(long *code, const char **name) {
                     snprintf(got_name, sizeof got_name, "%s", buf);
             }
             fclose(f);
-            if (got_code > 0) cached_code = got_code;
-            if (*got_name) snprintf(cached_name, sizeof cached_name, "%s", got_name);
-            KLJ_LOG("guest version %ld / %s (from %s)", cached_code, cached_name, path);
+            if (got_code > 0) g_cached_version_code = got_code;
+            if (*got_name) snprintf(g_cached_version_name, sizeof g_cached_version_name, "%s", got_name);
+            KLJ_LOG("guest version %ld / %s (from %s)", g_cached_version_code, g_cached_version_name, path);
         } else {
             KLJ_LOG("no apktool.yml beside %s — falling back to versionCode %ld / %s. "
                     "A split-binary guest builds its OBB NAME from this number.",
-                    g_assets_dir, cached_code, cached_name);
+                    g_assets_dir, g_cached_version_code, g_cached_version_name);
         }
     }
-    if (code) *code = cached_code;
-    if (name) *name = cached_name;
+    if (code) *code = g_cached_version_code;
+    if (name) *name = g_cached_version_name;
 }
 
 // ...and the same pair, for anything outside this file that has to describe the
@@ -1079,9 +1105,8 @@ void kl_jni_guest_version(long *code, const char **name) {
 // as klj_manifest_metadata's: the `package="..."` attribute of the root
 // <manifest> element.
  const char *klj_guest_package(void) {
-    static char cached[192];
-    if (!*cached) {
-        snprintf(cached, sizeof cached, "com.beatgames.beatsaber");  // historical
+    if (!*g_cached_package) {
+        snprintf(g_cached_package, sizeof g_cached_package, "com.beatgames.beatsaber");  // historical
         char path[1024];
         snprintf(path, sizeof path, "%s/../AndroidManifest.xml", g_assets_dir);
         FILE *f = fopen(path, "rb");
@@ -1094,19 +1119,19 @@ void kl_jni_guest_version(long *code, const char **name) {
             const char *end = m ? strchr(m, '>') : NULL;
             const char *p = m ? klj_xml_attr(m, end ? end : head + got, "package=\"") : NULL;
             const char *pe = p ? strchr(p, '"') : NULL;
-            if (p && pe && pe > p && (size_t)(pe - p) < sizeof cached) {
-                snprintf(cached, sizeof cached, "%.*s", (int)(pe - p), p);
-                KLJ_LOG("guest package %s (from %s)", cached, path);
+            if (p && pe && pe > p && (size_t)(pe - p) < sizeof g_cached_package) {
+                snprintf(g_cached_package, sizeof g_cached_package, "%.*s", (int)(pe - p), p);
+                KLJ_LOG("guest package %s (from %s)", g_cached_package, path);
             } else {
-                KLJ_LOG("no package= in %s — falling back to %s", path, cached);
+                KLJ_LOG("no package= in %s — falling back to %s", path, g_cached_package);
             }
         } else {
             KLJ_LOG("no AndroidManifest.xml beside %s — falling back to package %s. "
                     "A split-binary guest builds its OBB NAME from this.",
-                    g_assets_dir, cached);
+                    g_assets_dir, g_cached_package);
         }
     }
-    return cached;
+    return g_cached_package;
 }
 
 const char *kl_jni_guest_package(void) { return klj_guest_package(); }
@@ -1620,7 +1645,17 @@ static klj_val klj_AssetManager_open(void *env, void *self, const klj_val *a, in
     char path[1024];
     snprintf(path, sizeof path, "%s/%s", g_assets_dir, rel);
     FILE *f = fopen(path, "rb");
-    KLJ_LOG("AssetManager.open(\"%s\") -> %s", rel, f ? path : "MISSING");
+    int from_obb = 0;
+    if (!f) {
+        // Unity's Android catalog provider reaches the synthetic Java
+        // AssetManager for jar:file URLs. The APK is only the small launcher
+        // container; the catalog itself is staged in the OBB, so give this
+        // path the same read-through semantics as native fopen/open.
+        f = kl_obbmap_fopen(path, "rb");
+        from_obb = f != NULL;
+    }
+    KLJ_LOG("AssetManager.open(\"%s\") -> %s%s", rel,
+            f ? path : "MISSING", from_obb ? " (OBB)" : "");
     if (!f) return (klj_val){.l = NULL};   // guest catches IOException
 
     fseek(f, 0, SEEK_END);
@@ -1784,13 +1819,15 @@ const klj_binding klj_bind_services[] = {
     {"com/unity3d/player/UnityPlayer", "addPhoneCallListener", "()V", klj_UnityPlayer_addPhoneCallListener},
     {"java/lang/Class",  "getName",  "()Ljava/lang/String;", klj_Class_getName},
     // Unity builds this signature from Class.getName(), so it is spelled with
-    // dots where a real JNI signature would have slashes. Matched as the string
-    // the guest actually asks for.
+    // dots where a real JNI signature would have slashes. Retain direct legacy
+    // lookups and the canonical descriptors returned by ReflectionHelper.
     {"com/oculus/oculusdeviceconfig/OculusDeviceConfig", "init", "(Lcom.unity3d.player.UnityPlayerActivity;)V", klj_OculusDeviceConfig_init},
+    {"com/oculus/oculusdeviceconfig/OculusDeviceConfig", "init", "(Lcom/unity3d/player/UnityPlayerActivity;)V", klj_OculusDeviceConfig_init},
     {"com/oculus/oculusdeviceconfig/OculusDeviceConfig", "getCurrentState", "()I", klj_OculusDeviceConfig_getCurrentState},
     {"com/oculus/oculusdeviceconfig/OculusDeviceConfig", "getError", "()Ljava/lang/String;", klj_OculusDeviceConfig_getError},
     {"com/oculus/oculusdeviceconfig/OculusDeviceConfig", "didPrefetchParamName", "(Ljava/lang/String;)Z", klj_OculusDeviceConfig_didPrefetchParamName},
     {"com/oculus/oculusdeviceconfig/OculusDeviceConfig", "getBoolean", "(Lcom.unity3d.player.UnityPlayerActivity;Ljava/lang/String;)Z", klj_OculusDeviceConfig_getBoolean},
+    {"com/oculus/oculusdeviceconfig/OculusDeviceConfig", "getBoolean", "(Lcom/unity3d/player/UnityPlayerActivity;Ljava/lang/String;)Z", klj_OculusDeviceConfig_getBoolean},
     // Meta's unified telemetry logger (olar/UE5). There is no telemetry pipe on
     // this host — the ovrp Qpl* / consent family are already no-ops — so the
     // logger is a synthetic singleton and reportEvent drops the event. getInstance
@@ -1814,6 +1851,7 @@ const klj_binding klj_bind_services[] = {
     {"java/util/Locale", "getLanguage", "()Ljava/lang/String;",   klj_Locale_getLanguage},
     {"java/util/Locale", "getCountry",  "()Ljava/lang/String;",   klj_Locale_getCountry},
     {"java/util/Locale", "toLanguageTag", "()Ljava/lang/String;", klj_Locale_toLanguageTag},
+    {"java/util/Locale", "toString", "()Ljava/lang/String;", klj_Locale_toString},
     {"android/media/MediaRouter$RouteInfo", "getPresentationDisplay", "()Landroid/view/Display;", klj_RouteInfo_getPresentationDisplay},
 
     {"android/app/AlertDialog$Builder", "<init>", "(Landroid/content/Context;)V", klj_AlertBuilder_init},
@@ -1875,6 +1913,8 @@ const klj_binding klj_bind_services[] = {
     // same way in kl_jni_prefs.c.)
     {"com/ubisoft/bridge/JavaInterface", "injectActivityJava",
      "(Lcom.unity3d.player.UnityPlayerActivity;)I", klj_UbiJavaInterface_injectActivity},
+    {"com/ubisoft/bridge/JavaInterface", "injectActivityJava",
+     "(Lcom/unity3d/player/UnityPlayerActivity;)I", klj_UbiJavaInterface_injectActivity},
     // AC Nexus native loading screen - hide the host skybox when the game asks.
     {"com/nexusvr/loadingscreen/LoadingScreen", "stopUpdatingLoadingScreen",
      "()V", klj_LoadingScreen_stopUpdating},

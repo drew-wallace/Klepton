@@ -401,7 +401,7 @@ static const char kl_msl_reproject[] =
 "    o.chromaRange = float2(ua[amp].chromaMin, ua[amp].chromaMax);\n"
 "    o.src = uint(amp);\n"
 "    o.pos = ua[amp].visible == 0u ? kl_offscreen\n"
-"                                  : float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+"                                  : float4(p * 2.0 - 1.0, 0.0001, 1.0);\n"
 "    o.uv  = float2(p.x, ua[amp].flipY != 0u ? 1.0 - p.y : p.y);\n"
 "    return o;\n"
 "}\n"

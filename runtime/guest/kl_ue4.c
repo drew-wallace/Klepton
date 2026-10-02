@@ -73,6 +73,8 @@ static const char *ue4_meta_str(const char *key);   // defined below; used by co
 // libc++_shared (statically linked). A member whose FILE is not in the libdir
 // is skipped with a note; only the entry library failing is fatal.
 static const char *const UE4_CHAIN[] = {
+    // Older UE4 titles (Robo Recall 4.21) use GNU libstdc++ instead of libc++.
+    "libgnustl_shared.so",
     "libc++_shared.so",
     // FMOD, dependencies first (libfmodstudio is built on the libfmod core).
     // libUE4 has these as DT_NEEDED and binds FMOD_* / FMOD::* against them, but
@@ -722,17 +724,17 @@ static void kl_ue4_java_create(FILE *out) {
     // calls GetStringUTFChars on it — which is exactly how TWD2 died, in klj_str,
     // right after this call.
     //
-    // 4.26+ is the DEFAULT and 4.25 is the exception, not the other way round:
+    // 4.26+ is the DEFAULT and older versions are the exception:
     // every Quest UE4 title in this tree from 2022 on (Wrath2 4.27, TWD2, Red
     // Matter 2, Vampire) is 4.26+, and UE5 (Wanderer, libUnreal) inherited the
-    // int-inserted form too. Resident Evil 4 VR (2021, built on 4.25) is the
-    // only known five-string guest; it and any future 4.25 title are named here.
+    // int-inserted form too. RE4 (4.25) and Robo Recall (4.21) use five strings.
     // The engine version is not cheaply readable from the stripped binary, so
     // this is a name list rather than a probe — a wrong guess does not corrupt,
     // it faults loudly in klj_str exactly as TWD2 did, which names the fix.
     const char *ue4_tgt = kl_driver_target_name();
-    int is_425 = ue4_tgt && strcmp(ue4_tgt, "re4") == 0;
-    if (is_425) {
+    int is_older_ue4 = ue4_tgt &&
+        (!strcmp(ue4_tgt, "re4") || !strncmp(ue4_tgt, "roborecall-", 11));
+    if (is_older_ue4) {
         UE4_CALL(out, "nativeSetAndroidVersionInformation", ue4_fn_sssss,
                  jrel, jmake, jmodel, jbuild, jloc);
     } else {

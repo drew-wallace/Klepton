@@ -23,6 +23,8 @@ kl_image *kl_load_dylib(const char *path);
 // translation exists, else the ELF. Lets the boot chain run mixed while some
 // libraries are still untranslatable. Every guest-library load goes through it.
 kl_image *kl_load_auto(const char *path);
+// Resolved backing image filename, owned by the image until it is unloaded.
+const char *kl_image_path(const kl_image *img);
 
 // Could kl_load_auto load a guest library at `path`? Ask this — never
 // stat(path) — whenever answering an existence question about a guest library on

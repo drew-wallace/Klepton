@@ -69,17 +69,22 @@ static void arena_free(arena *a) { munmap(a->code, a->cap * 2); }
 // The emitter takes the addresses the buffers will have when executed, which
 // here are simply the buffers themselves — the degenerate case kl_x18_patch
 // uses, so this exercises the same path the ELF loader does.
-static uint64_t (*build(arena *a, const uint32_t *body, unsigned n,
-                        kl_x18_stats *st))(uint64_t) {
+static uint64_t (*build_with_link_offset(arena *a, const uint32_t *body, unsigned n,
+                                         kl_x18_stats *st, uint64_t link_offset))(uint64_t) {
     memcpy(a->code, body, n * 4);
     size_t used = 0;
-    if (kl_x18_emit(a->code, n * 4, (uint64_t)(uintptr_t)a->code,
-                    a->pool, a->cap, (uint64_t)(uintptr_t)a->pool, st, &used) != 0) {
+    if (kl_x18_emit(a->code, n * 4, (uint64_t)(uintptr_t)a->code - link_offset,
+                    a->pool, a->cap, (uint64_t)(uintptr_t)a->pool - link_offset,
+                    st, &used) != 0) {
         fprintf(stderr, "kl_x18_emit failed\n");
         exit(2);
     }
     arena_arm(a);
     return (uint64_t (*)(uint64_t))(void *)a->code;
+}
+static uint64_t (*build(arena *a, const uint32_t *body, unsigned n,
+                        kl_x18_stats *st))(uint64_t) {
+    return build_with_link_offset(a, body, n, st, 0);
 }
 
 #define MRS_CTR(rt)   (0xD53B0020u | (rt))
@@ -227,6 +232,24 @@ int main(void) {
         ck(slot == want && st.ctr_patched == 1 && st.patched == 0, msg);
         pthread_setspecific(KLX_TSD_SLOT, NULL);
         arena_free(&a);
+
+        // Robo Recall uses `adr x18, label` followed by an x18 load. The
+        // absolute address must land in the shadow slot even when the veneer
+        // pool is too far away for ADR's +/-1 MB immediate.
+        arena a2 = arena_new();
+        uint32_t adr_body[] = {
+            0x10000092u,              // adr x18, +16
+            MOV(0, 18), RET, 0xD503201Fu, 0xD503201Fu,
+        };
+        uint64_t target = (uint64_t)(uintptr_t)(a2.code + 16);
+        // The emitted code runs at a different address than the one it was
+        // linked for, as a translated dylib does under simulator ASLR.
+        uint64_t (*adr_fn)(uint64_t) = build_with_link_offset(&a2, adr_body, 5,
+                                                               &st, 0x10000000ULL);
+        uint64_t value = adr_fn(0);
+        ck(st.patched == 2 && st.refused == 0 && value == target,
+           "`adr x18` preserves its original PC target through the shadow slot");
+        arena_free(&a2);
     }
 
     // ---- 6. the shape the guest actually has ----

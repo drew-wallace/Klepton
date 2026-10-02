@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "target": "walkabout-57013",
+  "scope": "static, original game binaries; authentication and entitlement results remain unverified",
+  "metadata": {
+    "path": "walkabout-57013/assets/bin/Data/Managed/Metadata/global-metadata.dat",
+    "size": 18782156,
+    "sha256": "c52902709bff79b4afeec97ce136ebd251b970bdc4aa913130f579a3f2354274"
+  },
+  "binary": {
+    "path": "walkabout-57013/lib/arm64-v8a/libil2cpp.so",
+    "size": 116537040,
+    "sha256": "fbec3a43904b382c0281783e452760650054d9febc134fd616d721a42aec6e19"
+  },
+  "layout_reference": "https://github.com/SamboyCoding/Cpp2IL/tree/b5ad444b82267cb1e4b88b8b373c008105bdea52/LibCpp2IL/Metadata",
+  "methods": [
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "FarBridge.Worlds.SteamworksInterface",
+      "name": "OnInitialize",
+      "token": 100671712,
+      "address": 50482536
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "FarBridge.Worlds.SteamworksInterface",
+      "name": "GetAuthTicket",
+      "token": 100671718,
+      "address": 50483852
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "FarBridge.Worlds.SteamworksInterface",
+      "name": "CancelTicket",
+      "token": 100671719,
+      "address": 50483212
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "FarBridge.Worlds.SteamworksInterface",
+      "name": "FarBridge.Worlds.IPlatformDLC.DoesUserOwnProduct",
+      "token": 100671734,
+      "address": 50487680
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "FarBridge.Weywot.PlayFabController",
+      "name": "Login",
+      "token": 100672055,
+      "address": 50518532
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "FarBridge.Weywot.PlayFabController",
+      "name": "OnLoginSuccess",
+      "token": 100672056,
+      "address": 50544276
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "FarBridge.Weywot.PlayFabController",
+      "name": "OnLoginFailure",
+      "token": 100672058,
+      "address": 50544972
+    },
+    {
+      "image": "com.rlabrecque.steamworks.net.dll",
+      "type": "Steamworks.SteamUser",
+      "name": "GetAuthSessionTicket",
+      "token": 100664367,
+      "address": 56124520
+    },
+    {
+      "image": "com.rlabrecque.steamworks.net.dll",
+      "type": "Steamworks.SteamUser",
+      "name": "GetAuthTicketForWebApi",
+      "token": 100664368,
+      "address": 56124900
+    },
+    {
+      "image": "com.rlabrecque.steamworks.net.dll",
+      "type": "Steamworks.SteamUser",
+      "name": "CancelAuthTicket",
+      "token": 100664371,
+      "address": 56126020
+    },
+    {
+      "image": "com.rlabrecque.steamworks.net.dll",
+      "type": "Steamworks.SteamApps",
+      "name": "BIsSubscribedApp",
+      "token": 100663305,
+      "address": 55905532
+    },
+    {
+      "image": "com.rlabrecque.steamworks.net.dll",
+      "type": "Steamworks.SteamApps",
+      "name": "BIsDlcInstalled",
+      "token": 100663306,
+      "address": 55905624
+    },
+    {
+      "image": "PlayFab.dll",
+      "type": "PlayFab.PlayFabClientAPI",
+      "name": "LoginWithSteam",
+      "token": 100663426,
+      "address": 91075752
+    },
+    {
+      "image": "PlayFab.dll",
+      "type": "PlayFab.PlayFabSettings",
+      "name": "get_TitleId",
+      "token": 100664148,
+      "address": 91323160
+    },
+    {
+      "image": "PlayFab.dll",
+      "type": "PlayFab.PlayFabSettings",
+      "name": "GetSharedSettingsObjectPrivate",
+      "token": 100664146,
+      "address": 91322872
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "Mighty.Multiplayer.Launcher.MultiplayerLauncher",
+      "name": "DoConnect",
+      "token": 100683362,
+      "address": 53468964
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "Mighty.Multiplayer.Launcher.MultiplayerLauncher",
+      "name": "JoinPrivateRoom",
+      "token": 100683389,
+      "address": 53471664
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "Mighty.Multiplayer.Launcher.MultiplayerLauncher",
+      "name": "OnJoinedRoom",
+      "token": 100683365,
+      "address": 53472492
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "Mighty.Multiplayer.Launcher.MultiplayerLauncher",
+      "name": "JoinRoomPromptForMicrophone",
+      "token": 100683379,
+      "address": 53480720
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "MultiplayerVoice",
+      "name": "Start",
+      "token": 100666473,
+      "address": 55268132
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "MultiplayerVoice",
+      "name": "UpdateMicrophone",
+      "token": 100666482,
+      "address": 55268464
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "MultiplayerVoice",
+      "name": "RestartMic",
+      "token": 100666485,
+      "address": 55270972
+    },
+    {
+      "image": "Assembly-CSharp.dll",
+      "type": "MultiplayerVoice",
+      "name": "SetMicrophoneState",
+      "token": 100666486,
+      "address": 55268648
+    },
+    {
+      "image": "PhotonUnityNetworking.dll",
+      "type": "Photon.Pun.PhotonNetwork",
+      "name": "JoinOrCreateRoom",
+      "token": 100663421,
+      "address": 90493636
+    },
+    {
+      "image": "UnityEngine.AndroidJNIModule.dll",
+      "type": "UnityEngine.Android.Permission",
+      "name": "HasUserAuthorizedPermission",
+      "token": 100663881,
+      "address": 103704480
+    },
+    {
+      "image": "UnityEngine.AndroidJNIModule.dll",
+      "type": "UnityEngine.Android.Permission",
+      "name": "RequestUserPermission",
+      "token": 100663882,
+      "address": 103704792
+    }
+  ],
+  "literals": [
+    {
+      "index": 13298,
+      "value": "PlayFab",
+      "role": "session ticket recipient GenericString identity"
+    },
+    {
+      "index": 26363,
+      "value": "{0:x2}",
+      "role": "lowercase hex ticket formatting"
+    }
+  ],
+  "login_request_fields": [
+    "CreateAccount",
+    "CustomTags",
+    "EncryptedRequest",
+    "InfoRequestParameters",
+    "PlayerSecret",
+    "SteamTicket",
+    "TitleId"
+  ],
+  "playfab_settings": {
+    "member": "assets/bin/Data/698b2db098268c640929a7b8090a31eb",
+    "size": 320,
+    "sha256": "fdf342c910bc9e9b3ad77c2c48e9ade533ff87d2e4af03c6f92f5b559f24a911",
+    "crc32": "a8091839",
+    "title_id": "98AD5",
+    "object_offset": 208,
+    "object_size": 112,
+    "scope": "packaged default; runtime overrides unverified",
+    "script_path_id": 311,
+    "script_assembly": "PlayFab",
+    "script_class": "PlayFabSharedSettings",
+    "script_inventory_source": "globalgamemanagers.assets concatenated split files",
+    "script_inventory_sha256": "31305dee8c943517d36b09904eb7429f7e36d2c8f572753c328ef8cb1e923cf2",
+    "script_object_offset": 171040,
+    "script_object_size": 92,
+    "script_object_sha256": "821447b81ea00c38b324ea3caa6c1ee8dfe7b59167ae42d83c6816d1c89ecd47"
+  },
+  "callsite_audit": {
+    "method": "FarBridge.Worlds.SteamworksInterface.GetAuthTicket",
+    "buffer_capacity": 1024,
+    "identity_stack_bytes": 136,
+    "identity_generic_string": "PlayFab",
+    "identity_set_call": "0x3025464",
+    "session_ticket_call": "0x3025490",
+    "session_handle_store": "0x302549c",
+    "ticket_output_length_read": "0x3025494",
+    "hex_format_call": "0x3025514",
+    "web_api_ticket_called_in_method": false,
+    "playfab_login": {
+      "method": "FarBridge.Weywot.PlayFabController.Login",
+      "request_constructor_call": "0x302dc14",
+      "create_account_true_construct": "0x302dc20",
+      "create_account_nullable_store": "0x302dc3c",
+      "ticket_string_store": "0x302dcc8",
+      "login_with_steam_call": "0x302dd58",
+      "title_default_filled_by_sdk": true,
+      "title_fill_store": "0x56db5b0",
+      "service_specific_field_present": false,
+      "actual_http_request_observed": false
+    },
+    "dlc": {
+      "method": "FarBridge.Worlds.SteamworksInterface.FarBridge.Worlds.IPlatformDLC.DoesUserOwnProduct",
+      "native_managed_tail_call": "0x30261ec",
+      "target": "Steamworks.SteamApps.BIsDlcInstalled",
+      "content_id_read": "0x30261dc",
+      "ownership_verified": false
+    },
+    "private_room": {
+      "method": "Mighty.Multiplayer.Launcher.MultiplayerLauncher.JoinPrivateRoom",
+      "call": "0x32febc4",
+      "target": "Photon.Pun.PhotonNetwork.JoinOrCreateRoom",
+      "connection_verified": false
+    },
+    "voice_permission": {
+      "method": "MultiplayerVoice.UpdateMicrophone",
+      "check_call": "0x34b5500",
+      "request_call": "0x34b5510",
+      "target_platform": "UnityEngine.Android.Permission",
+      "physical_capture_verified": false
+    }
+  },
+  "dlc_compatibility": {
+    "consumer": "FarBridge.Worlds.IPlatformDLC.DoesUserOwnProduct",
+    "callsite": 50487788,
+    "original_target": 55905624,
+    "ownership_target": 55905532,
+    "reason": "Android course bundles are staged outside Steam depot installation; ownership must use the genuine subscription result",
+    "method_regions": [
+      {
+        "name": "DoesUserOwnProduct",
+        "address": 50487680,
+        "size": 140,
+        "sha256": "418cf4e1e69b0efa13a8d7599b24c9b2397e630f287db6632083a553c9241b2a"
+      },
+      {
+        "name": "BIsSubscribedApp",
+        "address": 55905532,
+        "size": 92,
+        "sha256": "bd38ef95778cac93b6970eac7ea8eff6185c832d2df6b5146659e250df47382d"
+      },
+      {
+        "name": "BIsDlcInstalled",
+        "address": 55905624,
+        "size": 92,
+        "sha256": "4763b879d4274659a6b684d0ed5a8120f32cb0d7bed0a7ec2f072e62d5e6d26d"
+      }
+    ]
+  }
+}

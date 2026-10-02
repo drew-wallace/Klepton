@@ -410,6 +410,15 @@ set -e
 APP="build/dd-sim-$KLT_NAME$DD_SUFFIX/Build/Products/Debug-xrsimulator/$PRODUCT.app"
 [ "$BUILD_RC" = 0 ] || { echo "!! build FAILED (see errors above) — not installing a stale app"; exit 1; }
 [ -f "$APP/Info.plist" ] || { echo "!! no usable .app at $APP"; exit 1; }
+# `CODE_SIGNING_ALLOWED=NO` keeps Xcode from signing the app, but its Mach-O
+# executable still gets a linker signature. The translated guest frameworks
+# are copied in by the project generator and remain unsigned, which dyld refuses
+# to load on current visionOS simulators. Sign each embedded framework first,
+# then seal the app bundle with an ad-hoc signature before installing it.
+while IFS= read -r -d '' FRAMEWORK; do
+  codesign --force --sign - "$FRAMEWORK"
+done < <(find "$APP/Frameworks" -maxdepth 1 -type d -name '*.framework' -print0)
+codesign --force --sign - "$APP"
 
 echo "[4/5] installing + staging…"
 xcrun simctl install "$UDID" "$APP"

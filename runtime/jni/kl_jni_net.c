@@ -227,6 +227,14 @@ klj_val klj_UnityPlayer_loadLibrary(void *env, void *self, const klj_val *a, int
     else
         snprintf(path, sizeof path, "%s/lib%s.so", g_native_lib_dir, name);
     void *h = klb_dlopen(path, 0x00002 /* RTLD_NOW */);
+    // Mirror ClassLoader.findLibrary's narrow recovery for plugins that pass
+    // an already-prefixed name such as "libngfx" to loadLibrary().
+    if (!h && strncmp(name, "lib", 3) == 0 && len > 3 &&
+        strcmp(name + len - 3, ".so") != 0) {
+        snprintf(path, sizeof path, "%s/%s.so", g_native_lib_dir, name);
+        h = klb_dlopen(path, 0x00002 /* RTLD_NOW */);
+        if (h) KLJ_LOG("UnityPlayer.loadLibrary(\"%s\") -> prefix alias %s", name, path);
+    }
     KLJ_LOG("UnityPlayer.loadLibrary(\"%s\") -> %s", name, h ? "loaded" : "failed");
     klj_run_jni_onload(h, name);
     return (klj_val){.j = h != NULL};
@@ -309,8 +317,8 @@ static klj_val klj_MediaRouter_getSelectedRoute(void *env, void *self, const klj
 static klj_val klj_Context_getContentResolver(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     static void *resolver;
-    if (!resolver) resolver = kl_jni_new_object("android/content/ContentResolver");
-    return (klj_val){.l = resolver};
+    // The context owns this cached object beyond any caller's local JNI frame.
+    return klj_singleton("android/content/ContentResolver", &resolver);
 }
 
 static klj_val klj_Settings_Secure_getString(void *env, void *self, const klj_val *a, int n) {

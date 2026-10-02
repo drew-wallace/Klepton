@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "client_sha256": "4b1318ea53168ecbf74318ef5b330eb0a41a3e2d335c14f3827504bebba4b40d",
+  "artifact": "androidarm64/libsteamclient.so",
+  "source_lock": "steamframe_recovery.lock.json",
+  "status": "experimental; credential-free simulator checks only",
+  "engine": {
+    "version": "CLIENTENGINE_INTERFACE_VERSION005",
+    "get_client_user": {
+      "slot": 8,
+      "offset": "0x1286858",
+      "args": [
+        "this",
+        "HSteamUser",
+        "HSteamPipe"
+      ]
+    },
+    "get_client_utils": {
+      "slot": 14,
+      "offset": "0x1289258",
+      "args": [
+        "this",
+        "HSteamPipe"
+      ]
+    }
+  },
+  "client_user_proxy": {
+    "get_logon_state": {
+      "slot": 5,
+      "offset": "0x10cf2a4",
+      "return": "int32"
+    },
+    "set_login_information": {
+      "slot": 54,
+      "offset": "0x10d5368",
+      "args": [
+        "this",
+        "password CString",
+        "account name CString",
+        "remember bool"
+      ],
+      "return": "void",
+      "called": false
+    },
+    "set_login_token": {
+      "slot": 56,
+      "offset": "0x10d5704",
+      "args": [
+        "this",
+        "refresh token CString",
+        "account name CString"
+      ],
+      "return": "void",
+      "called": false
+    }
+  },
+  "legacy_logon": {
+    "export": "Steam_LogOn",
+    "offset": "0xe54304",
+    "args": [
+      "HSteamUser",
+      "HSteamPipe",
+      "CSteamID uint64"
+    ],
+    "return": "EResult int32",
+    "credential_free_result": 5
+  },
+  "webui_transport": {
+    "utils_slot": 106,
+    "proxy_offset": "0x11232e4",
+    "args": [
+      "this",
+      "CMsgWebUITransportInfo*"
+    ],
+    "return": "bool",
+    "message_size": 40,
+    "constructor_offset": "0x2044d64",
+    "destructor_offset": "0x2044d9c",
+    "port_offset": 32,
+    "auth_key_arena_string_offset": 24,
+    "arena_string_pointer_tag_mask": 1,
+    "protobuf_descriptor_name_offset": "0x7cebf0",
+    "loopback_tcp_reached": true,
+    "websocket_authentication": "not_run",
+    "websocket_path": "/transportsocket/",
+    "ui_origin": "https://steamloopback.host",
+    "websocket_upgrade_http_status": 403,
+    "minimal_http_upgrade_status": 403,
+    "origin_comparison_matched": true,
+    "host_frames_before_login_probe": 500,
+    "host_frames_after_transport_info": 50,
+    "android_connection_callback_offset": "0xd2c284",
+    "android_connection_callback_returns": false,
+    "verified_rejection_branch_offset": "0x1e42214",
+    "linux_reference_sha256": "3b044464e6cf912c92de65a12520da020a156141ecb45235a5de682cb7ab08a0",
+    "linux_reference_connection_callback_offset": "0x56c128",
+    "https_auth_ui_qr_begin_result": 1,
+    "https_auth_ui_challenge_present": true,
+    "account_authenticated": false
+  },
+  "rules": [
+    "Only enable the private ABI after verifying the exact input hash.",
+    "Check image ownership and measured function offsets before calls.",
+    "Do not print, retain in reports, or persist local authentication keys.",
+    "Never use factory success, a pipe, callback count or TCP connect as authenticated readiness."
+  ],
+  "interactive_controller": {
+    "implemented": true,
+    "simulator_qr_rendered": true,
+    "simulator_anonymous_poll_result": 1,
+    "simulator_cancel_logoff_shutdown_returned": true,
+    "approved_account_tested": true,
+    "native_token_handoff_tested": true,
+    "keychain_authenticated_save_tested": true,
+    "physical_execution_verified": false,
+    "simulator_saved_login_relaunch_tested": true,
+    "simulator_authenticated_evidence": {
+      "qr_native_login_run_id": "0f1edfc4-1ae8-4684-ac0a-6bb8023136c7",
+      "game_argument_ticket_run_id": "1e282cb7-c256-4dd7-ba41-2a0a1f8a39c0",
+      "completed_observation": "1756cb6b-6d99-4be6-abb5-e7aff839e8c7",
+      "steam_api_init_result": 0,
+      "app_id": 1408230,
+      "base_game_subscribed": true,
+      "session_recipient": "PlayFab",
+      "session_buffer_capacity": 1024,
+      "session_bytes": 426,
+      "session_callback_result": 1,
+      "web_api_service": "AzurePlayFab",
+      "web_api_callback_result": 1,
+      "dlc_enumerated": 32,
+      "dlc_subscribed": 32,
+      "dlc_installed": 0,
+      "ticket_server_verification": false,
+      "game_playfab_authentication": false,
+      "sdk_shutdown_returned": true,
+      "native_logoff_returned": true,
+      "backend_shutdown_returned": true,
+      "complete_resource_reclamation_verified": false
+    }
+  }
+}

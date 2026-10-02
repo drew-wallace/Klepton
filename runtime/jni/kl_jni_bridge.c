@@ -107,6 +107,23 @@ static klj_field_obj *klj_as_field(void *obj) {
     return (o && strcmp(o->cls, KLJ_CLASS_FIELD) == 0) ? o->data : NULL;
 }
 
+// Unity's ReflectionHelper parses reference names through Class.forName and
+// accepts dotted source names as well as slash-separated JNI names. A reflected
+// Method/Field must describe the declared JVM type when converted back to JNI.
+// Normalize a copy so the caller's string and primitive/array syntax survive.
+static char *klj_reflection_signature(const char *sig) {
+    if (!sig) return NULL;
+    char *copy = strdup(sig);
+    if (!copy) return NULL;
+    int reference = 0;
+    for (char *p = copy; *p; p++) {
+        if (!reference && *p == 'L') reference = 1;
+        else if (reference && *p == ';') reference = 0;
+        else if (reference && *p == '.') *p = '/';
+    }
+    return copy;
+}
+
 static klj_val klj_ReflectionHelper_getFieldID(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self;
     const char *cls  = n > 0 ? klj_class_name(a[0].l) : NULL;
@@ -119,7 +136,11 @@ static klj_val klj_ReflectionHelper_getFieldID(void *env, void *self, const klj_
     }
     KLJ_LOG("ReflectionHelper.getFieldID %s.%s%s%s", cls, name, sig ? " " : "",
             sig ? sig : "");
-    return (klj_val){.l = klj_new_field(cls, name, sig, is_static)};
+    char *normalized = klj_reflection_signature(sig);
+    if (sig && !normalized) return (klj_val){0};
+    void *field = klj_new_field(cls, name, normalized, is_static);
+    free(normalized);
+    return (klj_val){.l = field};
 }
 
 // The method half of the same round trip. Unity looks a method up by name and
@@ -137,9 +158,15 @@ static klj_val klj_ReflectionHelper_getMethodID(void *env, void *self,
         KLJ_LOG("ReflectionHelper.getMethodID with no class or name -> null");
         return (klj_val){.l = NULL};
     }
+    // Reflection returns the declared Java method, even when Unity describes
+    // an argument using its Activity subclass or generated proxy class.
+    char *normalized = klj_reflection_signature(sig);
+    if (sig && !normalized) return (klj_val){0};
+    sig = klj_photon_reflected_signature(cls, name, normalized, is_static);
     KLJ_LOG("ReflectionHelper.getMethodID %s.%s%s", cls, name, sig ? sig : "");
     void *m = klj_own(klj_new_method(strdup(cls), name ? strdup(name) : NULL,
                                      sig ? strdup(sig) : NULL), klj_method_free);
+    free(normalized);
     klj_object *o = klj_as_object(m);
     if (o && o->data) ((klj_method_obj *)o->data)->is_static = is_static;
     return (klj_val){.l = m};
@@ -164,8 +191,10 @@ static klj_val klj_ReflectionHelper_getConstructorID(void *env, void *self,
         return (klj_val){.l = NULL};
     }
     KLJ_LOG("ReflectionHelper.getConstructorID %s.<init>%s", cls, sig ? sig : "()V");
+    char *normalized = klj_reflection_signature(sig ? sig : "()V");
+    if (!normalized) return (klj_val){0};
     return (klj_val){.l = klj_own(klj_new_method(strdup(cls), strdup("<init>"),
-                                                 strdup(sig ? sig : "()V")),
+                                                 normalized),
                                   klj_method_free)};
 }
 
@@ -179,6 +208,7 @@ static klj_val klj_ReflectionHelper_newProxyInstance(void *env, void *clazz,
     (void)env; (void)clazz;
     klj_proxy *p = calloc(1, sizeof *p);
     p->native_ptr = n > 1 ? (int64_t)a[1].j : 0;
+    p->reflection_helper = 1;
     // Wrapped in a one-element array so the two doors' proxies are identical
     // down to the field, rather than alike: klj_proxy_invoke and the report
     // both read `classes` as an object array.
@@ -247,12 +277,16 @@ static klj_val klj_Method_getDeclaringClass(void *env, void *self, const klj_val
                 o ? o->cls : "(not an object)");
         return NULL;
     }
-    void *fn = kl_jni_native("bitter/jnibridge/JNIBridge", "invoke", NULL);
+    klj_proxy *p = o->data;
+    if (!p) return NULL;
+    const char *native_class = p->reflection_helper ? "com/unity3d/player/ReflectionHelper"
+                                                   : "bitter/jnibridge/JNIBridge";
+    const char *native_name = p->reflection_helper ? "nativeProxyInvoke" : "invoke";
+    void *fn = kl_jni_native(native_class, native_name, NULL);
     if (!fn) {
-        KLJ_LOG("drain: the guest has not registered JNIBridge.invoke — skipped");
+        KLJ_LOG("drain: the guest has not registered %s.%s — skipped", native_class, native_name);
         return NULL;
     }
-    klj_proxy *p = o->data;
     if (p->disabled) {
         KLJ_LOG("proxy 0x%llx is disabled — not invoking %s.%s",
                 (unsigned long long)p->native_ptr, iface, name);
@@ -263,9 +297,18 @@ static klj_val klj_Method_getDeclaringClass(void *env, void *self, const klj_val
     // whatever the guest allocates inside the callback all die at the pop.
     void *(*invoke)(void *, void *, int64_t, void *, void *, void *) = fn;
     klj_PushLocalFrame(NULL, 0);
-    void *r = invoke(kl_jni_env(), klj_class_object("bitter/jnibridge/JNIBridge"),
-                     p->native_ptr, klj_class_object(iface),
-                     klj_new_method(iface, name, sig), args);
+    void *r;
+    if (p->reflection_helper) {
+        // Unity's modern proxy uses a GC handle and a method-name jstring.
+        // Passing it to bitter's pointer/Class/Method ABI can dereference an
+        // unrelated native object; the two proxy origins must stay distinct.
+        void *(*modern)(void *, void *, int64_t, void *, void *) = fn;
+        r = modern(kl_jni_env(), klj_class_object(native_class), p->native_ptr,
+                   kl_jni_new_string(name), args);
+    } else {
+        r = invoke(kl_jni_env(), klj_class_object(native_class), p->native_ptr,
+                   klj_class_object(iface), klj_new_method(iface, name, sig), args);
+    }
     klj_PopLocalFrame(NULL, NULL);
     return r;
 }

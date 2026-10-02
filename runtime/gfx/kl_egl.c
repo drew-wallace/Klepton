@@ -1025,10 +1025,52 @@ void kl_egl_dump_shaders(const char *dir) {
     fprintf(stderr, "  [gl] wrote %u shader sources to %s\n", g_nshaders, dir);
 }
 
+static void klgl_GetShaderPrecisionFormat(uint32_t shader, uint32_t kind,
+                                          int32_t *range, int32_t *precision) {
+    (void)shader;
+    // The null renderer compiles no shaders. Report the standard full-precision
+    // formats that the Metal/ANGLE path supports; do not leave output unwritten.
+    int is_int = kind == 0x8DF3 || kind == 0x8DF4 || kind == 0x8DF5;
+    if (range) { range[0] = is_int ? 31 : 127; range[1] = is_int ? 30 : 127; }
+    if (precision) *precision = is_int ? 0 : 23;
+}
+
+// On the null renderer there is no GPU work to fence. With ANGLE enabled,
+// kl_glfb_sym wins before these fallbacks and supplies its real EGL sync API.
+typedef struct { uint32_t tag; } kl_egl_sync;
+static void *klegl_CreateSyncKHR(EGLDisplay display, uint32_t kind,
+                                  const int32_t *attributes) {
+    (void)attributes;
+    if (display != DISPLAY || kind != 0x30F9 /* EGL_SYNC_FENCE_KHR */) {
+        g_error = EGL_BAD_PARAMETER; return NULL;
+    }
+    kl_egl_sync *s = malloc(sizeof *s);
+    if (s) s->tag = 0x4b4c5359;
+    return s;
+}
+static int32_t klegl_DestroySyncKHR(EGLDisplay display, kl_egl_sync *s) {
+    if (display != DISPLAY || !s || s->tag != 0x4b4c5359) {
+        g_error = EGL_BAD_PARAMETER; return EGL_FALSE;
+    }
+    s->tag = 0; free(s); return EGL_TRUE;
+}
+static int32_t klegl_ClientWaitSyncKHR(EGLDisplay display, kl_egl_sync *s,
+                                        int32_t flags, uint64_t timeout) {
+    (void)flags; (void)timeout;
+    if (display != DISPLAY || !s || s->tag != 0x4b4c5359) {
+        g_error = EGL_BAD_PARAMETER; return EGL_FALSE;
+    }
+    return 0x30F6; // EGL_CONDITION_SATISFIED_KHR
+}
+
 static const struct { const char *name; void *fn; } g_gl_impl[] = {
     {"glGetString",   (void *)klgl_GetString},
     {"glGetStringi",  (void *)klgl_GetStringi},
     {"glGetError",    (void *)klgl_GetError},
+    {"glGetShaderPrecisionFormat", (void *)klgl_GetShaderPrecisionFormat},
+    {"eglCreateSyncKHR", (void *)klegl_CreateSyncKHR},
+    {"eglDestroySyncKHR", (void *)klegl_DestroySyncKHR},
+    {"eglClientWaitSyncKHR", (void *)klegl_ClientWaitSyncKHR},
     {"glGetIntegerv", (void *)klgl_GetIntegerv},
     {"glGetIntegeri_v", (void *)klgl_GetIntegeri_v},
     {"glGetFloatv",     (void *)klgl_GetFloatv},
@@ -1108,6 +1150,7 @@ static const struct { const char *name; void *fn; } g_gl_impl[] = {
 static const char *const g_gl_void[] = {
     // per-fragment and rasteriser state
     "glEnable", "glDisable", "glCullFace", "glFrontFace", "glDepthFunc", "glDepthMask",
+    "glDepthRangef",
     "glColorMask", "glColorMaski", "glStencilMask", "glStencilFuncSeparate",
     "glStencilOpSeparate", "glPolygonOffset", "glScissor", "glViewport", "glPixelStorei",
     // glPolygonMode is desktop-GL only (no GLES equivalent); gl4es passes it
@@ -1165,6 +1208,7 @@ static const char *const g_gl_void[] = {
     // vertex state
     "glBindVertexArray", "glVertexAttribPointer", "glVertexAttribIPointer",
     "glEnableVertexAttribArray", "glDisableVertexAttribArray",
+    "glVertexAttribDivisor",
     "glVertexAttrib4f", "glVertexAttrib4fv",
     // the draws — the calls this whole milestone exists to reach
     "glDrawArrays", "glDrawArraysInstanced", "glDrawArraysIndirect",
@@ -1808,6 +1852,7 @@ void *kl_egl_sym(const char *name) {
             if (!b) b = kl_glfb_sym(base);
             if (!b) for (size_t j = 0; j < sizeof g_gl_impl / sizeof g_gl_impl[0]; j++)
                         if (strcmp(g_gl_impl[j].name, base) == 0) { b = g_gl_impl[j].fn; break; }
+            if (!b && gl_is_void(base)) b = kl_named_stub(name, (void *)klgl_noop);
             if (b) {
                 int bs = gl_slot(name);
                 if (bs >= 0) g_gl[bs].resolved = 1;
