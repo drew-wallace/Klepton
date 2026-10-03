@@ -114,6 +114,82 @@ The Klepton window stays open on cold boot and after re-entry so settings and
 Quit remain accessible beside the game. `KL_BOOT_WINDOW=0` explicitly closes
 it after immersion opens for diagnostics; the default is `1`.
 
+The **Guardian** panel offers three modes. **Default visionOS area** uses full
+immersion and the system's standard movement boundary (approximately 1.5 m from
+the initial head position). **Draw on the ground** uses mixed immersion: allow
+World Sensing, look at the detected floor, pinch and trace the perimeter, then
+choose **Finish boundary**. Multiple strokes connect in order; Finish closes
+the outline. Crossed outlines and areas smaller than 1 m² are rejected. **Mapped
+environment** outlines connected detected floor, excludes reconstructed walls
+and furniture with a 5 cm margin, and requires **Use mapped area** after review.
+Floor coverage combines the current room envelope, detected floor-plane polygons,
+and classified floor reconstruction. Mapping uses the measured physical floor
+height; when no floor plane is available, it weights floor height by triangle
+area rather than triangle count so a densely scanned local patch cannot dominate.
+Classified floor faces never enter the obstacle pass. Plane polygons are used
+instead of their rectangular extents. Local `[guardian] auto map` diagnostics
+report source face counts and covered, clear, and connected area every five seconds.
+Surface distances are sampled at 5 cm spacing, interpolated into closed contours,
+and simplified within 7.5 mm. Detected wall planes supply straight wall faces;
+the raw mesh supplies furniture contours and obstacle holes. The drawn outline
+also drives proximity checks. There is no additional floor-edge erosion.
+Unmapped floor remains outside the area. Mapping is an estimate and can miss
+objects, so check the outline and leave space for arms and controllers.
+
+The **Passthrough starts** slider sets the warning distance from 15–80 cm;
+the new default is 30 cm. Custom modes smoothly reveal passthrough starting at
+that distance and show the room fully by 5 cm; outside, during setup, or on tracking loss, the game is
+transparent. Guest controller input is suppressed during setup. The final Metal
+pass applies to projection layers, skyboxes, and guest overlays alike. The
+nearest physical headset, controller body/aim point, or tracked hand decides the
+fade; controller/hand checks include a 5 cm margin. Guardian coordinates stay in
+the physical ARKit world even if the game is recentered. Missing positional
+tracking for a connected controller keeps the room visible.
+
+The default mode retains visionOS's headset boundary. Controller proximity is
+checked against a 1.5 m radius around the initial physical head position. Its
+warning temporarily switches to mixed immersion so alpha can reveal passthrough,
+then returns to full once the headset and controllers are clear, with a 5 cm
+hysteresis band. This controller warning uses the distance slider; Apple's own
+headset warning is controlled by visionOS. The supplemental area keeps its entry
+position across style changes.
+
+Accepted drawings and automatic outlines are saved locally relative to persistent ARKit `WorldAnchor`s,
+with a separate record for each boundary. Points are encoded against the actual
+tracked transform from `anchorUpdates`, rather than assuming the requested transform was
+accepted unchanged. Applying a drawing retains its detected floor height; a
+restored boundary is aligned to the current detected floor. Returning from Home
+retains the approved boundary's anchor ID and restores the outline into the new
+session's world frame before resuming. Old world coordinates are hidden while
+the anchor and floor are being recognised. Both saved drawn and automatic boundaries
+also apply without confirmation after relaunching the app: their tracked room
+anchor must relocalize around the wearer, and fresh head and floor tracking must
+be available. Automatic boundaries additionally wait for fresh room mapping.
+An unrecognised
+or untracked anchor never enables the saved guardian; redraw or choose the default
+area instead. Redrawing replaces the recognised boundary while retaining other
+rooms. **Forget saved boundaries** removes the saved outlines and their anchors.
+Automatic outlines retain interior obstacle holes across anchor rotation. Live map
+updates can shrink an accepted area but never silently expand it, and those
+reductions update the saved outline. **Remap area** starts a fresh review.
+**Remove unwanted spots** opens passthrough for editing enclosed obstacle outlines
+in the automatic map. Look inside a false obstacle's outline on the floor and
+pinch once to remove it. **Undo removal** restores the last deletion; **Cancel**
+restores the outline from before editing; **Done** keeps the changes. A preview
+still needs **Use mapped area**, while an already active boundary saves the edit
+immediately. The outside perimeter cannot be deleted by this tool. Removed spots
+are stored as polygons in the same room-anchor frame as the boundary and remain
+ignored by live mapping after Home/relaunch. Remapping clears those overrides.
+Mapping and saved-anchor updates cannot overwrite a pending edit; tracking loss
+keeps passthrough visible, and anchor loss cancels pending edits.
+On visionOS 27, `WorldTrackingProvider.allAnchors` can report poses in a different
+coordinate frame from `anchorUpdates`. Guardian poses use the update stream only,
+and a new world provider on immersive re-entry supplies fresh poses in that
+space's frame. Records made with the previous mixed-source implementation are
+retained for deletion but must be redrawn/remapped once before reuse.
+Room/floor reconstruction
+and persisted anchor relocalization require physical-device verification.
+
 **Quit Klepton** at the bottom of the window closes the immersive display,
 stops the guest frame thread, and terminates Klepton along with all remaining
 game threads. It is available before boot and after returning to the settings

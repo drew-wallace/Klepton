@@ -1685,6 +1685,56 @@ final class KleptonControllers {
     }
     private var loggedNoChirality = false
 
+    // Physical positions for the guardian. Do not use game grip tuning,
+    // generated fallback poses, or `.rendered` coordinate corrections here.
+    func guardianTracking(leftHand: HandAnchor?, rightHand: HandAnchor?,
+                          at time: TimeInterval) -> (positions: [SIMD3<Float>], tracked: Bool) {
+        lock.lock()
+        let provider = accessoryProvider
+        let streamed = Array(accessoryAnchor.values)
+        lock.unlock()
+        let expected = Self.spatialControllers().count
+        var positions: [SIMD3<Float>] = []
+        var occupiedHands: Set<Int> = []
+        var trackedAccessories = 0
+        if let provider, provider.state == .running {
+            // The update stream can receive a controller before latestAnchors
+            // publishes it. Use both sources, with the newest inertial pose first.
+            var anchors = provider.latestAnchors
+            let latestIDs = Set(anchors.map(\.id))
+            anchors += streamed.filter { !latestIDs.contains($0.id) }
+            for stored in anchors {
+                let now = CACurrentMediaTime()
+                let anchor = provider.predictAnchor(for: stored, at: now + min(0.03, max(0, time - now))) ?? stored
+                guard anchor.isTracked,
+                      anchor.trackingState == .positionOrientationTracked || anchor.trackingState == .positionOrientationTrackedLowAccuracy else { continue }
+                trackedAccessories += 1
+                occupiedHands.insert(anchor.accessory.inherentChirality == .left ? 0 : 1)
+                let base = anchor.originFromAnchorTransform.columns.3
+                positions.append(SIMD3(base.x, base.y, base.z))
+                // Check both the body and aim point to cover the physical reach.
+                if anchor.accessory.locations.contains(.aim) {
+                    let aim = anchor.coordinateSpace(for: .aim, correction: .none)
+                        .ancestorFromSpaceTransformFloat().matrix.columns.3
+                    positions.append(SIMD3(aim.x, aim.y, aim.z))
+                }
+            }
+        }
+        for (hand, anchor) in [leftHand, rightHand].enumerated() {
+            guard !occupiedHands.contains(hand), let anchor, anchor.isTracked else { continue }
+            let wrist = anchor.originFromAnchorTransform.columns.3
+            positions.append(SIMD3(wrist.x, wrist.y, wrist.z))
+            if let skeleton = anchor.handSkeleton {
+                let finger = skeleton.joint(.indexFingerTip)
+                if finger.isTracked {
+                    let tip = (anchor.originFromAnchorTransform * finger.anchorFromJointTransform).columns.3
+                    positions.append(SIMD3(tip.x, tip.y, tip.z))
+                }
+            }
+        }
+        return (positions, expected == 0 || trackedAccessories >= expected)
+    }
+
     /// Merge every source and push the result across to kl_ovrp.
     ///
     /// The hand anchors are the fallback: used for a hand's *pose* and its
@@ -1695,6 +1745,11 @@ final class KleptonControllers {
     /// and describe the same instant the head pose does.
     func update(leftHand: HandAnchor?, rightHand: HandAnchor?,
                 at presentationTime: TimeInterval) {
+        if KLGuardianRuntime.shared.suppressInput {
+            lock.lock(); systemPinch = [false, false]; lock.unlock()
+            for hand in 0...1 { kl_ovrp_set_controller_input(Int32(hand), 0, 0, 0, 0, 0, 0) }
+            return
+        }
         pollButtons()
 
         for hand in 0...1 {
@@ -1722,8 +1777,8 @@ final class KleptonControllers {
                 // thresholding the fingertip distance chattered, and the
                 // system's own recogniser drops presses in here too — plausibly
                 // because `.mixed` immersion leaves the system competing for
-                // the same gesture (try KL_FULL=1), or because a pinch it
-                // cannot attribute to a hand is not one we can use. Their
+                // the same gesture (try the default visionOS guardian), or because
+                // a pinch it cannot attribute to a hand is not one we can use. Their
                 // failures are not correlated: the system misses presses the
                 // distance sees, and the distance chatters where the system's
                 // hysteresis is clean. A union is more reliable than either,

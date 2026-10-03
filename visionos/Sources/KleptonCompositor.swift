@@ -356,6 +356,14 @@ final class KleptonCompositor {
     // the host. Nothing below the seam changes — kl_ovrp still reports node 9
     // for the head and nodes 3/4 for the hands.
     private let arSession = ARKitSession()
+    private let guardianMapping = KLGuardianMapping()
+    private let guardianPersistence = KLGuardianPersistence()
+    private var guardianRenderer: KLGuardianRenderer?
+    private var guardianMixedRequested = false
+    private var guardianEventsTask: Task<Void, Never>?
+    @MainActor private var configuringARKit = false
+    @MainActor private var configureARKitAgain = false
+
     private var worldTracking = WorldTrackingProvider()
     private var handTracking = HandTrackingProvider()
     private let controllers = KleptonControllers()
@@ -553,13 +561,27 @@ final class KleptonCompositor {
         // that beats the recogniser the OS ships.
         let controllers = self.controllers
         layerRenderer.onSpatialEvent = { events in
-            controllers.handleSpatialEvents(events)
+            if !KLGuardianRuntime.shared.handle(events) { controllers.handleSpatialEvents(events) }
         }
     }
 
     // MARK: - Poses
 
-    private func startARKit() { Task { await runARKit() } }
+    private func startARKit() {
+        guardianMixedRequested = false
+        KLGuardianRuntime.shared.resetForRenderer()
+        Task { @MainActor [self] in
+            guardianPersistence.stop()
+            // A new provider emits fresh added/updated poses for persistent
+            // anchors in this immersive space's frame. Do not seed from allAnchors.
+            worldTracking = WorldTrackingProvider()
+            handTracking = HandTrackingProvider()
+            controllers.forgetAccessoryPoses()
+            guardianMapping.reset(resetBoundary: KleptonGuardian.shared.mode != .system)
+            KleptonGuardian.shared.configureTracking = { [weak self] in await self?.runARKit() }
+            await runARKit()
+        }
+    }
 
     /// Build the provider set and run the session.
     ///
@@ -570,6 +592,16 @@ final class KleptonCompositor {
     /// stopped first, world and hand tracking carry straight on, and this is
     /// how reconnects are meant to be handled.
     @MainActor private func runARKit() async {
+        guard layerRenderer.state != .invalidated else { return }
+        if configuringARKit { configureARKitAgain = true; return }
+        configuringARKit = true
+        defer {
+            configuringARKit = false
+            if configureARKitAgain {
+                configureARKitAgain = false
+                Task { await runARKit() }
+            }
+        }
         do {
             // Providers stopped by dismissal cannot be run again. The guest's
             // graphics survive, but tracking belongs to the new immersive space.
@@ -592,7 +624,31 @@ final class KleptonCompositor {
             if HandTrackingProvider.isSupported { providers.append(handTracking) }
             let accessories = await controllers.makeAccessoryProvider()
             if let accessories { providers.append(accessories) }
-            try await arSession.run(providers)
+            let mappingProviders = await guardianMapping.providers(session: arSession)
+            do {
+                try await arSession.run(providers + mappingProviders)
+            } catch {
+                KLGuardianRuntime.shared.unavailable("Room mapping could not start. Choose the default visionOS area or retry setup.")
+                try await arSession.run(providers)
+            }
+            guardianMapping.consume()
+            guardianPersistence.consume(worldTracking)
+            guardianEventsTask?.cancel()
+            guardianEventsTask = Task { @MainActor in
+                for await event in arSession.events {
+                    guard !Task.isCancelled else { return }
+                    if case .dataProviderStateChanged(dataProviders: let providers, newState: let state, error: _) = event,
+                       state != .running, providers.contains(where: { $0 is PlaneDetectionProvider || $0 is RoomTrackingProvider || $0 is SceneReconstructionProvider || $0 is WorldTrackingProvider }) {
+                        KLGuardianRuntime.shared.unavailable("Room tracking was interrupted. Keep passthrough visible until tracking returns.")
+                    }
+                    if case .authorizationChanged(type: .worldSensing, status: let status) = event,
+                       status != .allowed {
+                        KLGuardianRuntime.shared.setAuthorization(false)
+                        KLGuardianRuntime.shared.unavailable("World Sensing was disabled. Choose the default visionOS area.")
+                    }
+                }
+            }
+
             arRunning = true
             NSLog("[cp] ARKit running (hands: \(HandTrackingProvider.isSupported), "
                   + "sense: \(controllers.senseConnected))")
@@ -839,6 +895,12 @@ final class KleptonCompositor {
         // can actually be run before a device is available. Compiled from
         // source rather than shipped as a .metal so it stays beside the
         // matrices that feed it (kl_reproject_build).
+        do {
+            guardianRenderer = try KLGuardianRenderer(device: device, color: layerRenderer.configuration.colorFormat)
+        } catch {
+            NSLog("[guardian] Metal pipeline failed: \(error)")
+            Task { @MainActor in KleptonGuardian.shared.mode = .system }
+        }
         let src = String(cString: kl_reproject_msl())
         // The pipeline has to be linked against the format the LAYER got, not
         // against a constant: with the drawable now 8-bit sRGB by default, a
@@ -1518,6 +1580,7 @@ final class KleptonCompositor {
                 break loop
             case .paused:
                 kl_app_guest_suspend()
+                KLGuardianRuntime.shared.suspendTracking()
                 NSLog("[cp] layer paused at iteration \(iterations) — waiting")
                 layerRenderer.waitUntilRunning()
                 NSLog("[cp] layer running again")
@@ -2074,6 +2137,24 @@ final class KleptonCompositor {
         // The guest's stereo separation, refreshed from the display itself.
         pushEyeOffsets(main)
 
+        // Guardian geometry is in the physical ARKit world, independent of
+        // the origin/yaw recentering used to place the guest's picture.
+        let physicalOrigin = displayAnchor?.originFromAnchorTransform
+            ?? lastGoodOriginFromDevice ?? matrix_identity_float4x4
+        let guardianHands = handTracking.state == .running
+            ? handTracking.handAnchors(at: presentation) : (leftHand: nil, rightHand: nil)
+        let guardianControllers = controllers.guardianTracking(
+            leftHand: guardianHands.leftHand, rightHand: guardianHands.rightHand, at: presentation)
+        let guardianFrame = KLGuardianRuntime.shared.frame(
+            head: SIMD3(physicalOrigin.columns.3.x, physicalOrigin.columns.3.y, physicalOrigin.columns.3.z),
+            tracked: worldTracking.state == .running && displayAnchor?.isTracked == true,
+            controllers: guardianControllers.positions, controllersTracked: guardianControllers.tracked)
+        if guardianMixedRequested != guardianFrame.requiresPassthrough {
+            guardianMixedRequested = guardianFrame.requiresPassthrough
+            let requested = guardianMixedRequested
+            NSLog("[guardian] passthrough requested: \(requested), controller points: \(guardianControllers.positions.count), tracking: \(guardianControllers.tracked)")
+            Task { @MainActor in KleptonGuardian.shared.setPassthroughRequired(requested) }
+        }
         var encoded = 0
         for drawable in drawables {
             // Per drawable, not once: each one is presented separately and each
@@ -2083,6 +2164,7 @@ final class KleptonCompositor {
                                        completeStage: completeStage,
                                        rendered: rendered, haveRendered: haveRendered,
                                        originFromHead: originFromHead)
+            guardianRenderer?.encode(drawable, cmd: cmd, originFromDevice: physicalOrigin, state: guardianFrame)
             drawable.encodePresent(commandBuffer: cmd)
         }
 

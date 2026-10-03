@@ -197,6 +197,9 @@ for _stack in (_icon_base, f"{_icon_base}-launcher"):
 SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift",
          "KleptonAudio.swift", "KleptonShell.swift", "KleptonTuning.swift",
          "KleptonChroma.swift", "KleptonMic.swift",
+         "KleptonGuardian.swift", "KleptonGuardianGeometry.swift", "KleptonGuardianRuntime.swift",
+         "KleptonGuardianMapping.swift", "KleptonGuardianRenderer.swift",
+         "KleptonGuardianPersistence.swift", "KleptonGuardianCoordinates.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift"]
 if STEAM_LOCAL:
     SWIFT += ['../../steam/visionos/Sources/kl_steam_host.c', '../build/SteamLocal/SteamHostLogin.swift']

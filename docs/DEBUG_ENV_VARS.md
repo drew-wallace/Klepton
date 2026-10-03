@@ -2244,10 +2244,10 @@ except its own control vars (next section).
   P5b's shape before the guest moved to its own thread. The clock P5.4's device numbers were taken
   against, and the A/B for anything that looks like a pacing regression.
   Default is the guest on its own thread, one frame per published pose.
-- `KL_FULL=1` — `.full` immersion. `.mixed` is the default — the guest's world
-  is opaque so passthrough shows through nowhere it matters, and seeing the
-  room makes scale and IPD easier to judge. The scene manifest declares
-  `UIImmersionStyleMixed` to match; keep the two in step.
+- Immersion style is controlled by the **Guardian** setting. **Default visionOS
+  area** selects `.full` for the system movement boundary. **Draw on the ground**
+  and **Mapped environment** select `.mixed` so the guardian can reveal
+  passthrough. `KL_FULL` is retired and no longer overrides that setting.
 - `KL_GUEST_OVERLAYS=0` — stop compositing the GUEST's own non-eye layers.
   **Not the same thing as `KL_OVERLAYS` below, which is a system setting**; the
   two are one word apart and were briefly one name, which would have made each
