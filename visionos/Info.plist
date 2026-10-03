@@ -43,7 +43,7 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Klepton uses the microphone when you enable the Microphone toggle for voice chat in a running app.</string>
 	<key>NSWorldSensingUsageDescription</key>
-	<string>Klepton reads the headset's own pose, which is the head pose the guest renders from.</string>
+	<string>Klepton detects the floor, room and nearby obstacles to set up your guardian, and remembers drawn boundaries using spatial anchors.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 </dict>

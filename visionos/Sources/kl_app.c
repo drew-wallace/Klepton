@@ -85,9 +85,9 @@ static int target_is_jkxr(void) {
 int kl_app_target_wants_full(void) {
     // In-world VR titles render their MENU as a full stereo scene too, so .mixed
     // leaves it a flat window floating in passthrough (a jagged quad) until gameplay
-    // starts. Default those to .full immersion from boot: the native OpenXR kind
+    // starts. This reports the native presentation preference: the OpenXR kind
     // (vicecity) and the folder-fed launcher games — hl1 (GLES3JNI) and
-    // cs1/hl2/portal (SDL2). KL_FULL=0 forces .mixed back for development.
+    // cs1/hl2/portal (SDL2). The Guardian setting now selects the immersion style.
     return g_target && (g_target->kind == KL_GUEST_NATIVE ||
                         g_target->kind == KL_GUEST_GLES3JNI ||
                         g_target->kind == KL_GUEST_SDL2);

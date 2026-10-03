@@ -65,18 +65,6 @@ enum Immersive {
         klEnvOn("KL_IMMERSIVE", default: kl_app_target_is_steamlink() == 0)
     }
 
-    // .mixed by default now that the picture works. The guest renders an opaque
-    // world so passthrough shows through nowhere it matters, and being able to
-    // see the room is worth a great deal while the thing being judged is how the
-    // scene SITS — scale, distance and IPD are all much easier to call against
-    // real surroundings than against a black void. KL_FULL=1 restores .full,
-    // which is what shipping a VR title eventually wants.
-    // The native OpenXR VR kind (GTA Vice City) is an in-world title and defaults
-    // to FULLY immersive — .mixed leaves its menu a window floating in passthrough.
-    // Every other target keeps .mixed as the development default. KL_FULL in the
-    // environment overrides either way (KL_FULL=0 forces .mixed back).
-    static var mixed: Bool { !klEnvOn("KL_FULL", default: kl_app_target_wants_full() != 0) }
-
     // How many times the CompositorLayer closure has been entered. SwiftUI may
     // re-evaluate a scene, and a second layer would mean the render loop the log
     // describes is not the one on screen.
@@ -168,6 +156,7 @@ enum Lifecycle {
         // platform lies about.
         if phase == .active { KleptonAudio.resume() }
         guard phase == .background else { return }
+        KLGuardianRuntime.shared.beginImmersion()
         kl_app_guest_suspend()
         guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: false) else {
             NSLog("[app] backgrounded; retaining session for resume")
@@ -292,6 +281,7 @@ struct KleptonApp: App {
     /// immersive scene's `.upperLimbVisibility` live. The object is the shared
     /// singleton the panel edits, not a second copy.
     @ObservedObject private var chroma = KleptonChroma.shared
+    @ObservedObject private var guardian = KleptonGuardian.shared
 
     init() {
         KleptonBattery.shared.start()
@@ -332,13 +322,9 @@ struct KleptonApp: App {
                 KleptonCompositor.present(layerRenderer)
             }
         }
-        // .mixed vs .full is read from the observed chroma object (set by boot
-        // once the target is known — see KleptonChroma.immersionFull and
-        // Immersive.mixed), NOT from a static read here: the scene graph is built
-        // before kl_app_configure, so a static read always saw the pre-target
-        // default. Observing the object means .full takes hold reactively before
-        // the space opens, for the native VR kind (GTA Vice City). KL_FULL wins.
-        .immersionStyle(selection: .constant(chroma.immersionFull ? .full : .mixed),
+        // Full immersion is what enables Apple's standard movement boundary.
+        // Custom guardians use alpha in mixed immersion to reveal the room.
+        .immersionStyle(selection: $guardian.immersionStyle,
                         in: .mixed, .full)
         // See Immersive.systemOverlays. On the scene, not on a view inside it:
         // a CompositorLayer has no view hierarchy for the View-level modifier to
@@ -613,6 +599,8 @@ struct BootView: View {
         guard !session.quitting, !session.openedSpace, !session.openingSpace else { return }
         session.wantsImmersive = true
         session.openingSpace = true
+        KLGuardianRuntime.shared.beginImmersion()
+        KleptonGuardian.shared.setPassthroughRequired(false)
         let result = await openImmersiveSpace(id: Immersive.id)
         session.openingSpace = false
         NSLog("[cp] openImmersiveSpace (session) -> \(result)")
@@ -677,10 +665,11 @@ struct BootView: View {
             // KleptonLauncher.swift / KleptonHL1.swift.
             if isLauncher { LauncherPanel() }
 
-            // The controller-alignment sliders, in THIS window because it stays
-            // open beside the immersive space — so the guest keeps rendering
-            // while they move, which is the entire point of them. Collapsed by
-            // default: it is a tuning instrument, not part of booting.
+            // Guardian setup and review stay available beside the game.
+            DisclosureGroup("Guardian") { GuardianView() }
+                .font(.callout)
+
+            // Tuning remains collapsed beside the running immersive space.
             DisclosureGroup("Controller alignment") { TuningView() }
                 .font(.callout)
 
@@ -831,13 +820,6 @@ struct BootView: View {
                     }
                 }
                 return
-            }
-
-            // The target is resolved now, so the immersion default (which depends
-            // on it — the native VR kind opens .full) is finally knowable. Publish
-            // it on the main actor before the space opens; the scene observes it.
-            DispatchQueue.main.async {
-                KleptonChroma.shared.immersionFull = !Immersive.mixed
             }
 
             let logPath = String(cString: kl_app_log_path())

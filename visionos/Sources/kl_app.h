@@ -128,10 +128,10 @@ const char *kl_app_target_name(void);
 // launcher UI identify itself on the first render, not only after a boot.
 const char *kl_app_target_name_or_default(void);
 int         kl_app_target_is_steamlink(void);
-// Whether this target should open the immersive space FULLY immersive by default
-// (no passthrough) rather than .mixed. True for the native OpenXR VR kind
+// The target's native preference for full rather than mixed immersion.
+// The Guardian setting owns the app's actual immersion style. True for the native OpenXR VR kind
 // (GTA Vice City), which is an in-world game meant to fill the view — .mixed
-// leaves it a window in passthrough. KL_FULL in the environment overrides.
+// leaves it a window in passthrough.
 int         kl_app_target_wants_full(void);
 
 // ...and the question the COMPOSITOR is really asking, which is not the same
