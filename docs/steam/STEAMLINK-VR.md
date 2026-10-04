@@ -1,6 +1,6 @@
 # Steam Link VR on visionOS
 
-Steam Link 2.0.23 uses the Qt configuration shell to discover and pair with a
+Steam Link 2.0.24 uses the Qt configuration shell to discover and pair with a
 PC, then hands the authorized session to its OpenXR streaming activity.
 The shell opens in a window; the immersive space opens when pairing hands off.
 The pairing/report window closes after that handoff; `KL_BOOT_WINDOW=1` keeps
@@ -9,9 +9,13 @@ it open for diagnostics. Reopening the app's window provides its settings.
 Supply the APK locally (the APK and extracted files are ignored by Git):
 
 ```sh
-ln -s "$HOME/ovrport/Steam Link VR/steamlinkvr-2.0.23.apk" steamlink-vr.apk
+ln -sfn "$HOME/ovrport/Steam Link VR/android-steamlinkvr-release.apk" steamlink-vr.apk
 apktool d -f -o steamlink-vr steamlink-vr.apk
 ```
+
+The current local APK reports version 2.0.24, version code 5002389. When changing
+APKs, replace both the symlink and the extracted tree, rebuild guest frameworks,
+and force staging with `--stage` so the app receives the matching APK and assets.
 
 Build and run on a booted visionOS Simulator:
 
@@ -112,7 +116,7 @@ This branch includes upstream
 and charging state from `UIDevice`, plus independent PSVR2 Sense readings from
 `GCController`. The runtime shares those readings with Android BatteryManager,
 OVRPlugin, OpenXR battery queries, and Steam Link's controller power properties.
-The private controller power layout also matches the supplied 2.0.23 APK.
+The private controller power layout also matches the supplied 2.0.23 and 2.0.24 APKs.
 Battery reporting needs no additional entitlement. The simulator has no real
 headset/controller battery readings, so its fallback behavior and streaming
 integration can be tested there; measured percentages require physical devices.
@@ -136,17 +140,21 @@ Linux FIFO/RR scheduling remains unavailable.
 
 ## Validation status (2026-10-04)
 
-Steam Link VR 2.0.23.2363 discovers and pairs with a LAN PC in a dedicated
-visionOS 27 simulator. The authorized session enters the OpenXR activity,
-receives HEVC at 1152x4608, and renders SteamVR's library with audio. The
+Steam Link VR 2.0.24 (5002389) builds and starts in a dedicated visionOS 27
+simulator, reuses the existing pairing with the LAN PC, enters the OpenXR
+activity, receives HEVC at 1152x4608, and renders SteamVR's library. The
 32-slot eye cache holds the client's separate-eye swapchains without repeated
 evictions; the previous 16-slot cache evicted streaming images every frame.
-The simulator audio stream has been exercised at a 60 ms target with zero
+The 2.0.23 simulator audio stream was exercised at a 60 ms target with zero
 reported underruns. The JNI/libc/entitlement checks, video decoder/texture
-checks, discovery and XR input gates pass, and both visionOS runtime slices
-and the unsigned full device app build.
+checks, discovery and XR input gates pass. The 2.0.24 simulator and signed
+device app builds succeed; the signed device app has Increased Memory Limit
+enabled and both optional streaming capabilities disabled.
 
-Physical headset tracking, controllers, microphone, native video texture
-interop, wireless latency, and low-latency entitlement provisioning remain
-unverified. Xcode currently reports no signed-in account and no provisioning
-profile for this app. Configure a supporting team before device installation.
+The 2.0.23 build was signed with a Personal Team and installed on a physical
+Vision Pro with Extended Virtual Addressing and Low-Latency Streaming disabled.
+It entered immersive streaming, decoded video, and reported real headset and
+Sense controller battery levels. Rapid controller motion was reported rough;
+prediction timing and dropped stream frames need further investigation. Eye
+input, microphone behavior, measured wireless latency, and provisioning for the
+two disabled capabilities remain unverified.
