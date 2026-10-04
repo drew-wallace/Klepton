@@ -29,11 +29,16 @@
 
 #include "kl_avdec.h"
 #include "kl_env.h"
+#include "klepton.h"
+#include "kl_obbmap.h"
 
 struct kl_avdec {
     char        path[1024];          // the file actually opened (see slice_out)
     int         width, height;
     long long   duration_ms;
+    float       fps;
+    int         bitrate;
+    const char *mime;
 
     pthread_t       thread;
     pthread_mutex_t mu;
@@ -74,15 +79,19 @@ static int slice_out(const char *container, long long off, long long len,
     struct stat st;
     if (stat(out, &st) == 0 && st.st_size == (off_t)len) return 1;   // cached
 
-    int in = open(container, O_RDONLY);
-    if (in < 0) {
+    char mapped[1024];
+    const char *resolved = kl_guest_path(container, mapped, sizeof mapped);
+    FILE *in = kl_obbmap_fopen(resolved, "rb");
+    if (!in) in = fopen(resolved, "rb");
+    if (!in || fseeko(in, (off_t)off, SEEK_SET) != 0) {
+        if (in) fclose(in);
         fprintf(stderr, "  [avdec] cannot open the container %s: %s\n",
                 container, strerror(errno));
         return 0;
     }
     int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-        close(in);
+        fclose(in);
         fprintf(stderr, "  [avdec] cannot write the media cache %s: %s\n",
                 out, strerror(errno));
         return 0;
@@ -95,17 +104,16 @@ static int slice_out(const char *container, long long off, long long len,
     int ok = buf != NULL;
     while (ok && left > 0) {
         size_t want = left < CHUNK ? (size_t)left : CHUNK;
-        ssize_t got = pread(in, buf, want, (off_t)(off + (len - left)));
-        // A short read is not an error from pread and IS a truncated movie, so
-        // it has to be treated as one — the failure otherwise arrives as
-        // AVFoundation refusing a file for reasons that name nothing.
+        ssize_t got = (ssize_t)fread(buf, 1, want, in);
+        // EOF before the requested range ends is a truncated movie; reject
+        // it here rather than handing AVFoundation an incomplete container.
         if (got <= 0) { ok = 0; break; }
         if (write(fd, buf, (size_t)got) != got) { ok = 0; break; }
         left -= got;
     }
     free(buf);
     close(fd);
-    close(in);
+    fclose(in);
     if (!ok) {
         unlink(out);
         fprintf(stderr, "  [avdec] could not extract %lld bytes at %lld from %s\n",
@@ -309,6 +317,9 @@ kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
 
     __block int w = 0, h = 0;
     __block long long dur = 0;
+    float fps = 0;
+    int bitrate = 0;
+    const char *mime = "video/unknown";
     @autoreleasepool {
         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:real]];
         AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
@@ -323,6 +334,12 @@ kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
         CGSize sz = t.naturalSize;
         w = (int)sz.width; h = (int)sz.height;
         dur = (long long)(CMTimeGetSeconds(asset.duration) * 1000.0);
+        fps = t.nominalFrameRate;
+        bitrate = (int)t.estimatedDataRate;
+        CMFormatDescriptionRef fmt = (__bridge CMFormatDescriptionRef)t.formatDescriptions.firstObject;
+        FourCharCode codec = fmt ? CMFormatDescriptionGetMediaSubType(fmt) : 0;
+        if (codec == kCMVideoCodecType_H264) mime = "video/avc";
+        else if (codec == kCMVideoCodecType_HEVC) mime = "video/hevc";
     }
     if (w <= 0 || h <= 0) return NULL;
 
@@ -330,6 +347,7 @@ kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
     if (!d) return NULL;
     snprintf(d->path, sizeof d->path, "%s", real);
     d->width = w; d->height = h; d->duration_ms = dur;
+    d->fps = fps; d->bitrate = bitrate; d->mime = mime;
     d->seek_ms = -1;
     d->running = 1;
     pthread_mutex_init(&d->mu, NULL);
@@ -359,6 +377,13 @@ void kl_avdec_close(kl_avdec *d) {
 int kl_avdec_width(kl_avdec *d)  { return d ? d->width : 0; }
 int kl_avdec_height(kl_avdec *d) { return d ? d->height : 0; }
 long long kl_avdec_duration_ms(kl_avdec *d) { return d ? d->duration_ms : 0; }
+int kl_avdec_video_info(kl_avdec *d, float *fps, int *bitrate, const char **mime) {
+    if (!d) return 0;
+    if (fps) *fps = d->fps;
+    if (bitrate) *bitrate = d->bitrate;
+    if (mime) *mime = d->mime;
+    return 1;
+}
 
 void kl_avdec_play(kl_avdec *d, int on) {
     if (!d) return;

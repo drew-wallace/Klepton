@@ -12,6 +12,9 @@ int  kl_glfb_enabled(void);
 int  kl_glfb_init(void);
 // GPU regression for compressed mip copies; requires a patched Metal ANGLE.
 int  kl_glfb_copy_selftest(FILE *out);
+// Upload a decoded BGRA frame into an allocated guest 2D texture on its GL
+// thread. Restores texture/PBO bindings and all pixel-unpack parameters.
+int kl_glfb_upload_video_bgra(uint32_t texture, int w, int h, const void *pixels);
 void kl_glfb_set_size(int w, int h);
 
 // The flat door's zero-readback storage. Requested BEFORE ANGLE comes up

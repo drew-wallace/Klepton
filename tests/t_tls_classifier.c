@@ -28,5 +28,15 @@ int main(void) {
     assert(kl_x18_tls_is_data(data, sizeof data, 2));
     uint32_t code[] = {0xd53bd040, 0xf9401400, 0xd65f03c0};
     assert(!kl_x18_tls_is_data(code, sizeof code, 0));
+    // Actual PhysX literal pool and following frame prologue. Its x18 write
+    // belongs to the new function, although the preceding two floats decode
+    // as unallocated instructions.
+    uint32_t physics[] = {0x42c80000, 0x42c80000, 0, 0xd503201f,
+        0xd10a03ff, 0x4f000403, 0x5280002c, 0xaa0303f2,
+        0xa9b67bfd, 0x910003fd, 0xf940000e};
+    assert(!kl_x18_is_data(physics, sizeof physics, 7));
+    physics[9] = 0xd503201f; // No complete frame setup: keep refusing.
+    assert(kl_x18_is_data(physics, sizeof physics, 7));
+    assert(kl_x18_is_data(physics, 9 * 4, 7));
     puts("TLS classifier: measured prologue, stale pattern, bounds and data rejection passed");
 }

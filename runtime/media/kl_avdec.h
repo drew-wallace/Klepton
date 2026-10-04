@@ -41,6 +41,7 @@ void      kl_avdec_close(kl_avdec *d);
 int       kl_avdec_width(kl_avdec *d);
 int       kl_avdec_height(kl_avdec *d);
 long long kl_avdec_duration_ms(kl_avdec *d);
+int       kl_avdec_video_info(kl_avdec *d, float *fps, int *bitrate, const char **mime);
 
 // The transport. `kl_avdec_play(d, 0)` pauses where it is; position is in
 // milliseconds and is the presentation time of the newest frame handed out,

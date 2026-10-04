@@ -24,6 +24,7 @@
 #include "kl_ovrp.h"
 #include "kl_avdec.h"
 #include "kl_egl.h"
+#include "kl_glfb.h"
 #include "kl_ndk.h"
 #include "kl_va.h"
 #include "kl_jni_int.h"
@@ -487,9 +488,10 @@ static klj_val klj_MsgBox_show(void *env, void *self, const klj_val *a, int n) {
 // `needTrackInfo`, and the second one decides the whole output path: a Vulkan
 // guest reads frames through `getVideoLastFrameData()Ljava/nio/Buffer;` — a
 // direct ByteBuffer of packed pixels — rather than through the GLES external
-// texture `getExternalTextureId` names. RE4 is Vulkan, so that is the path
-// implemented; `getExternalTextureId` answers 0, which is "no external texture"
-// rather than a name that would be sampled and would be someone else's.
+// texture `getExternalTextureId` names. Robo Recall uses the bitmap renderer
+// instead: getVideoLastFrame writes into its supplied GLES 2D texture.
+// getExternalTextureId still reports no OES texture; that separate route is
+// not implemented by this CPU-backed player.
 typedef struct {
     int        swizzle, vulkan, need_track_info;
     char       source[1024];     // what the guest asked for, verbatim
@@ -738,15 +740,25 @@ static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
     return (klj_val){.l = m->buffer};
 }
 
-// (int) -> Z: "is there a frame at all". The int is the external texture the
-// GLES path would have rendered into and is not one here.
+// The APK's BitmapRenderer writes the decoded movie into the supplied 2D
+// texture. A true return without that write leaves Robo's TVs solid white.
 static klj_val klj_MP14_getVideoLastFrame(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)a; (void)n;
+    (void)env;
     klj_media *m = klj_media_of(self);
-    if (!m || !m->dec) return (klj_val){.j = 0};
+    if (!m || !m->dec || !m->video_enabled || n < 1) return (klj_val){.j = 0};
     unsigned long long serial = 0;
-    const void *px = kl_avdec_frame(m->dec, NULL, NULL, NULL, &serial);
-    return (klj_val){.j = px != NULL && serial != 0};
+    int w = 0, h = 0;
+    const void *px = kl_avdec_frame(m->dec, &w, &h, NULL, &serial);
+    if (!px || !serial || !kl_glfb_upload_video_bgra((uint32_t)a[0].j, w, h, px))
+        return (klj_val){.j = 0};
+    if (w != m->last_w || h != m->last_h) {
+        m->res_changed = 1;
+        m->last_w = w; m->last_h = h;
+    }
+    if (!m->buf_serial) KLJ_LOG("MediaPlayer14: decoded video -> GLES 2D texture %u (%dx%d)",
+                               (uint32_t)a[0].j, w, h);
+    m->buf_serial = serial;
+    return (klj_val){.j = 1};
 }
 
 // Latched and cleared by the read, which is what "did it change" means — a
@@ -784,10 +796,9 @@ static klj_val klj_MP14_updateVideoFrame(void *env, void *self, const klj_val *a
     return (klj_val){.l = NULL};
 }
 
-// Empty track lists. `needTrackInfo` is the ctor's third bool and UE4 only asks
-// when it is set; an empty array is "this player reports no selectable tracks",
-// which is true — nothing here exposes alternates — and is distinguishable from
-// the refusal an absent binding would be.
+// Caption/audio selection is not exposed. Video must report the decoded track:
+// UE4.21 disables video entirely when GetVideoTracks returns an empty array,
+// including with the older two-boolean constructor.
 static klj_val klj_MP14_tracks_audio(void *env, void *self, const klj_val *a, int n) {
     (void)self; (void)a; (void)n;
     return (klj_val){.l = klj_new_array('L',
@@ -799,9 +810,31 @@ static klj_val klj_MP14_tracks_caption(void *env, void *self, const klj_val *a, 
         "com/epicgames/ue4/MediaPlayer14$CaptionTrackInfo", 0)};
 }
 static klj_val klj_MP14_tracks_video(void *env, void *self, const klj_val *a, int n) {
-    (void)self; (void)a; (void)n;
-    return (klj_val){.l = klj_new_array('L',
-        "com/epicgames/ue4/MediaPlayer14$VideoTrackInfo", 0)};
+    (void)env; (void)a; (void)n;
+    klj_media *m = klj_media_of(self);
+    const char *clsname = "com/epicgames/ue4/MediaPlayer14$VideoTrackInfo";
+    float fps = 0;
+    int bitrate = 0;
+    const char *mime = NULL;
+    int ready = m && kl_avdec_video_info(m->dec, &fps, &bitrate, &mime);
+    void *result = klj_new_array('L', clsname, ready ? 1 : 0);
+    if (ready) {
+        void *track = klj_new_object_data(clsname, NULL);
+        void *cls = klj_class_object(clsname);
+#define MP_FIELD(name, sig, value) klj_field_store(track, klj_want(cls, name, sig, 'f'), value)
+        MP_FIELD("Index", "I", ((klj_val){.j = 0}));
+        MP_FIELD("Width", "I", ((klj_val){.j = kl_avdec_width(m->dec)}));
+        MP_FIELD("Height", "I", ((klj_val){.j = kl_avdec_height(m->dec)}));
+        MP_FIELD("BitRate", "I", ((klj_val){.j = bitrate}));
+        MP_FIELD("FrameRate", "F", ((klj_val){.d = fps}));
+        MP_FIELD("MimeType", "Ljava/lang/String;", ((klj_val){.l = kl_jni_new_string(mime)}));
+        MP_FIELD("DisplayName", "Ljava/lang/String;", ((klj_val){.l = kl_jni_new_string("Video")}));
+        MP_FIELD("Language", "Ljava/lang/String;", ((klj_val){.l = kl_jni_new_string("und")}));
+#undef MP_FIELD
+        klj_array *array = klj_as_object(result)->data;
+        ((void **)array->data)[0] = track;
+    }
+    return (klj_val){.l = result};
 }
 static klj_val klj_MP14_selectTrack(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;

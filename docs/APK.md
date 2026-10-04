@@ -133,8 +133,33 @@ Xcode 27's SDK stubs. `ANGLE_GN_ARGS` can override this selection.
   handler recovered. The call now uses IP0 and explicitly sets LR to the original
   return site, preserving stack arguments and ASLR. The updated headset build
   starts and continuously submits rendered frames with tracked head/hand input.
-  Hub/mission visuals and physical gameplay still require player validation;
-  startup and GPU checks alone do not establish full playability.
+  The player subsequently completed the first mission on the headset, reporting
+  missing intro-TV video and two crashes. The throwing crash was in PhysX
+  SweepGeomGeom: float literals before its frame prologue made the data heuristic
+  skip `mov x18,x3`, while later reads used the shadow register. The classifier
+  now recognizes a completely decoded frame prologue as a function boundary;
+  a native execution regression starts with stale shadow state and confirms the
+  entry write reaches the later read. The mission-results crash aborted on
+  `ovr_Leaderboard_GetEntries`. Leaderboard read/write requests now report the
+  unavailable online service (request 0), without invented scores or completions.
+  Intro video had three missing links: AVFoundation bypassed the OBB VFS,
+  GetVideoTracks returned no track (so UE disabled video), and the GLES bitmap
+  call returned true without writing the supplied texture. Archive ranges now
+  use guest path mapping and the read-through VFS; the player reports the actual
+  track dimensions, codec and frame rate; and GLES uploads convert decoded BGRA
+  to RGBA while preserving unpack/PBO/texture state. Simulator captures show the
+  TVs playing footage with readable captions and correct orientation/colors.
+  `build/t_ue4_media` checks unavailable leaderboard requests and exact GPU video
+  colors/state; optional OBB-directory/movie-path/byte-length arguments exercise
+  the actual archive decoder and UE4 JNI track/texture path. Both visionOS runtime
+  slices and the signed device app build. The updated app is installed and both
+  headset save files were verified byte-for-byte unchanged after reinstall.
+  One forced intro-to-hub-to-arena simulator sequence also crashed in Vorbis
+  streaming on an unmapped source buffer. A fresh arena, scripted mission-results
+  display, and return to the hub ran with audio without reproducing it; that
+  additional transition failure remains unverified. Physical
+  throwing and complete mission/results/return-to-hub retesting is still needed;
+  these checks do not establish full playability.
   The source folder supplies one matching main OBB containing the game pak and
   intro video; no supplied Robo Recall variant has a patch OBB. The generic
   missing-patch warning therefore does not establish missing content here.

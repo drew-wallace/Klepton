@@ -5837,10 +5837,43 @@ static void klfb_CopyImageSubData(uint32_t src, uint32_t src_target, int32_t src
 #undef KLFB_COPY_IMAGE_ARGS
 #undef KLFB_COPY_IMAGE_PASS
 
-// Exercises the streamed ASTC mip path by sampling the copied destination on
-// the GPU. Sizes include multiple 6x6 blocks, an aligned subregion and a 1x1
-// tail mip, which is smaller than one compression block. Cube faces test the
-// layer-to-image-view mapping as well as the normal 2D path.
+// UE4's Java bitmap renderer writes into the guest's existing 2D texture.
+// Decoder pixels are packed BGRA and cannot inherit the guest's PBO/row layout.
+int kl_glfb_upload_video_bgra(uint32_t texture, int w, int h, const void *pixels) {
+    if (!texture || w <= 0 || h <= 0 || !pixels) return 0;
+    void (*get)(uint32_t, int32_t *) = asym("glGetIntegerv");
+    void (*bind)(uint32_t, uint32_t) = asym("glBindTexture");
+    void (*bindbuf)(uint32_t, uint32_t) = asym("glBindBuffer");
+    void (*store)(uint32_t, int32_t) = asym("glPixelStorei");
+    void (*upload)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
+                   uint32_t, uint32_t, const void *) = asym("glTexSubImage2D");
+    if (!get || !bind || !bindbuf || !store || !upload) return 0;
+    // ES only accepts BGRA uploads into BGRA storage. UE4's bitmap target is
+    // RGBA, as in its Java renderer's framebuffer, so convert the channel order.
+    if ((size_t)w > SIZE_MAX / 4 / (size_t)h) return 0;
+    size_t count = (size_t)w * (size_t)h;
+    uint32_t *rgba = malloc(count * 4);
+    if (!rgba) return 0;
+    const uint32_t *bgra = pixels;
+    for (size_t i = 0; i < count; i++)
+        rgba[i] = (bgra[i] & 0xFF00FF00u) |
+                  ((bgra[i] & 0x00FF0000u) >> 16) | ((bgra[i] & 0xFFu) << 16);
+    int32_t oldtex = 0, oldpbo = 0, unpack[6];
+    const uint32_t names[] = {0x0CF5, 0x0CF2, 0x0CF3, 0x0CF4, 0x806E, 0x806D};
+    get(0x8069, &oldtex);             // TEXTURE_BINDING_2D
+    get(0x88EF, &oldpbo);             // PIXEL_UNPACK_BUFFER_BINDING
+    for (unsigned i = 0; i < 6; i++) { get(names[i], &unpack[i]); store(names[i], i ? 0 : 1); }
+    bindbuf(0x88EC, 0);
+    bind(0x0DE1, texture);
+    upload(0x0DE1, 0, 0, 0, w, h, 0x1908 /* RGBA */, 0x1401, rgba);
+    bind(0x0DE1, (uint32_t)oldtex);
+    bindbuf(0x88EC, (uint32_t)oldpbo);
+    for (unsigned i = 0; i < 6; i++) store(names[i], unpack[i]);
+    free(rgba);
+    return 1;
+}
+
+// Exercises streamed ASTC mips by sampling the copied destination on the GPU.
 int kl_glfb_copy_selftest(FILE *out) {
     if (!kl_glfb_init()) return 0;
     kl_glfb_make_current();

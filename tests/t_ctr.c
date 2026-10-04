@@ -260,6 +260,24 @@ int main(void) {
            "`adr x18` preserves its original PC target through the shadow slot");
         arena_free(&a2);
 
+        // PhysX's literal pool precedes its frame prologue. Both the entry
+        // write and the later read must use the same x18 shadow register.
+        arena physx = arena_new();
+        uint32_t physx_body[] = {
+            0x42C80000u, 0x42C80000u, 0, 0xD503201Fu,
+            0xD10A03FFu, 0x4F000403u, 0x5280002Cu, 0xAA0303F2u,
+            0xA9B67BFDu, 0x910003FDu, MOV(0, 18),
+            0xA8CA7BFDu, 0x910A03FFu, RET,
+        };
+        build(&physx, physx_body, sizeof physx_body / 4, &st);
+        typedef uint64_t (*physx_fn)(uint64_t, uint64_t, uint64_t, uint64_t);
+        physx_fn run_physx = (physx_fn)(void *)(physx.code + 16);
+        pthread_setspecific(KLX_TSD_SLOT, (void *)(uintptr_t)0x10);
+        ck(st.patched == 2 && run_physx(0, 0, 0, 0x12345678) == 0x12345678,
+           "PhysX entry after float literals initializes the translated x18 read");
+        pthread_setspecific(KLX_TSD_SLOT, NULL);
+        arena_free(&physx);
+
         // Robo's SpinPthread calls through x18. On a physical headset an
         // unpatched BLR through the zeroed architectural register is a fatal
         // CODESIGNING Invalid Page kill, so signal recovery cannot rescue it.

@@ -519,6 +519,26 @@ static int klx_unallocated(uint32_t w) {
 static int klx_looks_like_data(const uint32_t *w, size_t n, size_t i) {
     size_t lo = i > KLX_WIN_HALF ? i - KLX_WIN_HALF : 0;
     size_t hi = i + KLX_WIN_HALF + 1 < n ? i + KLX_WIN_HALF + 1 : n;
+    // PhysX puts float literals immediately before SweepGeomGeom's entry.
+    // They must not vote against the next function's `mov x18, x3`: leaving
+    // that write raw makes its later translated read consume stale TSD state.
+    // A complete SUB-SP / preindexed FP+LR save / FP setup identifies the
+    // function boundary. Require positively decoded instructions throughout
+    // the short prologue, keeping unlabelled crypto tables conservative.
+    for (size_t j = lo; j <= i; j++) {
+        if ((w[j] & 0xFFC003FFu) != 0xD10003FFu) continue;
+        size_t end = j + 8 < n ? j + 8 : n;
+        for (size_t p = j + 1; p + 1 < end; p++) {
+            if ((w[p] & 0xFFC07FFFu) != 0xA9807BFDu ||
+                w[p + 1] != 0x910003FDu) continue;
+            int code = 1;
+            for (size_t q = j; q <= p + 1; q++) {
+                klx_info in;
+                if (!klx_decode(w[q], &in)) { code = 0; break; }
+            }
+            if (code) lo = j;
+        }
+    }
     unsigned bad = 0;
     for (size_t k = lo; k < hi; k++)
         if (klx_unallocated(w[k]) && ++bad >= KLX_WIN_LIMIT) return 1;

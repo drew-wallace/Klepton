@@ -1112,6 +1112,12 @@ build/t_copyimage: tests/t_copyimage.c $(RUNTIME) $(RUNTIME_HDRS)
 copyimage: build/t_copyimage
 	@./build/t_copyimage vendor/out/Debug
 
+# UE4 video uploads and offline leaderboard requests; optional archive fixture.
+build/t_ue4_media: tests/t_ue4_media.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ $< $(RUNTIME) \
+	  $(LDLIBS) -framework Metal -framework QuartzCore -framework Foundation
+
 # Our advertised GL limits vs what the vendored ANGLE will honour. Needs
 # `make angle-debug`; passes (as a skip) without it, so a bare checkout is clean.
 build/t_fault: tests/t_fault.c $(RUNTIME) $(RUNTIME_HDRS)

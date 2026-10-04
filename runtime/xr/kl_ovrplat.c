@@ -804,6 +804,13 @@ static const char *const g_plat_request[] = {
     "ovr_User_GetOrgScopedID",
     "ovr_User_LaunchFriendRequestFlow",
     "ovr_User_GetLoggedInUserManagedInfo",
+    // Online leaderboard requests have no service here. Report an unavailable
+    // request so Robo Recall's mission-results UI can continue offline.
+    "ovr_Leaderboard_GetEntries", "ovr_Leaderboard_GetEntriesAfterRank",
+    "ovr_Leaderboard_GetEntriesByIds", "ovr_Leaderboard_GetEntriesByIdsAfterRank",
+    "ovr_Leaderboard_GetEntriesWithOptions", "ovr_Leaderboard_GetNextEntries",
+    "ovr_Leaderboard_GetPreviousEntries",
+    "ovr_Leaderboard_WriteEntry",
 };
 
 // Whole families where EVERY entry point is request-returning, so the same
