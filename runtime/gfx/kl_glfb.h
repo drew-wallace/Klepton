@@ -10,6 +10,8 @@
 
 int  kl_glfb_enabled(void);
 int  kl_glfb_init(void);
+// GPU regression for compressed mip copies; requires a patched Metal ANGLE.
+int  kl_glfb_copy_selftest(FILE *out);
 void kl_glfb_set_size(int w, int h);
 
 // The flat door's zero-readback storage. Requested BEFORE ANGLE comes up

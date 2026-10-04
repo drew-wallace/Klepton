@@ -101,8 +101,34 @@ Xcode 27's SDK stubs. `ANGLE_GN_ARGS` can override this selection.
   second compositor eye now aliases slice 0 without rebinding the GL name. A
   fresh simulator run removes the magenta and shows the game's light-gray
   post-splash field, with frames and eye draws continuing. The next issue is
-  why the game stays on that field instead of showing its menu or world; full
-  gameplay rendering and input remain unverified.
+  why the game stays on that field instead of showing its menu or world; that
+  startup observation is superseded by the October 4 results below.
+  On October 4, `roborecall-47091-patched` from the supplied patch+savefix+90Hz
+  folder reached its menu, hub and first arena in the visionOS 27 simulator.
+  Black streamed textures had three causes: `glCopyImageSubData` stack arguments
+  used Apple's packed layout instead of Android's eight-byte slots; the real
+  ES 3.0 context rejected the core ES 3.2 entry point; and ANGLE Metal lacked
+  the bitwise mip-copy implementation. A validated Metal copy bridge now keeps
+  compressed blocks and sRGB bits on ANGLE's ordered command stream. The
+  simulator additionally lost sRGB ASTC uploads through nonzero mip views;
+  uploads now use the original texture with recorded view ranges, avoiding the
+  simulator's unreliable `parentRelativeSlice`. The hub carpet, lighting,
+  furniture and elevator buttons render correctly after this change.
+  The simulator uses one display view, so both guest eyes now receive its
+  measured frustum. Robo's recommended eye width is also capped at 2730 there:
+  pixel density 1.5 and DoubleWide otherwise request a 9216-pixel texture over
+  the simulator's 8192 limit. Headset recommendations keep their existing cap.
+  `make copyimage` checks the Android call boundary, full/partial ASTC copies,
+  1x1 tails, all cube faces, linear/sRGB 64-pixel mips, and invalid requests on
+  host Metal. All 23 GPU samples and five validation cases pass on host Metal
+  and in the visionOS simulator. Full-resolution hub and arena captures show
+  the restored surfaces; audio output continues through scene transitions.
+  `KL_GLFB_COPY_SELFTEST=1` runs the same GPU checks before a
+  simulator guest starts. Unsigned simulator and device apps build successfully.
+  Signing the patched target is currently blocked by Xcode's `No Accounts`
+  error and lack of a matching provisioning profile; the existing 41778 profile
+  does not cover this bundle ID. Headset input and physical rendering still require
+  validation; these simulator results do not establish full playability.
   The source folder supplies one matching main OBB containing the game pak and
   intro video; no supplied Robo Recall variant has a patch OBB. The generic
   missing-patch warning therefore does not establish missing content here.

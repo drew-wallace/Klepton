@@ -311,3 +311,28 @@ LC_ALL=C less "$(xcrun simctl get_app_container $UDID $BUNDLE data)/Documents/kl
   producing `build/xros/libklepton.a`, an edited runtime source left a stale
   archive, the xcframework was built from it, and the app silently ran the
   *previous* loader — which presents as a bug in the app. Fixed in the Makefile.
+
+## Simulator scene and GPU diagnostics
+
+`KL_UE4_CONSOLE_FILE` names an optional text mailbox. Write one UE console
+command followed by a newline; the Android UI/looper thread consumes and removes
+it, then invokes `GameActivity.nativeConsoleCommand`. For Robo Recall, use
+`open /Game/Maps/Hub/Hub_env` or
+`open /Game/Maps/Arenas/level_pearl/level_pearl` after the menu has loaded. This
+allows texture streaming and scene transitions to be checked without tracked
+controllers. It does not simulate gameplay input.
+
+`KL_CP_CAPTURE` names a directory, relative to Documents unless absolute.
+The compositor blits eye 0 to a buffer after waiting for the guest fence and
+writes `eye_<frame>_<width>x<height>_<rowStride>_<bytesPerPixel>.raw` when the GPU
+command completes. DoubleWide captures contain both eyes. RGBA8 and RGBA16F
+are supported; GL frames need a vertical flip for image viewing.
+`KL_CP_CAPTURE_EVERY` defaults to 300 compositor submissions;
+`KL_CP_CAPTURE_LIMIT` defaults to eight files per launch, and zero disables
+capture. This opt-in capture path works in the simulator without relying on
+its unsupported CPU texture read methods.
+
+`KL_GLFB_COPY_SELFTEST=1` verifies compressed mip uploads and copies before
+booting the guest. The same regression runs on host Metal with
+`make angle-debug copyimage`. Failure is reported explicitly; the host test
+requires the patched ANGLE and does not skip a missing renderer.

@@ -197,11 +197,39 @@ index 2825a7c..49f308d 100644
      if (desc.numColorAttachments == 0 && mDepthRenderTarget == nullptr &&
          mStencilRenderTarget == nullptr)
      {
+diff --git a/src/libANGLE/renderer/metal/TextureMtl.h b/src/libANGLE/renderer/metal/TextureMtl.h
+index 446f81d..39aa728 100644
+--- a/src/libANGLE/renderer/metal/TextureMtl.h
++++ b/src/libANGLE/renderer/metal/TextureMtl.h
+@@ -105,6 +105,14 @@ class TextureMtl : public TextureImpl
+                                  bool unpackUnmultiplyAlpha,
+                                  const gl::Texture *source) override;
+ 
++    angle::Result copyTextureSubData(const gl::Context *context,
++                                     const gl::Texture *source,
++                                     gl::LevelIndex srcLevel,
++                                     GLint srcX, GLint srcY, gl::LayerIndex srcZ,
++                                     gl::LevelIndex dstLevel,
++                                     GLint dstX, GLint dstY, gl::LayerIndex dstZ,
++                                     GLsizei width, GLsizei height, GLsizei depth) override;
++
+     angle::Result copyCompressedTexture(const gl::Context *context,
+                                         const gl::Texture *source) override;
+ 
 diff --git a/src/libANGLE/renderer/metal/TextureMtl.mm b/src/libANGLE/renderer/metal/TextureMtl.mm
-index 7894742..2bd3489 100644
+index 7894742..b218235 100644
 --- a/src/libANGLE/renderer/metal/TextureMtl.mm
 +++ b/src/libANGLE/renderer/metal/TextureMtl.mm
-@@ -327,14 +327,25 @@ void ConvertDepthStencilData(const MTLSize &regionSize,
+@@ -21,6 +21,8 @@
+ #include "image_util/loadimage.h"
+ #include "libANGLE/ErrorStrings.h"
+ #include "libANGLE/Surface.h"
++#include "libANGLE/validationES.h"
++#include "libGLESv2/global_state.h"
+ #include "libANGLE/renderer/Format.h"
+ #include "libANGLE/renderer/metal/BufferMtl.h"
+ #include "libANGLE/renderer/metal/ContextMtl.h"
+@@ -327,14 +329,25 @@ void ConvertDepthStencilData(const MTLSize &regionSize,
                                                   size_t *buffer2DImageSizeOut,
                                                   mtl::BufferRef *bufferOut)
  {
@@ -230,7 +258,22 @@ index 7894742..2bd3489 100644
                      stagingBuffer2DImageSize, pdst);
  
      stagingBuffer->unmap(contextMtl);
-@@ -549,7 +560,6 @@ void CopyBufferToOriginalTextureIfDstIsAView(ContextMtl *contextMtl,
+@@ -390,9 +403,11 @@ void CopyBufferToOriginalTextureIfDstIsAView(ContextMtl *contextMtl,
+     mtl::TextureRef correctedTexture      = dst;
+     mtl::MipmapNativeLevel correctedLevel = dstLevel;
+     uint32_t correctedSlice               = dstSlice;
+-    // TODO(b/343734719): Simulator has bug in parentRelativeSlice() so skip this step
+-    // on simulator.
+-    if (!contextMtl->getDisplay()->isSimulator() && correctedTexture->parentTexture())
++    // The simulator cannot upload ASTC sRGB data reliably through mip views.
++    // Use the original texture with ANGLE's recorded view ranges; Metal's
++    // parentRelativeSlice property is unreliable on the simulator.
++    if ((!contextMtl->getDisplay()->isSimulator() || correctedTexture->hasKnownParentRange()) &&
++        correctedTexture->parentTexture())
+     {
+         correctedLevel = correctedLevel + correctedTexture->parentRelativeLevel().get();
+         correctedSlice += correctedTexture->parentRelativeSlice();
+@@ -549,7 +564,6 @@ void CopyBufferToOriginalTextureIfDstIsAView(ContextMtl *contextMtl,
                                                       const mtl::TextureRef &texture)
  {
      ASSERT(texture && texture->valid());
@@ -238,6 +281,148 @@ index 7894742..2bd3489 100644
  
      angle::FormatID stagingBufferFormatID   = textureAngleFormat.id;
      const angle::Format &angleStagingFormat = angle::Format::Get(stagingBufferFormatID);
+@@ -2859,6 +2873,49 @@ uint32_t height(GLuint glLevel) const
+     return angle::Result::Continue;
+ }
+ 
++// Bitwise mip copies, including ASTC blocks. The draw-based texture-copy path
++// cannot copy compressed images and would apply colour conversion to sRGB.
++angle::Result TextureMtl::copyTextureSubData(const gl::Context *context,
++                                             const gl::Texture *source,
++                                             gl::LevelIndex srcLevel,
++                                             GLint srcX, GLint srcY, gl::LayerIndex srcZ,
++                                             gl::LevelIndex dstLevel,
++                                             GLint dstX, GLint dstY, gl::LayerIndex dstZ,
++                                             GLsizei width, GLsizei height, GLsizei depth)
++{
++    ContextMtl *contextMtl = mtl::GetImpl(context);
++    TextureMtl *sourceMtl = mtl::GetImpl(source);
++    for (GLsizei layer = 0; layer < depth; ++layer)
++    {
++        bool srcCube = source->getType() == gl::TextureType::CubeMap;
++        bool dstCube = mState.getType() == gl::TextureType::CubeMap;
++        gl::ImageIndex srcIndex = gl::ImageIndex::MakeFromType(
++            source->getType(), srcLevel.get(), srcCube ? srcZ.get() + layer : gl::ImageIndex::kEntireLevel);
++        gl::ImageIndex dstIndex = gl::ImageIndex::MakeFromType(
++            mState.getType(), dstLevel.get(), dstCube ? dstZ.get() + layer : gl::ImageIndex::kEntireLevel);
++        ANGLE_TRY(sourceMtl->ensureImageCreated(context, srcIndex));
++        ANGLE_TRY(ensureImageCreated(context, dstIndex));
++        mtl::TextureRef src = sourceMtl->getImage(srcIndex);
++        mtl::TextureRef dst = getImage(dstIndex);
++        ANGLE_CHECK(contextMtl, src && dst && src->pixelFormat() == dst->pixelFormat(),
++                    gl::err::kInternalError, GL_INVALID_OPERATION);
++        bool src3D = source->getType() == gl::TextureType::_3D;
++        bool dst3D = mState.getType() == gl::TextureType::_3D;
++        uint32_t srcSlice = srcCube || src3D || source->getType() == gl::TextureType::_2D
++                                ? 0 : srcZ.get() + layer;
++        uint32_t dstSlice = dstCube || dst3D || mState.getType() == gl::TextureType::_2D
++                                ? 0 : dstZ.get() + layer;
++        auto *encoder = GetBlitCommandEncoderForResources(contextMtl, {src.get(), dst.get()});
++        encoder->copyTextureRegion(src, srcSlice,
++                                   MTLOriginMake(srcX, srcY, src3D ? srcZ.get() + layer : 0),
++                                   dst, dstSlice,
++                                   MTLOriginMake(dstX, dstY, dst3D ? dstZ.get() + layer : 0),
++                                   MTLSizeMake(width, height, 1));
++    }
++    contextMtl->invalidateCurrentTextures();
++    return angle::Result::Continue;
++}
++
+ angle::Result TextureMtl::copySubTextureImpl(const gl::Context *context,
+                                              const gl::ImageIndex &index,
+                                              const gl::Offset &destOffset,
+@@ -3006,3 +3063,39 @@ uint32_t height(GLuint glLevel) const
+ }
+ 
+ }  // namespace rx
++
++// Klepton exposes GLES 3.2 to Android engines over this ES 3.0 backend. Keep
++// the core entry point's version validation intact and offer this narrow bridge
++// for matching-format texture copies; renderbuffers and format reinterpretation
++// stay on the normal GL entry point. Validation and texture-content bookkeeping
++// remain ANGLE's, and the copy shares its command stream and resource fences.
++extern "C" __attribute__((visibility("default"))) int ANGLEMetalCopyImageSubData(
++    GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
++    GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ,
++    GLsizei width, GLsizei height, GLsizei depth)
++{
++    gl::Context *context = gl::GetValidGlobalContext();
++    const auto textureTarget = [](GLenum target) {
++        return target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP ||
++               target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY;
++    };
++    if (!context || !textureTarget(srcTarget) || !textureTarget(dstTarget)) return 0;
++    SCOPED_SHARE_CONTEXT_LOCK(context);
++    const auto entry = angle::EntryPoint::GLCopyImageSubData;
++    if (!gl::ValidateCopyImageSubDataBase(context, entry, srcName, srcTarget, srcLevel,
++                                         srcX, srcY, srcZ, dstName, dstTarget, dstLevel,
++                                         dstX, dstY, dstZ, width, height, depth)) return 1;
++    if (width == 0 || height == 0 || depth == 0) return 1;
++    gl::Texture *src = context->getTexture(gl::TextureID{srcName});
++    gl::Texture *dst = context->getTexture(gl::TextureID{dstName});
++    gl::ImageIndex si = gl::ImageIndex::MakeFromType(src->getType(), srcLevel,
++                        src->getType() == gl::TextureType::CubeMap ? srcZ : gl::ImageIndex::kEntireLevel);
++    gl::ImageIndex di = gl::ImageIndex::MakeFromType(dst->getType(), dstLevel,
++                        dst->getType() == gl::TextureType::CubeMap ? dstZ : gl::ImageIndex::kEntireLevel);
++    if (src->getState().getImageDesc(si).format.info->sizedInternalFormat !=
++        dst->getState().getImageDesc(di).format.info->sizedInternalFormat) return 0;
++    context->copyImageSubData(srcName, srcTarget, srcLevel, srcX, srcY, srcZ,
++                              dstName, dstTarget, dstLevel, dstX, dstY, dstZ,
++                              width, height, depth);
++    return 1;
++}
+diff --git a/src/libANGLE/renderer/metal/mtl_command_buffer.h b/src/libANGLE/renderer/metal/mtl_command_buffer.h
+index 2221ba0..293f241 100644
+--- a/src/libANGLE/renderer/metal/mtl_command_buffer.h
++++ b/src/libANGLE/renderer/metal/mtl_command_buffer.h
+@@ -704,6 +704,14 @@ class BlitCommandEncoder final : public CommandEncoder
+                                     uint32_t sliceCount,
+                                     uint32_t levelCount);
+ 
++    BlitCommandEncoder &copyTextureRegion(const TextureRef &src,
++                                          uint32_t srcSlice,
++                                          MTLOrigin srcOrigin,
++                                          const TextureRef &dst,
++                                          uint32_t dstSlice,
++                                          MTLOrigin dstOrigin,
++                                          MTLSize size);
++
+     BlitCommandEncoder &fillBuffer(const BufferRef &buffer, NSRange range, uint8_t value);
+ 
+     BlitCommandEncoder &generateMipmapsForTexture(const TextureRef &texture);
+diff --git a/src/libANGLE/renderer/metal/mtl_command_buffer.mm b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
+index 1dd725d..e8cf806 100644
+--- a/src/libANGLE/renderer/metal/mtl_command_buffer.mm
++++ b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
+@@ -2571,6 +2571,28 @@ void RandomizeClearValue(ObjCAttachmentDescriptor *objCRenderPassAttachment)
+     return *this;
+ }
+ 
++BlitCommandEncoder &BlitCommandEncoder::copyTextureRegion(const TextureRef &src,
++                                                          uint32_t srcSlice,
++                                                          MTLOrigin srcOrigin,
++                                                          const TextureRef &dst,
++                                                          uint32_t dstSlice,
++                                                          MTLOrigin dstOrigin,
++                                                          MTLSize size)
++{
++    cmdBuffer().setReadDependency(src, /*isRenderCommand=*/false);
++    cmdBuffer().setWriteDependency(dst, /*isRenderCommand=*/false);
++    [get() copyFromTexture:src->get()
++              sourceSlice:srcSlice
++              sourceLevel:0
++             sourceOrigin:srcOrigin
++               sourceSize:size
++                toTexture:dst->get()
++         destinationSlice:dstSlice
++         destinationLevel:0
++        destinationOrigin:dstOrigin];
++    return *this;
++}
++
+ BlitCommandEncoder &BlitCommandEncoder::fillBuffer(const BufferRef &buffer,
+                                                    NSRange range,
+                                                    uint8_t value)
 diff --git a/src/libANGLE/renderer/metal/mtl_common.h b/src/libANGLE/renderer/metal/mtl_common.h
 index 85cc743..1b76b7e 100644
 --- a/src/libANGLE/renderer/metal/mtl_common.h
@@ -708,6 +893,89 @@ index 0710ffe..ad3916b 100644
      if (isColorBlit)
      {
          const ColorBlitParams *colorParams = static_cast<const ColorBlitParams *>(&params);
+diff --git a/src/libANGLE/renderer/metal/mtl_resources.h b/src/libANGLE/renderer/metal/mtl_resources.h
+index 8916375..42b79ea 100644
+--- a/src/libANGLE/renderer/metal/mtl_resources.h
++++ b/src/libANGLE/renderer/metal/mtl_resources.h
+@@ -328,6 +328,7 @@ class Texture final : public Resource,
+     TextureRef getLinearColorView();
+ 
+     TextureRef parentTexture();
++    bool hasKnownParentRange() const { return mHasKnownParentRange; }
+     MipmapNativeLevel parentRelativeLevel();
+     uint32_t parentRelativeSlice();
+ 
+@@ -428,6 +429,11 @@ class Texture final : public Resource,
+     TextureRef mReadCopy;
+ 
+     TextureRef mParentTexture;
++    // Simulator parentRelativeSlice() is unreliable. Retain the ranges ANGLE
++    // supplied when constructing a view, without retaining its wrapper parent.
++    bool mHasKnownParentRange = false;
++    uint32_t mParentLevel = 0;
++    uint32_t mParentSlice = 0;
+ 
+     size_t mEstimatedByteSize = 0;
+ 
+diff --git a/src/libANGLE/renderer/metal/mtl_resources.mm b/src/libANGLE/renderer/metal/mtl_resources.mm
+index fcd258b..fb16c34 100644
+--- a/src/libANGLE/renderer/metal/mtl_resources.mm
++++ b/src/libANGLE/renderer/metal/mtl_resources.mm
+@@ -526,6 +526,7 @@ bool needMultisampleColorFormatShaderReadWorkaround(ContextMtl *context, MTLText
+     ANGLE_MTL_OBJC_SCOPE
+     {
+         set(angle::adoptObjCPtr([original->get() newTextureViewWithPixelFormat:pixelFormat]));
++        mHasKnownParentRange = true;
+         // Texture views consume no additional memory
+         mEstimatedByteSize = 0;
+     }
+@@ -545,6 +546,9 @@ bool needMultisampleColorFormatShaderReadWorkaround(ContextMtl *context, MTLText
+                                                                    textureType:textureType
+                                                                         levels:levels
+                                                                         slices:slices]));
++        mParentLevel = static_cast<uint32_t>(levels.location);
++        mParentSlice = static_cast<uint32_t>(slices.location);
++        mHasKnownParentRange = true;
+         // Texture views consume no additional memory
+         mEstimatedByteSize = 0;
+     }
+@@ -566,7 +570,10 @@ bool needMultisampleColorFormatShaderReadWorkaround(ContextMtl *context, MTLText
+                                                                         levels:levels
+                                                                         slices:slices
+                                                                        swizzle:swizzle]));
++        mParentLevel = static_cast<uint32_t>(levels.location);
++        mParentSlice = static_cast<uint32_t>(slices.location);
+ 
++        mHasKnownParentRange = true;
+         // Texture views consume no additional memory
+         mEstimatedByteSize = 0;
+     }
+@@ -1028,10 +1035,16 @@ bool needMultisampleColorFormatShaderReadWorkaround(ContextMtl *context, MTLText
+ }
+ MipmapNativeLevel Texture::parentRelativeLevel()
+ {
++#if TARGET_OS_SIMULATOR
++    if (mHasKnownParentRange) return mtl::GetNativeMipLevel(mParentLevel, 0);
++#endif
+     return mtl::GetNativeMipLevel(static_cast<uint32_t>(get().parentRelativeLevel), 0);
+ }
+ uint32_t Texture::parentRelativeSlice()
+ {
++#if TARGET_OS_SIMULATOR
++    if (mHasKnownParentRange) return mParentSlice;
++#endif
+     return static_cast<uint32_t>(get().parentRelativeSlice);
+ }
+ 
+@@ -1043,6 +1056,8 @@ bool needMultisampleColorFormatShaderReadWorkaround(ContextMtl *context, MTLText
+     mLinearColorView = nullptr;
+ 
+     mParentTexture = nullptr;
++    mHasKnownParentRange = false;
++    mParentLevel = mParentSlice = 0;
+ }
+ 
+ // Buffer implementation
 diff --git a/src/libANGLE/renderer/metal/mtl_state_cache.h b/src/libANGLE/renderer/metal/mtl_state_cache.h
 index 329402d..f010383 100644
 --- a/src/libANGLE/renderer/metal/mtl_state_cache.h

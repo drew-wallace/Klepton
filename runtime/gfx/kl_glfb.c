@@ -418,7 +418,7 @@ int kl_glfb_init(void) {
     // here instead of needing an error-code probe per call site.
     if (kl_env_on("KL_GLFB_DEBUG_CB", 0)) {
         void (*glDebugMessageCallback)(const void *, const void *) =
-            asym("glDebugMessageCallback");
+            asym("glDebugMessageCallbackKHR");
         void (*glEnable)(uint32_t) = asym("glEnable");
         if (glDebugMessageCallback) {
             glDebugMessageCallback((const void *)klfb_debug_cb, NULL);
@@ -448,6 +448,11 @@ int kl_glfb_init(void) {
                         "EXT_color_buffer_half_float=%s\n",
                 strstr(ext, "GL_EXT_color_buffer_float") ? "yes" : "NO",
                 strstr(ext, "GL_EXT_color_buffer_half_float") ? "yes" : "NO");
+    }
+
+    if (kl_env_on("KL_GLFB_COPY_SELFTEST", 0)) {
+        kl_glfb_copy_selftest(stderr);
+        kl_glfb_release_current();
     }
 
     // Release it. EGL binds a context to one thread at a time and *refuses* to
@@ -610,7 +615,7 @@ void kl_glfb_make_current(void) {
         // registration in kl_glfb_init does not cover this thread's context.
         t->debug_cb = 1;
         void (*glDebugMessageCallback)(const void *, const void *) =
-            asym("glDebugMessageCallback");
+            asym("glDebugMessageCallbackKHR");
         void (*glEnable)(uint32_t) = asym("glEnable");
         if (glDebugMessageCallback) {
             glDebugMessageCallback((const void *)klfb_debug_cb, NULL);
@@ -5790,6 +5795,197 @@ static void klfb_CompressedTexSubImage3D(uint32_t target, int32_t level, int32_t
                                        (uint32_t)format, (int32_t)imageSize, data);
 }
 
+// UE4 streams mip chains by copying their already-resident images into a new
+// texture. ANGLE's core CopyImageSubData rejects an ES 3.0 context (even though
+// the guest sees GLES 3.2), and its Metal backend lacked the compressed copy.
+// The patched backend bridge performs a validated, bitwise copy on ANGLE's own
+// command stream, preserving ASTC blocks, sRGB bits and resource ordering.
+#define KLFB_COPY_IMAGE_ARGS uint32_t src, uint32_t src_target, int32_t src_level, \
+    int32_t sx, int32_t sy, int32_t sz, uint32_t dst, uint32_t dst_target, \
+    int32_t dst_level, int32_t dx, int32_t dy, int32_t dz, \
+    int32_t w, int32_t h, int32_t d
+#define KLFB_COPY_IMAGE_PASS src, src_target, src_level, sx, sy, sz, \
+    dst, dst_target, dst_level, dx, dy, dz, w, h, d
+static void (*g_real_CopyImageSubData)(KLFB_COPY_IMAGE_ARGS);
+static int (*g_metal_CopyImageSubData)(KLFB_COPY_IMAGE_ARGS);
+static pthread_once_t g_copy_once = PTHREAD_ONCE_INIT;
+static void klfb_resolve_copy_image(void) {
+    g_metal_CopyImageSubData = asym("ANGLEMetalCopyImageSubData");
+    fprintf(stderr, "  [glfb] texture mip copies: %s\n", g_metal_CopyImageSubData
+            ? "validated Metal block copies" : "ANGLE bridge absent; core GL fallback");
+}
+static void klfb_CopyImageSubDataImpl(KLFB_COPY_IMAGE_ARGS) {
+    pthread_once(&g_copy_once, klfb_resolve_copy_image);
+    if (klfb_trace_tex())
+        fprintf(stderr, "  [glfb] glCopyImageSubData %u/0x%x mip %d (%d,%d,%d) "
+                        "-> %u/0x%x mip %d (%d,%d,%d), %dx%dx%d\n",
+                KLFB_COPY_IMAGE_PASS);
+    if (g_metal_CopyImageSubData && g_metal_CopyImageSubData(KLFB_COPY_IMAGE_PASS)) return;
+    if (g_real_CopyImageSubData) g_real_CopyImageSubData(KLFB_COPY_IMAGE_PASS);
+}
+// Android AAPCS64 gives every stack argument an eight-byte slot. Apple
+// arm64 packs GLint/GLsizei stack arguments into four-byte slots. The first
+// eight arguments stay in registers; widen the remaining seven at this seam.
+static void klfb_CopyImageSubData(uint32_t src, uint32_t src_target, int32_t src_level,
+    int32_t sx, int32_t sy, int32_t sz, uint32_t dst, uint32_t dst_target,
+    int64_t dst_level, int64_t dx, int64_t dy, int64_t dz,
+    int64_t w, int64_t h, int64_t d) {
+    klfb_CopyImageSubDataImpl(src, src_target, src_level, sx, sy, sz, dst, dst_target,
+                             (int32_t)dst_level, (int32_t)dx, (int32_t)dy, (int32_t)dz,
+                             (int32_t)w, (int32_t)h, (int32_t)d);
+}
+#undef KLFB_COPY_IMAGE_ARGS
+#undef KLFB_COPY_IMAGE_PASS
+
+// Exercises the streamed ASTC mip path by sampling the copied destination on
+// the GPU. Sizes include multiple 6x6 blocks, an aligned subregion and a 1x1
+// tail mip, which is smaller than one compression block. Cube faces test the
+// layer-to-image-view mapping as well as the normal 2D path.
+int kl_glfb_copy_selftest(FILE *out) {
+    if (!kl_glfb_init()) return 0;
+    kl_glfb_make_current();
+    while (a_glGetError()) {} // isolate this test from optional debug setup
+    // Call the public guest lookup with Android's independent stack-slot ABI.
+    // Calling the wrapper by its C declaration would hide a packing regression.
+    void (*copy_guest)(uint32_t,uint32_t,int32_t,int32_t,int32_t,int32_t,uint32_t,uint32_t,
+                       int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t) =
+        kl_glfb_sym("glCopyImageSubData");
+    if (!copy_guest) return 0;
+#define COPY_LOAD(ret, name, args) ret (*name) args = asym(#name)
+    COPY_LOAD(void, glGenTextures, (int32_t, uint32_t *));
+    COPY_LOAD(void, glDeleteTextures, (int32_t, const uint32_t *));
+    COPY_LOAD(void, glBindTexture, (uint32_t, uint32_t));
+    COPY_LOAD(void, glActiveTexture, (uint32_t));
+    COPY_LOAD(void, glTexStorage2D, (uint32_t, int32_t, uint32_t, int32_t, int32_t));
+    COPY_LOAD(void, glTexParameteri, (uint32_t, uint32_t, int32_t));
+    COPY_LOAD(void, glCompressedTexSubImage2D, (uint32_t, int32_t, int32_t, int32_t,
+                                               int32_t, int32_t, uint32_t, int32_t, const void *));
+    COPY_LOAD(void, glGenFramebuffers, (int32_t, uint32_t *));
+    COPY_LOAD(void, glDeleteFramebuffers, (int32_t, const uint32_t *));
+    COPY_LOAD(void, glBindFramebuffer, (uint32_t, uint32_t));
+    COPY_LOAD(void, glFramebufferTexture2D, (uint32_t, uint32_t, uint32_t, uint32_t, int32_t));
+    COPY_LOAD(uint32_t, glCreateShader, (uint32_t));
+    COPY_LOAD(void, glShaderSource, (uint32_t, int32_t, const char *const *, const int32_t *));
+    COPY_LOAD(void, glCompileShader, (uint32_t));
+    COPY_LOAD(void, glDeleteShader, (uint32_t));
+    COPY_LOAD(uint32_t, glCreateProgram, (void));
+    COPY_LOAD(void, glAttachShader, (uint32_t, uint32_t));
+    COPY_LOAD(void, glLinkProgram, (uint32_t));
+    COPY_LOAD(void, glGetProgramiv, (uint32_t, uint32_t, int32_t *));
+    COPY_LOAD(void, glDeleteProgram, (uint32_t));
+    COPY_LOAD(void, glUseProgram, (uint32_t));
+    COPY_LOAD(int32_t, glGetUniformLocation, (uint32_t, const char *));
+    COPY_LOAD(void, glUniform1i, (int32_t, int32_t));
+    COPY_LOAD(void, glUniform3f, (int32_t, float, float, float));
+    COPY_LOAD(void, glViewport, (int32_t, int32_t, int32_t, int32_t));
+    COPY_LOAD(void, glDrawArrays, (uint32_t, int32_t, int32_t));
+#undef COPY_LOAD
+    uint32_t textures[3], fb, shaders[2], program;
+    glGenTextures(3, textures); glGenFramebuffers(1, &fb);
+    glBindTexture(0x0DE1, textures[2]); glTexStorage2D(0x0DE1, 1, 0x8058, 1, 1);
+    glBindFramebuffer(0x8D40, fb);
+    glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, textures[2], 0);
+    const char *vs = "#version 300 es\nvoid main(){ vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2); gl_Position=vec4(p*2.0-1.0,0,1);}";
+    const char *fs = "#version 300 es\nprecision highp float; uniform sampler2D t; uniform samplerCube c; uniform int cube; uniform vec3 uv; out vec4 o; void main(){o=cube==0?textureLod(t,uv.xy,0.0):textureLod(c,uv,0.0);}";
+    shaders[0] = glCreateShader(0x8B31); shaders[1] = glCreateShader(0x8B30);
+    glShaderSource(shaders[0], 1, &vs, NULL); glCompileShader(shaders[0]);
+    glShaderSource(shaders[1], 1, &fs, NULL); glCompileShader(shaders[1]);
+    program = glCreateProgram(); glAttachShader(program, shaders[0]);
+    glAttachShader(program, shaders[1]); glLinkProgram(program);
+    int32_t linked = 0; glGetProgramiv(program, 0x8B82, &linked);
+    int ok = linked;
+    glUseProgram(program); glViewport(0, 0, 1, 1);
+    glUniform1i(glGetUniformLocation(program, "t"), 0);
+    glUniform1i(glGetUniformLocation(program, "c"), 1);
+    int32_t uv = glGetUniformLocation(program, "uv");
+    int32_t cube = glGetUniformLocation(program, "cube");
+    uint8_t colors[6][4] = {{255,0,0,255},{0,255,0,255},{0,0,255,255},
+                            {255,255,255,255},{255,255,0,255},{0,255,255,255}};
+    const float directions[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    unsigned samples = 0;
+    for (int test = 0; test < 8; test++) {
+        int is_cube = test == 3, size = test == 2 ? 1 : test >= 4 ? 64 : 12;
+        uint32_t format = test >= 6 ? 0x93D4 /* sRGB ASTC 6x6 */ : 0x93B4;
+        int src_level = test >= 4 ? (test&1) : 0;
+        uint32_t target = is_cube ? 0x8513 : 0x0DE1;
+        glActiveTexture(is_cube ? 0x84C1 : 0x84C0);
+        glBindTexture(target, textures[0]);
+        glTexStorage2D(target, src_level+1, format, size<<src_level, size<<src_level);
+        uint8_t blocks[16*11*11];
+        int block_count = ((size+5)/6)*((size+5)/6);
+        for (int face = 0; face < (is_cube ? 6 : 1); face++) {
+            for (int b = 0; b < block_count; b++) {
+                uint8_t *block = blocks + 16*b;
+                memset(block, 255, 16); block[0]=0xFC; block[1]=0xFD;
+                for (int channel=0; channel<4; channel++)
+                    block[8+2*channel]=block[9+2*channel]=test>=4 ? (channel==3?255:128)
+                        : colors[is_cube?face:b][channel];
+            }
+            glCompressedTexSubImage2D(is_cube ? 0x8515+face : target, src_level, 0, 0,
+                                        size, size, format, 16*block_count, blocks);
+        }
+        if (test >= 4) {
+            glTexParameteri(target, 0x813C, src_level); glTexParameteri(target, 0x813D, src_level);
+            glTexParameteri(target, 0x2801, 0x2600); glTexParameteri(target, 0x2800, 0x2600);
+            glUniform1i(cube,0); glUniform3f(uv,.25f,.25f,0); glDrawArrays(4,0,3);
+            uint8_t pixel[4]; a_glReadPixels(0,0,1,1,0x1908,0x1401,pixel);
+            uint8_t expected[4] = {test>=6?55:128,test>=6?55:128,test>=6?55:128,255};
+            uint32_t error = a_glGetError();
+            int match = error == 0 && !memcmp(pixel,expected,4);
+            ok &= match; samples++;
+            if (!match) fprintf(out,"  ASTC source test %d mip %d: %u,%u,%u,%u err=%#x FAILED\n",
+                    test,src_level,pixel[0],pixel[1],pixel[2],pixel[3],error);
+        }
+        glBindTexture(target, textures[1]);
+        int dst_level = size == 1 ? 0 : 2;
+        glTexStorage2D(target, dst_level+1, format, size<<dst_level, size<<dst_level);
+        glTexParameteri(target, 0x813C /* BASE_LEVEL */, dst_level);
+        glTexParameteri(target, 0x813D /* MAX_LEVEL */, dst_level);
+        glTexParameteri(target, 0x2801, 0x2600); glTexParameteri(target, 0x2800, 0x2600);
+        copy_guest(textures[0], target, src_level, 0, 0, 0,
+                              textures[1], target, dst_level, 0, 0, 0, size, size, is_cube ? 6 : 1);
+        if (test == 1)
+            copy_guest(textures[0], target, src_level, 0, 0, 0,
+                                  textures[1], target, dst_level, 6, 0, 0, 6, 6, 1);
+        if (test == 1) {
+            // Invalid names, mip levels, dimensions and block offsets must
+            // report GL_INVALID_VALUE, without corrupting the valid copy.
+            for (int bad=0; bad<4; bad++) {
+                copy_guest(bad==0?0:textures[0], target, bad==1?99:src_level,
+                    bad==3?1:0, 0, 0, textures[1], target, dst_level,
+                    0, 0, 0, bad==2?-1:6, 6, 1);
+                uint32_t error = a_glGetError();
+                ok &= error == 0x501;
+                if (error != 0x501) fprintf(out,"  copy invalid case %d: err=%#x FAILED\n",bad,error);
+            }
+            copy_guest(textures[0],target,src_level,0,0,0,
+                                 textures[1],target,dst_level,0,0,0,0,12,1);
+            ok &= a_glGetError() == 0;
+        }
+        glUniform1i(cube, is_cube);
+        for (int sample=0; sample<(is_cube?6:size==1||test>=4?1:4); sample++) {
+            if (is_cube) glUniform3f(uv, directions[sample][0], directions[sample][1], directions[sample][2]);
+            else glUniform3f(uv, (sample%2+.5f)/2, (sample/2+.5f)/2, 0);
+            glDrawArrays(4, 0, 3);
+            uint8_t pixel[4]; a_glReadPixels(0,0,1,1,0x1908,0x1401,pixel);
+            uint32_t error = a_glGetError();
+            int expect = test==1 && sample==1 ? 0 : sample;
+            uint8_t srgb_expected[4] = {test>=6?55:128,test>=6?55:128,test>=6?55:128,255};
+            int match = error == 0 && !memcmp(pixel, test>=4?srgb_expected:colors[expect], 4);
+            ok &= match; samples++;
+            if (!match) fprintf(out, "  copy test %d sample %d: RGBA %u,%u,%u,%u err=%#x FAILED\n",
+                                 test,sample,pixel[0],pixel[1],pixel[2],pixel[3],error);
+        }
+        glDeleteTextures(2,textures); glGenTextures(2,textures);
+    }
+    glDeleteTextures(3,textures); glDeleteFramebuffers(1,&fb);
+    glUseProgram(0); glDeleteProgram(program);
+    glDeleteShader(shaders[0]); glDeleteShader(shaders[1]);
+    glBindFramebuffer(0x8D40,0); glActiveTexture(0x84C0); glViewport(0,0,g_w,g_h);
+    fprintf(out, "  [glfb] ASTC mip copies: %s (%u GPU samples: full/partial/1x1/cube/sRGB64; 5 validation cases)\n",ok?"PASS":"FAIL",samples);
+    return ok;
+}
+
 // ------------------------------------------------------- draw-target census
 //
 // The frame reads back black even though the capture is now correct, so the
@@ -7429,6 +7625,9 @@ static const struct { const char *name; void *thunk; void **real; } g_thunks[] =
     {"glTexSubImage3D",           (void *)klfb_TexSubImage3D,           (void **)&g_real_TexSubImage3D},
     {"glCompressedTexSubImage2D", (void *)klfb_CompressedTexSubImage2D, (void **)&g_real_CompressedTexSubImage2D},
     {"glCompressedTexSubImage3D", (void *)klfb_CompressedTexSubImage3D, (void **)&g_real_CompressedTexSubImage3D},
+    {"glCopyImageSubData", (void *)klfb_CopyImageSubData, (void **)&g_real_CopyImageSubData},
+    {"glCopyImageSubDataEXT", (void *)klfb_CopyImageSubData, (void **)&g_real_CopyImageSubData},
+    {"glCopyImageSubDataOES", (void *)klfb_CopyImageSubData, (void **)&g_real_CopyImageSubData},
     // the shared-context compile lock — see the block above s10's numbers
     {"glShaderSource", (void *)klfb_ShaderSource, (void **)&g_real_ShaderSource},
     {"glCompileShader", (void *)klfb_CompileShader, (void **)&g_real_CompileShader},

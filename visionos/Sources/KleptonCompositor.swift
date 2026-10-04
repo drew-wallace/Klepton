@@ -510,6 +510,7 @@ final class KleptonCompositor {
     // right Sense Options button >= 1 s (KleptonControllers).
     nonisolated(unsafe) static var pendingRecenter = false
     private var recenterXform = matrix_identity_float4x4
+    private var eyeCaptures = 0
     private var cmdCommitted = 0
     private let cmdLock = NSLock()
     private var cmdCompleted = 0
@@ -2201,6 +2202,7 @@ final class KleptonCompositor {
             if n <= 12 { NSLog("[cp] cmdbuf #\(n) COMPLETED" + (b.error != nil ? " err=\(b.error!)" : "")) }
             if first { NSLog("[cp] composite command buffer error: \(b.error!)") }
         }
+        captureEyes(cmd: cmd, stage: stage)
         cmd.commit()
         cmdCommitted += 1
         lastEncodedSeen = encoded
@@ -2213,6 +2215,41 @@ final class KleptonCompositor {
         noteCadence(presentation: presentation, drawable: main)
         frame.endSubmission()      // only here — see startSubmission above
         return encoded > 0 ? 1 : 0
+    }
+
+    /// Optional GPU capture, after the guest fence wait on the compositor queue.
+    private func captureEyes(cmd: MTLCommandBuffer, stage: Int) {
+        guard let path = ProcessInfo.processInfo.environment["KL_CP_CAPTURE"], !path.isEmpty,
+              eyeCaptures < max(0, Int(klEnvFloat("KL_CP_CAPTURE_LIMIT", 8))),
+              cmdCommitted % max(1, Int(klEnvFloat("KL_CP_CAPTURE_EVERY", 300))) == 0 else { return }
+        let root = path.hasPrefix("/") ? URL(fileURLWithPath: path)
+            : FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(path)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        eyesLock.lock(); let allocation = eyes[Self.key(0, stage)]; eyesLock.unlock()
+        guard let allocation else { return }
+        let texture = allocation.texture
+        let bytesPerPixel: Int
+        switch texture.pixelFormat {
+        case .rgba8Unorm, .rgba8Unorm_srgb: bytesPerPixel = 4
+        case .rgba16Float: bytesPerPixel = 8
+        default: return
+        }
+        let stride = (texture.width * bytesPerPixel + 255) & ~255
+        guard let buffer = device.makeBuffer(length: stride * texture.height, options: .storageModeShared),
+              let blit = cmd.makeBlitCommandEncoder() else { return }
+        blit.copy(from: texture, sourceSlice: allocation.slice, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+                  to: buffer, destinationOffset: 0, destinationBytesPerRow: stride,
+                  destinationBytesPerImage: stride * texture.height)
+        blit.endEncoding()
+        eyeCaptures += 1
+        let file = root.appendingPathComponent("eye_\(cmdCommitted)_\(texture.width)x\(texture.height)_\(stride)_\(bytesPerPixel).raw")
+        cmd.addCompletedHandler { command in
+            guard command.status == .completed else { return }
+            try? Data(bytes: buffer.contents(), count: buffer.length).write(to: file)
+            NSLog("[cp] captured eye: \(file.path)")
+        }
     }
 
     /// One drawable, every eye it carries. Returns how many eyes got a picture.
@@ -3881,6 +3918,12 @@ final class KleptonCompositor {
             frame.endSubmission()
         }
 
+        #if targetEnvironment(simulator)
+        // The simulator presents a monoscopic drawable. Give the guest's
+        // second eye the same cone instead of leaving its default 90-degree
+        // vertical FOV, which stretches the two eye images differently.
+        if tangents.count == 1 { tangents.append(tangents[0]) }
+        #endif
         for (i, t) in tangents.enumerated() where i < 2 {
             NSLog(String(format: "[cp] eye %d display tangents l=%.4f r=%.4f t=%.4f b=%.4f "
                                  + "(%.1f x %.1f degrees)", i, t.x, t.y, t.z, t.w,

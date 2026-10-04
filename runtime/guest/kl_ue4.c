@@ -585,6 +585,7 @@ typedef unsigned char ue4_jboolean;
 // macro's), and naming them after the descriptor keeps the call sites checkable
 // against the smali line above each one.
 typedef void (*ue4_fn_v)(void *, void *);
+typedef void (*ue4_fn_s)(void *, void *, void *);
 typedef void (*ue4_fn_ZI)(void *, void *, ue4_jboolean, int);
 typedef void (*ue4_fn_Z)(void *, void *, ue4_jboolean);
 typedef void (*ue4_fn_ZZssZsZ)(void *, void *, ue4_jboolean, ue4_jboolean,
@@ -828,6 +829,34 @@ double kl_ue4_pump(double seconds, const volatile int *quit) {
     double elapsed = 0;
     for (unsigned t = 0; (quit ? !*quit : 1) && (seconds < 0 || elapsed < seconds); t++) {
         kl_ndk_pump_looper(100);
+        // Diagnostic mailbox, drained on Android's UI/looper thread just like
+        // GameActivity.nativeConsoleCommand. Allows simulator scene transitions
+        // without changing the APK or requiring a tracked controller.
+        const char *mailbox = getenv("KL_UE4_CONSOLE_FILE");
+        if (mailbox && *mailbox && t % 10 == 0) {
+            FILE *f = fopen(mailbox, "r");
+            if (f) {
+                char command[1024];
+                int have = fgets(command, sizeof command, f) != NULL;
+                fclose(f);
+                remove(mailbox);
+                if (have) {
+                    command[strcspn(command, "\r\n")] = 0;
+                    void *env = kl_jni_env(), *thiz = kl_jni_activity();
+                    void *text = kl_jni_new_string(command);
+                    const uint16_t *args = kl_sym(g_ue4, "_ZN12FCommandLine7CmdLineE");
+                    if (args) {
+                        char ascii[1024]; unsigned i = 0;
+                        for (; i < sizeof ascii - 1 && args[i]; i++)
+                            ascii[i] = args[i] < 128 ? (char)args[i] : '?';
+                        ascii[i] = 0;
+                        fprintf(stderr, "  [ue4] active engine command line: %s\n", ascii);
+                    }
+                    fprintf(stderr, "  [ue4] console: %s\n", command);
+                    UE4_CALL(stderr, "nativeConsoleCommand", ue4_fn_s, text);
+                }
+            }
+        }
         // The UI thread's task queue and the frame clock, on the same thread
         // that turns the looper — which is what makes it the UI thread by the
         // only definition that matters: "am I the UI thread" is answered by

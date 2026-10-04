@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <mach/mach.h>   // vm_read_overwrite — probe a guest pointer without faulting
+#include <TargetConditionals.h>
 #include "klepton.h"
 #include "kl_ovrp.h"
 #include "../guest/kl_driver.h"
@@ -1133,7 +1134,15 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         w = (int)((float)w * scale + 0.5f);
         h = (int)((float)h * scale + 0.5f);
     }
-    int cap = kl_env_int("KL_OVRP_EYE_MAX", 3072);
+    int default_cap = 3072;
+#if TARGET_OS_SIMULATOR
+    // Robo Recall applies vr.PixelDensity=1.5, then packs both eyes into one
+    // DoubleWide texture. The simulator's Metal textures stop at 8192 pixels:
+    // the usual 3072 recommendation becomes 9216 and aborts in Metal validation.
+    const char *target = kl_driver_target_name();
+    if (target && !strncmp(target, "roborecall-", 11)) default_cap = 8192 / 3;
+#endif
+    int cap = kl_env_int("KL_OVRP_EYE_MAX", default_cap);
     if (cap > 0 && (w > cap || h > cap)) {
         // Preserve the aspect ratio: clamping the axes independently would
         // change the shape of the picture, and the frustum tangents pushed

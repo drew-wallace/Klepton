@@ -102,3 +102,8 @@ tools/__pycache__/
 # Python bytecode is generated locally.
 __pycache__/
 *.py[cod]
+
+# Generated game/toolchain trees can be symlinks in an isolated worktree.
+/vendor
+/vendor-moltenvk
+/roborecall-47091-patched
