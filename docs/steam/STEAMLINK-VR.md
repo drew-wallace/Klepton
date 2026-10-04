@@ -105,6 +105,18 @@ streaming success cannot establish any of these conditions. Provider approval,
 the provider/client migration, and that physical acceptance test are pending;
 the eye-tracking extensions remain unadvertised.
 
+## Battery telemetry
+
+This branch includes upstream
+[PR #5](https://github.com/shinyquagsire23/Klepton/pull/5): headset battery level
+and charging state from `UIDevice`, plus independent PSVR2 Sense readings from
+`GCController`. The runtime shares those readings with Android BatteryManager,
+OVRPlugin, OpenXR battery queries, and Steam Link's controller power properties.
+The private controller power layout also matches the supplied 2.0.23 APK.
+Battery reporting needs no additional entitlement. The simulator has no real
+headset/controller battery readings, so its fallback behavior and streaming
+integration can be tested there; measured percentages require physical devices.
+
 ## Regression checks
 
 ```sh

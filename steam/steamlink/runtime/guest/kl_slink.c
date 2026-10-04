@@ -105,7 +105,8 @@ static kl_slink_door g_door;
 static char g_libdir[1024];
 static char g_error[512];
 
-// Steam Link 2.0.0's controller power query. This APK predates
+// Steam Link's controller power query (layout also verified in 2.0.23).
+// The original 2.0.0 APK predates
 // XR_EXT_interaction_profile_battery_state_display and never asks OpenXR for
 // battery state; instead its own QSVLXRInput virtual method fills this private
 // six-property record before it is sent to the host as VTE_PROPS_POWER_L/R.
