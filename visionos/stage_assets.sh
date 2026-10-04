@@ -236,9 +236,13 @@ fi
 # and takes seconds. Saying which is which up front is the difference between
 # waiting and wondering.
 copy() {   # <source> <destination-relative-to-container>
+  # Local APKs may be symlinks into ~/ovrport. Copy their contents instead of
+  # staging a link whose Mac-only target cannot exist on the headset.
+  local resolved_source
+  resolved_source=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1")
   xcrun devicectl device copy to --device "$TARGET" \
     --domain-type appDataContainer --domain-identifier "$BUNDLE_ID" \
-    --source "$1" --destination "$2"
+    --source "$resolved_source" --destination "$2"
 }
 copy_meta() {
   for m in "${META[@]:-}"; do
