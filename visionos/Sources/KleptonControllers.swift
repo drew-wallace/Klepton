@@ -13,12 +13,10 @@
 //      one whose pose the platform publishes as a proper `.grip`, and the only
 //      one that reports velocity.
 //
-//  **Every pose here is predicted to the frame's presentation time**, the same
-//  instant `queryDeviceAnchor(atTimestamp:)` gives the head. Reading the last
-//  anchor an async stream delivered instead — which is what this did — caps the
-//  controllers at the tracker's delivery rate rather than the display's, and a
-//  pose repeated across three frames of a 90 Hz picture does not read as
-//  latency, it reads as the hands running at 30 Hz.
+//  Sense poses are updated by the tracker each render frame. Native guests
+//  may predict toward presentation time; Steam Link defaults to the current
+//  time because its host predicts again. Returning the last delivered anchor
+//  instead repeats sensor samples across render frames and adds sample-age lag.
 //    * **Hands**, always. `HandTrackingProvider`'s skeleton supplies the grip
 //      pose (the middle-finger metacarpal, so a hilt is gripped rather than
 //      swinging off the wrist), and the index trigger comes from the system's
@@ -376,30 +374,16 @@ struct KLSenseTune {
     /// `KL_SENSE_VEL_FRAME=world` — treat `AccessoryAnchor.velocity` as already
     /// being in tracking space instead of the accessory's own frame.
     ///
-    /// The default follows ALVR, which rotates both velocities by the grip
-    /// orientation before using them, i.e. reads them as controller-local.
-    /// Apple documents neither frame, and the two differ only in *direction*
-    /// (the magnitude is the same either way), so this is the knob that settles
-    /// it on device: shake the controller along one axis and see which reading
-    /// stays pointed the way your hand went.
+    /// Apple describes both velocities as accessory-local. Rotate them by
+    /// the grip orientation to publish tracking-space motion. The world
+    /// override is retained for coordinate-frame diagnostics.
     /// `KL_SENSE_PREDICT_MS=<ms>` — how far into the future a Sense controller
-    /// pose may be predicted. 0 is the measured pose; the default 50 is the
-    /// same horizon `kl_openxr` clamps the HEAD to, so both poses a guest reads
-    /// are bounded by one number.
-    ///
-    /// **A time cap, not a fraction of the interval**, and that distinction is
-    /// the whole knob: a tracker's extrapolation error is a function of how far
-    /// AHEAD it reaches, not of what proportion of some pipeline that
-    /// represents. A fraction moves with the frame rate, so the same setting
-    /// means a different horizon at 90 Hz and at 60, and tuning it once tunes
-    /// it for one frame rate.
-    ///
-    /// It exists because both extremes were measured wrong on Steam Link: at
-    /// full prediction the controllers overshoot badly (we predict to
-    /// presentation time and publish a velocity, and SteamVR predicts AGAIN to
-    /// the PC's photon time — twice applied), and with no prediction the
-    /// overshoot goes but they visibly lag, because the PC's own prediction
-    /// does not cover our pipeline.
+    /// pose may be predicted, measured ahead of now. 0 still asks the tracker
+    /// for a pose at NOW, compensating for the age of the delivered sample;
+    /// it does not return an older raw anchor. Steam Link's policy defaults
+    /// this to 0. Other guests retain the 50 ms presentation-time cap.
+    /// `KL_SENSE_RAW_ANCHOR=1` restores the raw-anchor diagnostic used by the
+    /// earlier zero test, which improved accuracy but visibly trailed.
     static let sensePredictMaxMs: Double = {
         guard let v = ProcessInfo.processInfo.environment["KL_SENSE_PREDICT_MS"],
               let f = Double(v) else { return 50.0 }
@@ -408,11 +392,15 @@ struct KLSenseTune {
 
     static let velocityIsLocal =
         ProcessInfo.processInfo.environment["KL_SENSE_VEL_FRAME"] != "world"
+
+    static let senseUseRawAnchor =
+        ProcessInfo.processInfo.environment["KL_SENSE_RAW_ANCHOR"] == "1"
 }
 
 final class KleptonControllers {
     // 0 = left, 1 = right, matching kl_ovrp's hand indices (nodes 3 and 4).
     private var state: [KleptonHandState] = [KleptonHandState(), KleptonHandState()]
+    private var accessoryPredictionAvailable: [Bool?] = [nil, nil]
 
     // Poses arrive asynchronously from AccessoryTrackingProvider's anchor
     // stream, while buttons are polled synchronously on the render thread, so
@@ -668,13 +656,12 @@ final class KleptonControllers {
         NSLog("[cp]   Touch aim      ( 0.000000, -0.067273, -0.073480)  ( -60.00,  +0.00,   -0.00)  0.0996")
     }
 
-    /// This hand's Sense controller, predicted to `time` and corrected: grip
+    /// This hand's Sense controller, updated toward `time` and corrected: grip
     /// pose plus the motion that goes with it, all in tracking space.
     ///
     /// `time` is a `CACurrentMediaTime()`-domain instant — the frame's
-    /// presentation time, the same one `queryDeviceAnchor(atTimestamp:)` gets
-    /// for the head, so the hands and the head describe one instant rather than
-    /// two. Falling back to the raw anchor if prediction refuses keeps a
+    /// presentation time, bounded by the controller's ahead-of-now cap.
+    /// Falling back to the raw anchor if prediction refuses keeps a
     /// controller that has just appeared (or one the tracker has lost) visible
     /// instead of snapping it to the synthetic head-relative pose.
     private func sensePose(hand: Int, at time: TimeInterval)
@@ -684,30 +671,31 @@ final class KleptonControllers {
         let provider = accessoryProvider
         lock.unlock()
         guard let stored, let provider else { return nil }
-        // **KL_SENSE_PREDICT=0 hands over the raw anchor**, and it exists
-        // because a guest can predict a second time. We predict to the frame's
-        // presentation time and publish the velocity alongside; a guest that
-        // takes both and extrapolates again lands past the controller, and the
-        // further ahead its own pipeline reaches the further past. Steam Link
-        // is that case — the pose crosses to a PC and SteamVR predicts it to
-        // the PC's photon time — and it is the one target where the
-        // controllers were reported to overshoot badly while native guests did
-        // not. Off publishes the measured pose with its measured velocity and
-        // leaves all the predicting to whoever is going to do it anyway.
-        // Predicted no further AHEAD than the cap, so a guest that predicts
-        // again downstream is handed a pose that has not already reached into
-        // its territory. The cap is applied to the target INSTANT and the
-        // tracker is asked for that instant, rather than the pose being scaled
-        // after the fact: a pose is not linear in time and the tracker is the
-        // thing that knows how to move it.
+        // Even at a zero cap, ask the tracker for NOW. The old zero branch
+        // returned `stored`, an asynchronous sensor sample that may be older
+        // than this render frame. Bringing that sample up to now is distinct
+        // from predicting ahead of now; those Steam Link tests still overshot.
+        // Preserve the raw sample path separately for an explicit A/B test.
         let now = CACurrentMediaTime()
         let capS = KLSenseTune.sensePredictMaxMs / 1000.0
         let ahead = time - now
         Self.notePredictionHorizon(ahead: ahead, cap: capS)
-        let a = capS > 0.0
-            ? (provider.predictAnchor(for: stored, at: now + min(max(ahead, 0), capS))
-               ?? stored)
-            : stored
+        let targetTime = now + min(max(ahead, 0), capS)
+        let predicted = KLSenseTune.senseUseRawAnchor ? nil
+            : provider.predictAnchor(for: stored, at: targetTime)
+        if !KLSenseTune.senseUseRawAnchor {
+            let available = predicted != nil
+            lock.lock()
+            let changed = accessoryPredictionAvailable[hand] != available
+            accessoryPredictionAvailable[hand] = available
+            lock.unlock()
+            if changed {
+                NSLog("[ctrl] %@ Sense pose resampling: %@",
+                      hand == 0 ? "left" : "right",
+                      available ? "tracker returned a pose" : "unavailable, using raw sample")
+            }
+        }
+        let a = predicted ?? stored
 
         // `.grip` is the location the platform defines for "where a hand holds
         // this" — the anchor's own transform is the middle of the plastic, and
@@ -760,9 +748,10 @@ final class KleptonControllers {
         NSLog(String(format: "[ctrl] sense prediction: presentation is %.1f ms "
                      + "ahead, cap %.1f ms (KL_SENSE_PREDICT_MS) — the cap %@",
                      ahead * 1000, cap * 1000,
-                     cap <= 0 ? "is off, poses are the measured ones"
+                     KLSenseTune.senseUseRawAnchor ? "is bypassed, poses are raw sensor samples"
+                     : (cap <= 0 ? "updates poses to NOW, without predicting ahead"
                      : (cap < ahead ? "BINDS" : "does NOT bind, this is the full "
-                        + "prediction; lower it to shorten the horizon")))
+                        + "prediction; lower it to shorten the horizon"))))
     }
 
     /// Apply the KL_HAND_ROT / KL_HAND_POS tuning, in the grip's own frame.

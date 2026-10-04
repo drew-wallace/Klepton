@@ -597,6 +597,11 @@ static int steamlink_load_vr(void) {
 // lives here rather than in kl_driver: the driver describes the guest, the
 // frontend chooses how this platform runs it.
 static void steamlink_policy(void) {
+    // Update Sense poses to the current time, leaving future extrapolation to
+    // the Steam host. A raw sensor sample lagged in physical tests, while
+    // even a 5 ms ahead-of-now pose still overshot on rapid movement.
+    // Explicit diagnostic overrides continue to win.
+    setenv("KL_SENSE_PREDICT_MS", "0", 0);
     // Steam Link's VR door composites several OpenXR projection layers: layer 0
     // is the environment/room (black in an empty space) and the streamed screen
     // is stacked ON TOP. The compositor shows one projection layer, so tell it

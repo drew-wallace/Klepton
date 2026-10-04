@@ -1545,15 +1545,16 @@ The composite/timewarp pass — one file, compiled by both compositors
 
 
 - `KL_SENSE_PREDICT_MS=<ms>` — how far into the future a Sense-controller pose
-  may be predicted. 0 is the measured pose; the default 50 is the same horizon
-  `kl_openxr` clamps the HEAD to, so both poses a guest reads are bounded by one
-  number. **A time cap, not a fraction of the frame interval**: a tracker's
-  extrapolation error is a function of how far ahead it reaches, and a fraction
-  would mean a different horizon at 90 Hz than at 60. Both extremes were
-  measured wrong on Steam Link — full prediction overshoots (we predict AND
-  publish a velocity, and SteamVR predicts again to the PC's photon time), none
-  lags. The app logs the measured interval and whether the cap binds; if
-  presentation is nearer than the cap, the cap does nothing and wants lowering.
+  may be predicted ahead of now. **0 updates the sample to the current time**
+  through ARKit; it does not return the older sensor sample. Steam Link defaults
+  to 0, while other guests retain the 50 ms cap. The headset tests found that
+  10 ms improved overshoot, 5 ms still overshot, and raw samples were accurate
+  but trailed. This cap is a time interval, not a fraction of the frame interval.
+  The app logs the presentation interval and whether the cap binds.
+- `KL_SENSE_RAW_ANCHOR=1` — bypass ARKit's pose prediction entirely and return
+  the last delivered sensor sample, preserving the earlier zero-prediction
+  diagnostic. This ignores `KL_SENSE_PREDICT_MS` and may repeat older samples
+  across render frames. Off by default.
 
 - `KL_REPROJECT_NOCANT=1` — treat `device_from_view` as having no rotation;
   the A/B for the eye-cant handling.
@@ -2535,8 +2536,8 @@ written down is a value found twice.
   Oculus Touch constant).
 - `KL_SENSE_VEL_FRAME=world` — read `AccessoryAnchor.velocity`/`angularVelocity`
   as already being in tracking space. Default treats them as accessory-local
-  and rotates them by the grip orientation, which is what ALVR does; Apple
-  documents neither, and the two differ only in direction.
+  and rotates them by the grip orientation, matching Apple's documented local
+  coordinate system. Retained for coordinate-frame diagnostics.
 - `KL_HAND_MIRROR=1` — left hand back on ALVR's *mirrored* wrist→grip
   constant. The default left constant is `R · Rx(180)`, forced by four
   playtests.

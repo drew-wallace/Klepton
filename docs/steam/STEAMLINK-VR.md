@@ -121,6 +121,21 @@ Battery reporting needs no additional entitlement. The simulator has no real
 headset/controller battery readings, so its fallback behavior and streaming
 integration can be tested there; measured percentages require physical devices.
 
+## Controller prediction
+
+Steam Link defaults to `KL_SENSE_PREDICT_MS=0`: ARKit updates each controller
+sample to the current time, without predicting ahead of now. The host still
+receives controller velocity for its own prediction. Other guests retain their
+50 ms cap. `KL_SENSE_RAW_ANCHOR=1` explicitly returns the last sensor sample for
+comparison; this was the behavior of the earlier zero-cap diagnostic.
+
+On the headset, the original default predicted about 26.5 ms ahead. A 10 ms
+cap improved accuracy, but 5 ms still overshot during rapid motion. Raw samples
+removed overshoot but visibly trailed. Network lag also increased trailing in
+the 5 ms test. Updating to the current time addresses sample age separately from future prediction;
+its physical accuracy and latency still need validation. Simulator testing
+cannot validate this behavior. This change does not eliminate network delay.
+
 ## Regression checks
 
 ```sh
