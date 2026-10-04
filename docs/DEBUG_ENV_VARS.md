@@ -1716,12 +1716,9 @@ reads no knobs).
   ring fill in frames and ms, underruns. What to turn on when the sound is
   present but wrong.
 - `KL_AUDIO_SPATIAL=1` — visionOS only. Leave the system's spatialiser in the
-  path. The default is `setIntendedSpatialExperience(.bypassed)` plus two
-  preferred output channels (`KleptonAudio.directStereo`, imported from ALVR's
-  `fixAudioForDirectStereo`): the guest hands us a mix it has already panned
-  for a head-mounted listener, and visionOS otherwise pans it a second time
-  into a sound stage anchored to the app's scene — which is the sound following
-  the window. Turn this on only to A/B that.
+  default configuration instead of requesting an unanchored, non-head-tracked
+  `.fixed(soundStageSize: .small)` experience. The normal fixed experience keeps
+  game audio from following the settings window while retaining the system mixer.
 - `KL_AUDIO_WATCHDOG=0` — stop the independent watchdog thread from running.
   **On by default, and it is the thing that keeps audio alive on visionOS.**
   This OS silently stops calling CoreAudio's render callback across a scene
@@ -1735,10 +1732,10 @@ reads no knobs).
   the failure it hides.
 - `KL_AUDIO_INTERRUPT_MAX_MS=<n>` — how long an interruption may last with no
   matching "ended" before the watchdog assumes the notification was lost and
-  restarts anyway (default 3000). `.began` without `.ended` is a documented
-  hazard on this OS family and used to be silence for the rest of the run,
-  because the write loop breaks out of its spin *before* the watchdog on that
-  flag. Raise it if a real interruption is being fought over.
+  restarts anyway (default 1500), for hosts without an audio-session manager.
+  The visionOS app disables this timed override: it respects interruptions
+  until the OS sends "ended" or the app explicitly returns to the foreground
+  and successfully reactivates its mixing session.
 
 ## x18 (`runtime/kl_x18.c`)
 

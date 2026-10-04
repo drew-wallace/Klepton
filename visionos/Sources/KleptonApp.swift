@@ -133,6 +133,23 @@ enum Immersive {
 /// Retain the guest on Home. The opt-in exit remains useful for cold-boot probes.
 @MainActor
 enum Lifecycle {
+    private static var settingsWindowTransition = 0
+
+    static func settingsWindowBecameInactive() {
+        settingsWindowTransition += 1
+        let transition = settingsWindowTransition
+        // Allow the system's close-window interruption to arrive first. The
+        // view's presentation task is cancelled on disappearance; this explicit
+        // lifecycle task survives it, and never resumes audio after Home/Quit.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard transition == settingsWindowTransition else { return }
+            let session = KleptonSession.shared
+            KleptonAudio.settingsWindowClosed(immersiveActive:
+                session.phase == .active && session.openedSpace && !session.quitting)
+        }
+    }
+
     static func scenePhaseChanged(to phase: ScenePhase) {
         NSLog("[app] scene phase -> \(phase)")
         KleptonSession.shared.phase = phase
@@ -438,7 +455,13 @@ struct BootView: View {
         }
         .disabled(session.quitting)
         .task { await watchPresentation() }
-        .onChange(of: windowPhase, initial: true) { _, phase in
+        .onDisappear { Lifecycle.settingsWindowBecameInactive() }
+        .onChange(of: windowPhase, initial: true) { previous, phase in
+            // visionOS may retain the last window's view when the user closes
+            // it, so onDisappear alone does not cover this transition.
+            if previous == .active, phase != .active {
+                Lifecycle.settingsWindowBecameInactive()
+            }
             if phase == .active, !session.quitting {
                 session.canRestoreAutomatically = true
                 session.restorationBlocked = false

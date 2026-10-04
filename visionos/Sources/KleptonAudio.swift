@@ -23,11 +23,62 @@ import Foundation
 ///   * kl_audio.c's own watchdog on the producer side, which notices a render
 ///     callback that has stopped arriving and rebuilds the unit regardless.
 ///
-/// Either alone has been enough to lose audio for a whole session on this
-/// family of OS. Together, a missed notification costs a half-second gap.
+/// The watchdog handles a dead callback without an OS interruption. Actual
+/// interruptions remain under session control until ended or foreground resume.
 enum KleptonAudio {
     nonisolated(unsafe) private static var started = false
     nonisolated(unsafe) private static var observers: [NSObjectProtocol] = []
+
+    // Startup runs on the boot worker, resume on the render thread, and route
+    // notifications on main. Keep category restoration and activation together.
+    private static let sessionLock = NSRecursiveLock()
+    nonisolated(unsafe) private static var interrupted = false // guarded by sessionLock
+    nonisolated(unsafe) private static var interruptionReason: UInt? // guarded by sessionLock
+    private enum SessionError: Error { case interrupted }
+
+    /// Restore policy before activation: a scene or route transition can replace
+    /// the category options even though the session object itself survives.
+    private static func activate(_ session: AVAudioSession, mic: Bool,
+                                 foregroundResume: Bool = false) throws {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        // A route or guardian style update is not permission to override a call.
+        // Only an ended notification or explicit foreground return can recover.
+        guard !interrupted || foregroundResume else { throw SessionError.interrupted }
+        let otherAudioBefore = session.isOtherAudioPlaying
+        try setCategoryForMic(session, mic)
+        // Game sound should mix alongside the user's chosen video/music app.
+        // Mixing and Now Playing eligibility are separate visionOS settings.
+        if session.isNowPlayingCandidate {
+            try session.setIsNowPlayingCandidate(false)
+        }
+        let preserveOtherRoute = otherAudioBefore && !mic
+        try configureStereoExperience(session)
+        // Let the active call keep its hardware rate, buffer and channel route.
+        // C measures the actual output format and resamples the guest itself.
+        if !preserveOtherRoute && session.preferredSampleRate != 48000 {
+            try session.setPreferredSampleRate(48000)
+        }
+        if !preserveOtherRoute && session.preferredIOBufferDuration != 0.010 {
+            try session.setPreferredIOBufferDuration(0.010)
+        }
+        try session.setActive(true)
+        if !preserveOtherRoute && session.preferredOutputNumberOfChannels != 2 {
+            try session.setPreferredOutputNumberOfChannels(2)
+        }
+        if foregroundResume { interrupted = false }
+    }
+
+    /// Immersion-style changes may preserve the renderer. Restore mixing without
+    /// rebuilding a healthy output unit every time passthrough opens or closes.
+    static func refreshMixing() {
+        guard started else { return }
+        do {
+            try activate(AVAudioSession.sharedInstance(), mic: KleptonMic.shared.settings.enabled)
+        } catch {
+            NSLog("[au] mixing restore failed: \(error)")
+        }
+    }
 
     /// A foreground transition can deactivate the session as well as its
     /// output unit. Reactivate first, then rebuild C's output against that route.
@@ -35,12 +86,25 @@ enum KleptonAudio {
         guard started else { return }
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setActive(true)
-            try directStereo(session)
+            try activate(session, mic: KleptonMic.shared.settings.enabled, foregroundResume: true)
             kl_audio_resume()
         } catch {
             NSLog("[au] session resume failed: \(error)")
         }
+    }
+
+    /// Closing the launcher can interrupt the shared session even though the
+    /// compositor keeps running. Treat that confirmed scene transition like
+    /// foreground entry, rather than making the watchdog override every call.
+    static func settingsWindowClosed(immersiveActive: Bool) {
+        guard immersiveActive, started else { return }
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        // Default / scene-backgrounded interruptions can accompany window
+        // closure. A disconnected route or muted microphone must still wait.
+        guard !interrupted || interruptionReason == 0 || interruptionReason == 3 else { return }
+        NSLog("[au] settings window closed with active immersion — restoring game audio")
+        resume()
     }
 
     /// Configure and activate the session, then tell the C side what the
@@ -48,34 +112,12 @@ enum KleptonAudio {
     static func start() {
         guard !started else { return }
         started = true
+        // The C watchdog must not guess that an OS interruption has ended.
+        kl_audio_set_session_managed(1)
 
         let session = AVAudioSession.sharedInstance()
         do {
-            // .playback, not .ambient: Beat Saber's music is the point of the
-            // app, not a decoration over someone else's audio, and .ambient is
-            // silenced by the ringer switch on this OS family. .default mode
-            // keeps the system's own spatialisation out of the way — the guest
-            // mixes its own stereo and anything we add on top is a second
-            // opinion about a scene we already rendered.
-            //
-            // ...UNLESS the microphone toggle is on, in which case the category
-            // becomes .playAndRecord so a guest (Steam Link's voice chat) can
-            // capture — see setCategoryForMic. That is opt-in and off by default
-            // precisely because .playAndRecord hands the ringer switch a veto
-            // over the music, which is not a tradeoff to make for a title that
-            // never asks for the mic.
-            try Self.setCategoryForMic(session, KleptonMic.shared.settings.enabled)
-            // Ask for the guest's rate. If the system grants it the resampler
-            // in kl_audio.c degenerates to a copy; if it does not, kl_audio
-            // measures what it actually got and resamples. Either way this is a
-            // request, never an assumption — a unit built against an assumed
-            // rate is the failure that reports success and stays silent.
-            try session.setPreferredSampleRate(48000)
-            try session.setPreferredIOBufferDuration(0.010)
-            try session.setActive(true)
-            // After activation, which is the order ALVR uses and the order the
-            // session's own routing decisions are made in.
-            try Self.directStereo(session)
+            try activate(session, mic: KleptonMic.shared.settings.enabled)
         } catch {
             NSLog("[au] AVAudioSession setup failed: \(error) — expect silence")
         }
@@ -88,12 +130,22 @@ enum KleptonAudio {
         observe(AVAudioSession.interruptionNotification) { note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
             let began = AVAudioSession.InterruptionType(rawValue: raw) == .began
+            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
+            sessionLock.lock()
+            interrupted = began
+            interruptionReason = began ? reason : nil
+            sessionLock.unlock()
             if !began {
                 // The session is deactivated for us on the way in but NOT
                 // reactivated on the way out — an interruption that ends leaves
                 // an inactive session, and a unit started against one produces
                 // silence with no error. Reactivate before telling C to rebuild.
-                try? session.setActive(true)
+                do {
+                    try activate(session, mic: KleptonMic.shared.settings.enabled)
+                } catch {
+                    NSLog("[au] interruption recovery failed: \(error)")
+                    return
+                }
             }
             kl_audio_interrupted(began ? 1 : 0)
         }
@@ -110,8 +162,12 @@ enum KleptonAudio {
             switch reason {
             case .oldDeviceUnavailable, .newDeviceAvailable, .override,
                  .routeConfigurationChange, .categoryChange:
-                try? session.setActive(true)
-                _ = kl_audio_restart()
+                do {
+                    try activate(session, mic: KleptonMic.shared.settings.enabled)
+                    _ = kl_audio_restart()
+                } catch {
+                    NSLog("[au] route recovery failed: \(error)")
+                }
             default:
                 break
             }
@@ -122,63 +178,39 @@ enum KleptonAudio {
         // configured again from scratch first.
         observe(AVAudioSession.mediaServicesWereResetNotification) { _ in
             NSLog("[au] media services were reset — reconfiguring from scratch")
-            try? Self.setCategoryForMic(session, KleptonMic.shared.settings.enabled)
-            try? session.setActive(true)
-            // A reset invalidates every audio object in the process, and the
-            // spatial experience is one of them — without this the sound comes
-            // back correct in every respect except where it is.
-            try? Self.directStereo(session)
-            kl_audio_session_ready(session.sampleRate)
-            _ = kl_audio_restart()
+            do {
+                try activate(session, mic: KleptonMic.shared.settings.enabled)
+                kl_audio_session_ready(session.sampleRate)
+                _ = kl_audio_restart()
+            } catch {
+                NSLog("[au] media services recovery failed: \(error)")
+            }
         }
     }
 
-    /// Take the system's spatial audio out of the path: two channels, played
-    /// where the guest mixed them.
-    ///
-    /// **This is why the sound followed the window.** visionOS spatialises app
-    /// audio by default, and the sound stage it spatialises *into* is anchored
-    /// to the app's scene — so a stereo mix that the guest has already panned
-    /// for a head-mounted listener gets panned a second time, towards a window,
-    /// by a system that has no idea where anything in the guest's world is. It
-    /// is not a mixing bug and no gain change fixes it; the whole scene simply
-    /// sits wherever the window is.
-    ///
-    /// `.bypassed` is the escape hatch, and it is the same one ALVR uses
-    /// (`EventHandler.fixAudioForDirectStereo`) for the same reason: the audio
-    /// arrives already spatialised by something that knows the scene, so the
-    /// only correct thing the OS can do with it is play it. Beat Saber's FMOD
-    /// mix is exactly that — `kl_opensl.c` hands us a finished stereo buffer.
-    ///
-    /// `setPreferredOutputNumberOfChannels(2)` goes with it: bypassing the
-    /// spatialiser on a route that has offered more than two channels would
-    /// otherwise leave the mix to be spread across them by whatever downmix
-    /// happens to be in the way.
-    ///
-    /// ALVR's other two calls are deliberately NOT imported. It takes
-    /// `.playAndRecord` and `.voiceChat` because it needs the microphone for
-    /// SteamVR; we do not, and `.playAndRecord` would hand the ringer switch a
-    /// veto over the music this app exists to play.
-    ///
-    /// `KL_AUDIO_SPATIAL=1` leaves the system's spatialiser in, which is the
-    /// A/B if the sound is ever wrong in a way that is not "in the wrong
-    /// place".
-    private static func directStereo(_ session: AVAudioSession) throws {
-        guard ProcessInfo.processInfo.environment["KL_AUDIO_SPATIAL"] != "1" else {
-            NSLog("[au] KL_AUDIO_SPATIAL=1 — leaving the system spatialiser in the path")
-            return
+    /// Keep the game unanchored to its settings window while retaining the
+    /// system spatial mixer. Fixed is non-head-tracked.
+    private static func configureStereoExperience(_ session: AVAudioSession) throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["KL_AUDIO_SPATIAL"] != "1" else { return }
+        if (session.intendedSpatialExperience as? AVAudioSession.FixedSpatialExperience)?.soundStageSize != .small {
+            try session.setIntendedSpatialExperience(.fixed(soundStageSize: .small))
         }
-        try session.setPreferredOutputNumberOfChannels(2)
-        try session.setIntendedSpatialExperience(.bypassed)
-        NSLog("[au] direct stereo: system spatialisation bypassed, 2 ch preferred")
     }
 
     /// Keep game audio mixable with other apps, including Discord calls.
-    /// OFF → playback only, leaving microphone capture to the calling app.
+    /// OFF → playback with mixing, leaving microphone capture to the calling app.
     /// ON → playAndRecord for guest voice chat; mixing does not guarantee that
     /// two apps can capture the microphone at the same time. Use .default mode
     /// because the C capture unit provides its own voice processing.
     static func setCategoryForMic(_ session: AVAudioSession, _ mic: Bool) throws {
+        let category: AVAudioSession.Category = mic ? .playAndRecord : .playback
+        let options: AVAudioSession.CategoryOptions = mic
+            ? [.mixWithOthers, .allowBluetooth, .defaultToSpeaker] : [.mixWithOthers]
+        // Changing category emits another route notification. Do not turn that
+        // notification into an endless reconfiguration/restart loop.
+        guard session.category != category || session.mode != .default
+                || session.categoryOptions != options else { return }
         if mic {
             // mode .default, NOT .voiceChat — and this is deliberate even though the
             // capture unit is now VoiceProcessingIO. .voiceChat makes the SYSTEM
@@ -192,8 +224,7 @@ enum KleptonAudio {
             try session.setCategory(.playAndRecord, mode: .default,
                                     options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
         } else {
-            try session.setCategory(.playback, mode: .default,
-                                    options: [.mixWithOthers])
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         }
     }
 
@@ -204,10 +235,8 @@ enum KleptonAudio {
     static func applyMicCategory(_ on: Bool) {
         let session = AVAudioSession.sharedInstance()
         do {
-            try setCategoryForMic(session, on)
-            try session.setActive(true)
-            try directStereo(session)
-            NSLog("[au] microphone \(on ? "enabled — category .playAndRecord" : "disabled — category .playback")")
+            try activate(session, mic: on)
+            NSLog("[au] microphone \(on ? "enabled — category .playAndRecord" : "disabled — category .playback + mixWithOthers")")
             if on {
                 // The input route the capture unit will actually read. If inputs is
                 // empty or inputChannels is 0, the mic is not on the route and the

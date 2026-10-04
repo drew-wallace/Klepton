@@ -74,6 +74,9 @@ void kl_audio_resume(void);
 // the hardware sample rate reads as a default rather than the real one, and an
 // output unit initialised against the wrong rate fails at AudioUnitInitialize.
 void kl_audio_session_ready(double sample_rate);
+// An AVAudioSession host owns interruption recovery: wait for an ended signal
+// or an explicit foreground resume instead of overriding an interruption by age.
+void kl_audio_set_session_managed(int managed);
 
 // How many times the render callback found the ring empty while the guest
 // thought it was playing. Exposed because AAudio's AAudioStream_getXRunCount is

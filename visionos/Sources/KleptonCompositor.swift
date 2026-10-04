@@ -1527,10 +1527,12 @@ final class KleptonCompositor {
             lastPresentation = 0
             lastGoodOriginFromDevice = nil
             arRunning = false
-            KleptonAudio.resume()
         } else {
             installProvider()
         }
+        // The first immersive entry can change routing too; startup configured
+        // audio while the boot window was still in the shared space.
+        KleptonAudio.resume()
         applyRenderQuality()
         startARKit()
 

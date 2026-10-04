@@ -222,32 +222,38 @@ use the app's normal launch defaults, without Steam-mode or camera overrides.
 Window/presentation checks do not establish that the game's menu loaded; also
 inspect the visible game after the splash and check the log for startup errors.
 
-## Discord voice chat while playing
+## Audio mixing and recovery
 
-Klepton configures game audio with `AVAudioSession.CategoryOptions.mixWithOthers`
-so activating its audio session does not interrupt a call in another app. This
-applies at startup, when changing the game microphone toggle, and after an audio
-services reset. Foreground reactivation retains the same category options.
+With the game microphone off, Klepton uses `playback` with `mixWithOthers`.
+Enabling the guest microphone uses `playAndRecord` with mixing; leave it off
+when another app handles the call microphone. Simultaneous microphone capture
+is not guaranteed. Klepton opts out of Now Playing eligibility and uses a small,
+fixed spatial experience so game audio remains independent of its settings
+window. When other audio is already playing and the guest microphone is off,
+it preserves the route's sample-rate, buffer, and channel preferences. The C
+output measures the hardware rate and resamples the guest audio.
 
-For Discord on Vision Pro, leave Klepton's **Microphone → Allow microphone**
-toggle off. That toggle is for voice chat inside the guest game; Discord captures
-the microphone itself. Audio mixing does not guarantee simultaneous microphone
-capture by both apps, or keep a calling app alive if visionOS suspends it.
+Startup, immersive entry, foreground returns, guardian-style changes, route
+changes, and media-services resets restore mixing policy before activation.
+Category changes are skipped when the policy already matches, avoiding route
+notification loops. An OS interruption blocks route/style reactivation and the
+C watchdog's timeout override until an ended notification or successful explicit
+foreground recovery. The watchdog still repairs stopped render callbacks when
+there is no active interruption.
 
-After installing a build with this change, validate on a physical headset:
+Closing the settings window while immersion remains active restores game audio
+after the scene transition. The user verified this fix on the headset. Home,
+Quit, route disconnection, and microphone-mute interruptions do not use that
+window-close recovery. Run `python3 tests/test_visionos_audio.py` to exercise
+policy restoration, failed activations, interruption handling, and window-close
+recovery with a simulated session and the real C watchdog.
 
-1. Join a Discord voice channel and confirm speech works in both directions.
-2. Launch Klepton with **Allow microphone** off and start a game. Confirm both
-   directions still work and game audio remains audible in immersion.
-3. Go Home, reopen Klepton, and confirm the call and game audio still work.
-4. Repeat with the speakers or headphones you normally use, since calls can
-   change the audio route and sample rate.
-
-If the call still stops, check whether it works while Klepton's settings window
-is open before entering immersion (`KL_AUTOBOOT=0` for a diagnostic launch).
-This helps distinguish audio-session interruption from Discord's behavior when
-its window is hidden. Discord and visionOS behavior must be verified on-device;
-a simulator build cannot establish that the call survives.
+Mixing requests cannot guarantee another app's background behavior. Discord
+347.0 (112799) on visionOS 27.0.1 still stopped in both mixed and full native
+RealityKit immersion in a separate app with no explicit audio code. This
+reproduced without Klepton's guardian, game, or compositor. No Discord workaround
+was confirmed; Home/Resume recovery was intermittent. Safari music continued
+mixing in the tester's comparisons.
 
 ## Language boundary
 

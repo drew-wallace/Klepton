@@ -19,7 +19,12 @@ final class KleptonGuardian: ObservableObject {
     @Published private(set) var needsPassthrough = false
     @Published var immersionStyle: ImmersionStyle = .full
     private func updateImmersionStyle() {
-        immersionStyle = mode == .system && !needsPassthrough ? .full : .mixed
+        let full = mode == .system && !needsPassthrough
+        guard full != (immersionStyle is FullImmersionStyle) else { return }
+        immersionStyle = full ? .full : .mixed
+        // Style changes can keep the same compositor alive. Reapply the audio
+        // policy after SwiftUI receives the new style, without rebuilding audio.
+        DispatchQueue.main.async { KleptonAudio.refreshMixing() }
     }
     @MainActor func setPassthroughRequired(_ value: Bool) {
         if needsPassthrough != value {
