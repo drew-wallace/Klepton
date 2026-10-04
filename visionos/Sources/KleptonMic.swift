@@ -4,11 +4,9 @@
 // window, so it is remembered across launches and adjustable while wearing the
 // headset.
 //
-// OFF by default, and deliberately so. A microphone is a privacy surface: the
-// session category it forces (.playAndRecord) also hands the ringer switch a
-// veto over the music this app exists to play, and touching the device at all
-// makes visionOS show a permission prompt. Neither belongs in a title that
-// never asks for the mic. So nothing here engages the microphone — no category
+// OFF by default, leaving capture to another app such as Discord. Enabling it
+// changes the category from .playback to .playAndRecord and requests recording
+// permission. Nothing here engages the microphone — no category
 // change, no permission prompt, no capture device presented to the guest —
 // until a person turns it on. The C half is kl_audio.c's capture path, armed by
 // kl_audio_mic_set_enabled and read by kl_aaudio.c / kl_opensl.c when a guest

@@ -34,7 +34,8 @@ static AudioUnit    g_unit;
 static int          g_open;           // a unit exists and is initialised
 static int          g_running;        // ...and AudioOutputUnitStart succeeded
 static int          g_playing;        // the guest wants sound
-static int          g_interrupted;    // the OS took the stream
+static _Atomic int  g_interrupted;    // the OS took the stream
+static _Atomic int  g_session_managed; // Swift owns interruption recovery
 static uint64_t     g_interrupt_ns;   // ...when, so a lost `.ended` is escapable
 static unsigned     g_interrupt_max_ms = 1500;
 // The recovery machinery lives at the bottom of the file, beside the producer
@@ -352,6 +353,7 @@ static void unit_destroy(void) {
 }
 
 static int unit_start(void) {
+    if (g_interrupted) return -1;
     if (!g_unit || g_running) return 0;
     OSStatus s = AudioOutputUnitStart(g_unit);
     if (s != noErr) {
@@ -421,7 +423,7 @@ int kl_audio_open(unsigned rate, unsigned channels, unsigned bits) {
     g_pos = 0.0;
     memset(g_prev, 0, sizeof g_prev);
     g_open = 1;
-    g_interrupted = 0;
+    if (!g_session_managed) g_interrupted = 0;
     // Once per process, not once per open: FMOD destroys and re-creates the
     // player, and a capture that restarted with it would silently keep only the
     // last few seconds of a long run.
@@ -520,6 +522,7 @@ void kl_audio_interrupted(int began) {
 int kl_audio_restart(void) {
     if (!g_open) return -1;
     pthread_mutex_lock(&g_lock);
+    if (g_interrupted) { pthread_mutex_unlock(&g_lock); return -1; }
     unit_destroy();
     int rc = unit_create();
     if (rc == 0) {
@@ -554,6 +557,10 @@ void kl_audio_session_ready(double sample_rate) {
     // a default, and a unit initialised against the wrong rate is the failure
     // that presents as "everything succeeded and nothing is audible".
     if (g_open && fabs(sample_rate - g_out_rate) > 1.0) kl_audio_restart();
+}
+
+void kl_audio_set_session_managed(int managed) {
+    g_session_managed = managed != 0;
 }
 
 // ---- the producer ----
@@ -671,37 +678,41 @@ static void watchdog(void) {
 //     looks like when the notification is dropped) is silence for the rest of
 //     the run with nothing left running to notice.
 //
+static void watchdog_tick(void) {
+    if (!g_open) return;
+    if (g_interrupted && g_playing) {
+        // An interruption can be a live Discord call, not a missing ended
+        // notification. Rebuilding after 1.5 seconds fought over the route.
+        // The session host recovers on ended/foreground events; retain the
+        // timeout fallback only for hosts without AVAudioSession management.
+        if (g_session_managed) return;
+        uint64_t since = now_ns() - g_interrupt_ns;
+        if (since > (uint64_t)g_interrupt_max_ms * 1000000ull) {
+            fprintf(stderr, "  [au] interrupted for %.1f s with no resume — "
+                            "assuming the notification was lost\n",
+                    (double)since / 1e9);
+            g_interrupted = 0;
+            g_interrupt_ns = now_ns();
+            kl_audio_restart();
+            // If this restart lands on a session that is STILL reactivating
+            // it plays silence and the normal watchdog below would rebuild it
+            // again every 500 ms — the jump storm. Pre-load the backoff so the
+            // next attempt is seconds away, not milliseconds: one more try,
+            // spaced, by which point the session is certainly back.
+            g_wd_streak = 4;
+        }
+        return;
+    }
+    watchdog();
+}
+
 // A detached thread at 4 Hz costs nothing and depends on neither side.
 static void *watchdog_thread(void *unused) {
     (void)unused;
     pthread_setname_np("klepton-audio-watchdog");
     for (;;) {
         nap_ms(250);
-        if (!g_open) continue;
-        // The stuck-interruption escape. The OS deactivated the session on the
-        // way in and is supposed to tell us on the way out; when it does not,
-        // the only thing that distinguishes "still interrupted" from "the
-        // notification was lost" is trying. Bounded, so a real interruption (a
-        // call, another app taking the route) is not fought over.
-        if (g_interrupted && g_playing) {
-            uint64_t since = now_ns() - g_interrupt_ns;
-            if (since > (uint64_t)g_interrupt_max_ms * 1000000ull) {
-                fprintf(stderr, "  [au] interrupted for %.1f s with no resume — "
-                                "assuming the notification was lost\n",
-                        (double)since / 1e9);
-                g_interrupted = 0;
-                g_interrupt_ns = now_ns();
-                kl_audio_restart();
-                // If this restart lands on a session that is STILL reactivating
-                // it plays silence and the normal watchdog below would rebuild it
-                // again every 500 ms — the jump storm. Pre-load the backoff so the
-                // next attempt is seconds away, not milliseconds: one more try,
-                // spaced, by which point the session is certainly back.
-                g_wd_streak = 4;
-            }
-            continue;
-        }
-        watchdog();
+        watchdog_tick();
     }
     return NULL;
 }
