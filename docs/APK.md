@@ -167,6 +167,19 @@ Xcode 27's SDK stubs. `ANGLE_GN_ARGS` can override this selection.
   Those additional simulator audio failures remain unresolved. Physical
   throwing and complete mission/results/return-to-hub retesting is still needed;
   these checks do not establish full playability.
+  A subsequent October 4 headset crash at 15:28 was capsule/capsule PhysX CCD:
+  the translated `ldr s3,[x18,#4]` read stale shadow x18 = 0xc because the
+  entry `ldr x18,[x0]` at ELF 0x6d45858 was still raw. This specialization puts
+  SIMD setup between the FP/LR save and FP setup and needs a longer prologue
+  window. Boundary recognition now allows decoded instructions between the
+  save and FP setup within 16 words. The audit changes exactly two x18 sites:
+  that capsule entry and SweepGeomTriangles' entry write at 0x6d5f754. The
+  native execution regression performs the entry and scalar loads starting
+  with the measured stale shadow value; classifier regressions still reject
+  undecodable or incomplete prologues. Both shipping slices build and the
+  bundled device guest contains the corrected branches. The Steam Link
+  CRYPTOGAMS checks retain the same data exclusions. Headset mission retesting
+  is still required; this fix does not resolve the separate simulator audio faults.
   The source folder supplies one matching main OBB containing the game pak and
   intro video; no supplied Robo Recall variant has a patch OBB. The generic
   missing-patch warning therefore does not establish missing content here.

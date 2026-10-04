@@ -38,5 +38,19 @@ int main(void) {
     physics[9] = 0xd503201f; // No complete frame setup: keep refusing.
     assert(kl_x18_is_data(physics, sizeof physics, 7));
     assert(kl_x18_is_data(physics, 9 * 4, 7));
+    // Capsule/capsule CCD inserts SIMD setup between saving FP/LR and
+    // establishing FP; its first x18 load was skipped on the headset.
+    uint32_t capsule[] = {0x42c80000, 0x42c80000, 0, 0xd503201f,
+        0xd10883ff, 0x4f000407, 0xaa0203f1, 0xaa0303ec,
+        0x52800089, 0xaa0403ea, 0xa9b67bfd, 0x2f000405,
+        0x0f07f406, 0x910003fd, 0xf9400012, 0x6d0627e8,
+        0x6d072fea, 0xa90153f3, 0x6d0837ec, 0xa9025bf5,
+        0xbd400643};
+    assert(!kl_x18_is_data(capsule, sizeof capsule, 14));
+    capsule[12] = 0x01234567; // Undecodable gap must still refuse.
+    assert(kl_x18_is_data(capsule, sizeof capsule, 14));
+    capsule[12] = 0x0f07f406;
+    capsule[13] = 0xd503201f; // Incomplete frame setup must still refuse.
+    assert(kl_x18_is_data(capsule, sizeof capsule, 14));
     puts("TLS classifier: measured prologue, stale pattern, bounds and data rejection passed");
 }

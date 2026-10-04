@@ -278,6 +278,33 @@ int main(void) {
         pthread_setspecific(KLX_TSD_SLOT, NULL);
         arena_free(&physx);
 
+        // The mission crash uses the capsule/capsule specialization, which
+        // schedules two SIMD instructions between the frame save and FP setup.
+        // Execute its entry load and faulting later scalar load with stale TSD.
+        arena capsule = arena_new();
+        uint32_t capsule_body[] = {
+            0x42C80000u, 0x42C80000u, 0, 0xD503201Fu,
+            0xD10883FFu, 0x4F000407u, 0xAA0203F1u, 0xAA0303ECu,
+            0x52800089u, 0xAA0403EAu, 0xA9B67BFDu, 0x2F000405u,
+            0x0F07F406u, 0x910003FDu, 0xF9400012u, 0x6D0627E8u,
+            0x6D072FEAu, 0xD503201Fu, 0x6D0837ECu, 0xD503201Fu,
+            0xBD400643u, MOV(0, 18),
+            0x6D4627E8u, 0x6D472FEAu, 0x6D4837ECu,
+            0xA8CA7BFDu, 0x910883FFu, RET,
+        };
+        build(&capsule, capsule_body, sizeof capsule_body / 4, &st);
+        uint64_t (*run_capsule)(const void *) = (void *)(capsule.code + 16);
+        float shape[] = {1.0f, 2.0f};
+        const void *shape_ptr = shape;
+        // An invalid old shadow value would crash at ldr s3 if the entry load
+        // were left raw. Check translation first so regressions report safely.
+        pthread_setspecific(KLX_TSD_SLOT, (void *)(uintptr_t)0xC);
+        ck(st.patched == 3 && st.refused == 0 &&
+           run_capsule(&shape_ptr) == (uint64_t)(uintptr_t)shape,
+           "capsule CCD entry initializes x18 across interleaved SIMD frame setup");
+        pthread_setspecific(KLX_TSD_SLOT, NULL);
+        arena_free(&capsule);
+
         // Robo's SpinPthread calls through x18. On a physical headset an
         // unpatched BLR through the zeroed architectural register is a fatal
         // CODESIGNING Invalid Page kill, so signal recovery cannot rescue it.
