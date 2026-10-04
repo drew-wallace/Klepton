@@ -10,10 +10,13 @@ private var resumes = 0
 private var restarts = 0
 private var interruptions: [Int32] = []
 private var sessionManaged = false
+private var nativeSuspended = false
+private var suspends = 0
 func kl_audio_set_session_managed(_ managed: Int32) { sessionManaged = managed != 0 }
-func kl_audio_resume() { resumes += 1; checkPolicy() }
+func kl_audio_suspend() { nativeSuspended = true; suspends += 1 }
+func kl_audio_resume() { resumes += 1; nativeSuspended = false; checkPolicy() }
 func kl_audio_restart() -> Int32 { restarts += 1; checkPolicy(); return 0 }
-func kl_audio_session_ready(_ rate: Double) { checkPolicy() }
+func kl_audio_session_ready(_ rate: Double) { if !nativeSuspended { checkPolicy() } }
 func kl_audio_interrupted(_ began: Int32) {
     interruptions.append(began)
     if began == 0 { checkPolicy() }
@@ -32,6 +35,21 @@ private func checkPolicy() {
 @main struct AudioSessionTests {
     static func main() {
         let s = AVAudioSession.sharedInstance()
+        s.beforeDeactivation = { precondition(nativeSuspended, "native I/O must stop before session release") }
+        if CommandLine.arguments.contains("--suspended-boot") {
+            KleptonAudio.suspend()
+            precondition(s.deactivations == 0 && suspends == 0)
+            KleptonAudio.start()
+            precondition(s.activations == 0 && nativeSuspended)
+            KleptonAudio.refreshMixing()
+            precondition(s.activations == 0)
+            KleptonAudio.resume()
+            precondition(s.activations == 1 && !nativeSuspended)
+            print("Audio suspended-boot tests passed")
+            return
+        }
+        KleptonAudio.suspend()
+        precondition(s.deactivations == 0 && suspends == 0)
         s.preferredSampleRate = 44100
         s.preferredIOBufferDuration = 0.020
         s.preferredOutputNumberOfChannels = 1
@@ -140,6 +158,46 @@ private func checkPolicy() {
         }
         NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
             object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(0)])
+
+        // Home releases the session once, after stopping I/O. Route, reset,
+        // ended-interruption and window-close callbacks cannot reclaim it.
+        let beforeHomeResume = resumes
+        let beforeHomeRestarts = restarts
+        let beforeHomeActivations = s.activations
+        KleptonAudio.suspend()
+        KleptonAudio.suspend()
+        precondition(nativeSuspended && suspends == 1 && s.deactivations == 1)
+        precondition(s.deactivationOptions == [.notifyOthersOnDeactivation])
+        s.losePolicy()
+        KleptonAudio.refreshMixing()
+        KleptonAudio.settingsWindowClosed(immersiveActive: true)
+        NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification,
+            object: s, userInfo: [AVAudioSessionRouteChangeReasonKey: UInt(8)])
+        NotificationCenter.default.post(name: AVAudioSession.mediaServicesWereResetNotification, object: s)
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(0)])
+        precondition(s.activations == beforeHomeActivations && resumes == beforeHomeResume
+                     && restarts == beforeHomeRestarts && nativeSuspended)
+        s.rejectActivation = true
+        KleptonAudio.resume()
+        precondition(nativeSuspended && resumes == beforeHomeResume)
+        s.rejectActivation = false
+        KleptonAudio.refreshMixing()
+        precondition(s.activations == beforeHomeActivations)
+        KleptonAudio.resume()
+        precondition(!nativeSuspended && resumes == beforeHomeResume + 1)
+        checkPolicy()
+
+        // A deactivation error must still leave native I/O held until a real
+        // successful return, rather than treating it as permission to restart.
+        s.rejectDeactivation = true
+        let beforeReleaseError = resumes
+        KleptonAudio.suspend()
+        KleptonAudio.refreshMixing()
+        precondition(nativeSuspended && resumes == beforeReleaseError)
+        s.rejectDeactivation = false
+        KleptonAudio.resume()
+        precondition(!nativeSuspended && resumes == beforeReleaseError + 1)
 
         // Solo playback can request the guest's preferred format. A later call
         // route must survive all subsequent foreground and style updates.

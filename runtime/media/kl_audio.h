@@ -70,6 +70,10 @@ int  kl_audio_restart(void);
 // second later and by finding silence that has already been heard; a compositor
 // leaving `.paused` knows the moment exactly. The two overlap on purpose.
 void kl_audio_resume(void);
+// Stop output/capture and hold off producer/watchdog restarts while Home hides
+// the display. Preserve the guest's playback state; resume releases the hold.
+// The session host must deactivate AVAudioSession after this call completes.
+void kl_audio_suspend(void);
 // Swift calls this once the AVAudioSession is configured and active. Before it
 // the hardware sample rate reads as a default rather than the real one, and an
 // output unit initialised against the wrong rate fails at AudioUnitInitialize.

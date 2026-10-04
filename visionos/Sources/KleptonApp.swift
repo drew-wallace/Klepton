@@ -158,20 +158,11 @@ enum Lifecycle {
             KleptonSession.shared.restorationBlocked = false
             KleptonSession.shared.canRestoreAutomatically = true
         }
-        // Coming back is the audio's cue, and it needs one: this OS silently
-        // stops calling CoreAudio's render callback across a scene transition —
-        // the boot window being closed while the immersive space runs is one,
-        // a Digital Crown press to passthrough is another — with no error and
-        // no interruption notification. See kl_audio_resume; the compositor
-        // hooks the immersive half of the same transition, and kl_audio's
-        // heartbeat catches whatever neither of them sees.
-        //
-        // Unconditional rather than "only if we were away". A rebuild of a
-        // healthy unit costs a few milliseconds of silence and cannot go wrong;
-        // the state that would let us skip it is precisely the state this
-        // platform lies about.
-        if phase == .active { KleptonAudio.resume() }
+        // An immersive guest resumes audio with its live renderer. Opening only
+        // the settings window must not reclaim audio before the display returns.
+        if phase == .active, !Immersive.wanted { KleptonAudio.resume() }
         guard phase == .background else { return }
+        KleptonAudio.suspend()
         KLGuardianRuntime.shared.beginImmersion()
         kl_app_guest_suspend()
         guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: false) else {
@@ -193,6 +184,7 @@ enum Lifecycle {
         let session = KleptonSession.shared
         guard !session.quitting else { return false }
         session.quitting = true
+        KleptonAudio.suspend()
         session.wantsImmersive = false
         session.restorationBlocked = true
         session.status = "Quitting…"

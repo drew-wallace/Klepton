@@ -23,6 +23,11 @@ public final class AVAudioSession: NSObject {
         public static let allowBluetooth = Self(rawValue: 2)
         public static let defaultToSpeaker = Self(rawValue: 4)
     }
+    public struct SetActiveOptions: OptionSet {
+        public let rawValue: Int
+        public init(rawValue: Int) { self.rawValue = rawValue }
+        public static let notifyOthersOnDeactivation = Self(rawValue: 1)
+    }
     public enum SoundStageSize { case small, medium, large }
     public struct FixedSpatialExperience: AVAudioSessionSpatialExperience {
         public let soundStageSize: SoundStageSize
@@ -59,6 +64,10 @@ public final class AVAudioSession: NSObject {
     public var categoryChanges = 0
     public var activations = 0
     public var rejectActivation = false
+    public var rejectDeactivation = false
+    public var deactivations = 0
+    public var beforeDeactivation: (() -> Void)?
+    public var deactivationOptions: SetActiveOptions = []
     public var rateRequests = 0
     public var bufferRequests = 0
     public var channelRequests = 0
@@ -77,7 +86,14 @@ public final class AVAudioSession: NSObject {
     public func setIntendedSpatialExperience(_ experience: any AVAudioSessionSpatialExperience) throws {
         intendedSpatialExperience = experience
     }
-    public func setActive(_ active: Bool) throws {
+    public func setActive(_ active: Bool, options: SetActiveOptions = []) throws {
+        if !active {
+            beforeDeactivation?()
+            deactivationOptions = options
+            deactivations += 1
+            if rejectDeactivation { throw NSError(domain: "test-deactivation", code: 1) }
+            return
+        }
         precondition(categoryOptions.contains(.mixWithOthers), "activation would interrupt other audio")
         precondition(!isNowPlayingCandidate, "game remains eligible to replace the selected media app")
         precondition((intendedSpatialExperience as? FixedSpatialExperience)?.soundStageSize == .small,

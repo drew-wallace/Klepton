@@ -30,6 +30,8 @@ def main():
         ], check=True)
         subprocess.run([str(binary)], check=True, timeout=10,
                        env={**os.environ, "DYLD_LIBRARY_PATH": temp})
+        subprocess.run([str(binary), "--suspended-boot"], check=True, timeout=10,
+                       env={**os.environ, "DYLD_LIBRARY_PATH": temp})
 
 
 if __name__ == "__main__":
