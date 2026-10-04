@@ -2,11 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- The generator keeps Increased Memory Limit and filters the two
-	     optional keys below unless KLEPTON_EXTENDED_VA=1 or
-	     KLEPTON_LOW_LATENCY=1. The current Personal Team cannot provision
-	     those capabilities. Low-Latency Streaming is for Foveated Streaming;
-	     standalone guests do not depend on it. -->
+	<!-- Steam Link keeps all three capabilities. Standalone guests keep
+	     Increased Memory Limit and opt into the other keys via
+	     KLEPTON_EXTENDED_VA=1 / KLEPTON_LOW_LATENCY=1. A Personal Team may
+	     not provision the latter two. Low-Latency Streaming permits the
+	     system's wireless mode for streamed games; it is distinct from the
+	     Foveated Streaming Session entitlement. -->
 	<key>com.apple.developer.kernel.increased-memory-limit</key>
 	<true/>
 	<key>com.apple.developer.kernel.extended-virtual-addressing</key>

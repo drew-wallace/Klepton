@@ -1390,6 +1390,35 @@ int klb_sigprocmask(int how, const uint64_t *s, uint64_t *o) {
 int klb_pthread_setname_np(pthread_t t, const char *nm) {
     return pthread_equal(t, pthread_self()) ? pthread_setname_np(nm) : 0;
 }
+// Unlike setname, Darwin's getname accepts a thread handle just like bionic.
+// bionic requires room for Linux's 16-byte task name even for a short name,
+// returns an error number, and preserves errno. Steam Link reads worker names
+// when it starts its VR transport.
+int klb_pthread_getname_np(pthread_t t, char *name, size_t size) {
+    if (size < 16) return kl_errno_to_linux(ERANGE);
+    int saved = errno;
+    int r = px(pthread_getname_np(t, name, size));
+    errno = saved;
+    return r;
+}
+// Linux scheduler policies are not available to a visionOS application. Keep
+// the failure recoverable (Steam Link tolerates EPERM on Android too), while
+// a realtime request on the calling receive thread gets Darwin's QoS boost.
+// The boost is best effort; it does not grant Linux FIFO/RR scheduling.
+int klb_sched_setscheduler(int tid, int policy, const struct sched_param *param) {
+    int base = policy & ~0x40000000;  // Linux SCHED_RESET_ON_FORK
+    int valid = param && tid >= 0 &&
+        (((base == 1 || base == 2) && param->sched_priority >= 1 && param->sched_priority <= 99) ||
+         ((base == 0 || base == 3 || base == 5) && param->sched_priority == 0));
+    if (!valid) { errno = kl_errno_to_linux(EINVAL); return -1; }
+    if (base == 1 || base == 2) {
+        uint64_t self = 0;
+        pthread_threadid_np(NULL, &self);
+        if (tid == 0 || (uint64_t)tid == self) kl_pthread_boost_qos(self);
+    }
+    errno = kl_errno_to_linux(EPERM);
+    return -1;
+}
 int klb_pthread_atfork(void (*p)(void), void (*c)(void), void (*ch)(void)) {
     return pthread_atfork(p, c, ch);
 }

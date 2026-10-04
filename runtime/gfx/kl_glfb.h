@@ -202,7 +202,11 @@ uint64_t kl_glfb_stage_draw_count(int stage);
 // once and a swapchain's image index is not unique across them — see
 // kl_glfb_mirror_eye_layer. The two never share a process, so one table serves
 // both, and what the count has to cover is the OpenXR case: every (swapchain,
-// image) pair the guest keeps in flight, which for a three-layer guest is nine.
+// image) pair the guest keeps in flight. Steam Link 2.0.23 uses separate left
+// and right swapchains: three layers x two eyes x three images = 18, plus
+// its retained preflight/menu layers. Sixteen slots evicted active streaming
+// images on every frame, rebuilding their Metal/EGL storage. Thirty-two holds
+// the streaming and menu sets; textures are still allocated only when used.
 //
 // **A provider sized smaller than this declines the slots past its own end**,
 // and a declined slot is a layer with no storage: the mirror fails, the frame
@@ -210,7 +214,7 @@ uint64_t kl_glfb_stage_draw_count(int stage);
 // on the host provider, which held four — most frames of a two-swapchain guest
 // failed to compose, seen first as flicker and then, once the compositor held
 // instead, as two seconds a frame.
-#define KL_MTL_MAX_STAGES 16
+#define KL_MTL_MAX_STAGES 32
 
 // What the host supplies for one (eye, stage). `texture` is an id<MTLTexture>
 // which the host must keep alive for as long as the guest holds the eye texture.

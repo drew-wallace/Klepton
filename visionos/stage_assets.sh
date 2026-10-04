@@ -10,6 +10,7 @@
 # signed* and established nothing about one pushed into Documents.
 #
 #   ./stage_assets.sh                 # the booted simulator
+#   KLEPTON_SIMULATOR=<udid> ./stage_assets.sh # one specific simulator
 #   ./stage_assets.sh <device-udid>   # a physical Vision Pro
 #
 # Idempotent, but not incremental: it replaces what is there. The APK is
@@ -174,7 +175,15 @@ if [ "${1:-}" = "--meta" ]; then META_ONLY=1; shift; fi
 TARGET="${1:-}"
 
 if [ -z "$TARGET" ]; then
-  UDID=$(xcrun simctl list devices booted | grep -o '[0-9A-F-]\{36\}' | head -1)
+  UDID="${KLEPTON_SIMULATOR:-$(xcrun simctl list devices booted -j | python3 -c '
+import json, sys
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    if ".xrOS-" in runtime:
+        for device in devices:
+            if device["state"] == "Booted":
+                print(device["udid"])
+                sys.exit(0)
+' || true)}"
   [ -n "$UDID" ] || { echo "!! no booted simulator"; exit 1; }
   CONTAINER=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null) || {
     echo "!! $BUNDLE_ID is not installed on $UDID — install the app first"; exit 1; }

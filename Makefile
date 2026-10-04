@@ -322,6 +322,20 @@ guestlibs-list:
 	@echo $(GUEST_LIBS)
 
 # ---- Steam Link ----
+.PHONY: slinkcheck
+check: slinkcheck
+build/t_slink_jni: tests/t_slink_jni.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_slink_jni.c $(RUNTIME) $(LDLIBS)
+
+build/t_slink_libc: tests/t_slink_libc.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_slink_libc.c $(RUNTIME) $(LDLIBS)
+
+slinkcheck: build/t_slink_jni build/t_slink_libc
+	./build/t_slink_jni
+	./build/t_slink_libc
+	python3 -m unittest discover -s tests -p 'test_visionos_entitlements.py'
 #
 # One target row like any other (`./build/m_boot steamlink-vr`), and one binary:
 # the front door is a KNOB, not a build. All three doors are the same guest, the

@@ -195,12 +195,12 @@ def defined_symbols(path):
 # Hand-written elsewhere. Keep in sync with the E(...) entries in kl_shim.c.
 SPECIAL = set("""
 __errno environ gettid __system_property_find __system_property_get __system_property_read
-prctl sched_getaffinity sched_setaffinity __sched_cpualloc __sched_cpufree stat fstat lstat statfs uname sigaction
+prctl sched_getaffinity sched_setaffinity sched_setscheduler __sched_cpualloc __sched_cpufree stat fstat lstat statfs uname sigaction
 __FD_ISSET_chk __FD_SET_chk __ctype_get_mb_cur_max lseek64 getpwuid getpwuid_r
 opendir readdir closedir setjmp _setjmp sigsetjmp longjmp _longjmp siglongjmp strtold wcstold strtold_l
 swprintf vprintf vsscanf execl system syscall sysconf fopen access mkdir unlink rename
 dlopen dlsym dlclose dlerror dladdr dl_iterate_phdr
-memrchr memalign
+memrchr memalign inet_pton inet_ntop
 fputc fputs fwrite fread fclose fflush fgets getc feof ferror clearerr
 fseek fseeko ftell ftello setvbuf
 __memcpy_chk __memset_chk __strcpy_chk __strlen_chk __strchr_chk __vsnprintf_chk

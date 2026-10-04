@@ -2439,8 +2439,9 @@ except its own control vars (next section).
   (`[app] scene phase -> …`). Retention lasts while visionOS keeps the process
   alive; force-quitting or memory-pressure termination still needs a fresh boot.
 - `KL_BOOT_WINDOW=1` — keep the startup/report window beside the immersive
-  guest on cold boot and re-entry. **Default on:** settings and Quit stay
-  available. `=0` closes it after immersion opens for diagnostics.
+  guest on cold boot and re-entry. **Default on for standalone guests:** settings
+  and Quit stay available. Steam Link closes its pairing/report window when VR
+  opens; `=1` keeps it available for diagnostics. `=0` closes it for other guests.
 - `KL_SIM_HEAD_HEIGHT` — simulator-only standing camera lift in metres.
   **Default `1.6`:** a Home launch has the same standing view as a scripted
   launch. `0` disables the lift; physical-headset tracking is unaffected.
@@ -2656,8 +2657,15 @@ Read by the scripts themselves, never forwarded to the app.
   than launching into an empty container — it is just not free.
 - `KLEPTON_TEAM=<id>` — override the signing team;
   `KLEPTON_DEVICE=<udid>` — skip device auto-detection;
-  `KLEPTON_ENTITLEMENTS=0` — build without the two memory capabilities (see
-  `gen_xcodeproj.py` for why that is the unusual build).
+  `KLEPTON_ENTITLEMENTS=0` — build without the authored capabilities.
+  Steam Link enables Increased Memory Limit, Extended Virtual Addressing,
+  and Low-Latency Streaming by default. Other guests enable Increased Memory
+  Limit only. `KLEPTON_EXTENDED_VA=0` and `KLEPTON_LOW_LATENCY=0` individually
+  disable the optional keys for diagnostic builds on an unsupported signing
+  team; `=1` opts other guests in. The low-latency key permits wireless
+  networking for streamed games, separately from Foveated Streaming Session.
+  `KLEPTON_SIMULATOR=<udid>` selects a booted visionOS simulator for both
+  installation and asset staging.
 - `KL_SKIP_STAGE=1` — never stage assets, even on a target that has never had
   them; `KL_STAGE=1` — always stage, whatever the stamp says. The 2.2 GB
   upload is a ~20 s loop vs a ~20 min one; a reinstall rotates the data

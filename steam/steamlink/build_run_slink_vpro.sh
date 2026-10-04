@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build, install and run the STEAM LINK target on a physical Apple Vision Pro.
+# Build, install and run the STEAM LINK target on Apple Vision Pro or Simulator.
 #
 # The hybrid of the two wrappers, because neither alone fits this target on
 # device. build_run_vpro.sh owns the device loop — build through visionos/run.sh,
@@ -19,6 +19,8 @@
 #                                         #   a carried session (kl_app.c: the
 #                                         #   shell is already the default —
 #                                         #   this wins over --sargs)
+#   ./steam/steamlink/build_run_slink_vpro.sh --sim       # a booted visionOS Simulator;
+#                                         #   KLEPTON_SIMULATOR selects its UDID
 #   ./steam/steamlink/build_run_slink_vpro.sh --vr        # the VR front door DIRECTLY. It reads
 #                                         #   its session from the environment
 #                                         #   and leaves before its first frame
@@ -67,8 +69,7 @@
 # steamlink_policy() — so no flag has to: the topmost projection layer is the one
 # composited, the eye texture is allocated 2x and capped at 3456, the display rate
 # is pinned to 90 Hz (this client dereferences a null frametime container on a
-# MEASURED rate) and the audio buffer is 240 ms (a network stream jitters through
-# the 80 ms local-mixer default). Each is one env var away — KL_XR_CAPTURE_LAYER,
+# MEASURED rate) and the audio fill target is 60 ms. Each is one env var away — KL_XR_CAPTURE_LAYER,
 # KL_XR_EYE_SCALE / KL_XR_EYE_MAX, KL_DISPLAY_HZ, KL_AUDIO_LATENCY_MS — and
 # run.sh forwards every KL_* it sees. Those defaults are the APP's alone;
 # `build/m_boot` sets none of them, so a host run still passes them by hand.
@@ -86,11 +87,13 @@ cd "$(dirname "$0")/../.."
 # build_run_vpro.sh with the wrong summary.
 export KLEPTON_TARGET=steamlink-vr
 
-STAGE=""          # empty => KL_SKIP_STAGE=1 (assets persist across installs)
+STAGE=""          # empty => run.sh decides from its staging stamp
 LOG_ONLY=""
+RUN_MODE=device
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --sim)        RUN_MODE=sim; shift ;;
     --shell)      export KL_SLINK_SHELL=1; shift ;;
     --vr)         export KL_SLINK_VR=1; shift ;;
     --sargs)      export KL_SLINK_SARGS="$2"; shift 2 ;;
@@ -127,7 +130,7 @@ fi
 KLT_VARS=$(python3 visionos/targets.py "$KLEPTON_TARGET") || exit 1
 eval "$KLT_VARS"
 BUNDLE_ID="${KLEPTON_BUNDLE_ID:-$KLT_BUNDLE}"
-LOCAL_LOG="${KL_LOG_OUT:-/tmp/klepton-$KLT_NAME.log}"
+LOCAL_LOG="${KL_LOG_OUT:-/tmp/klepton-$KLT_NAME-$RUN_MODE.log}"
 
 # Device discovery, shared shape with build_run_vpro.sh: JSON, because device
 # names contain non-breaking spaces and column parsing picks the wrong field.
@@ -150,9 +153,23 @@ print(phys[0]["identifier"])
 ' "$json"
   rm -f "$json"
 }
-DEVID="${KLEPTON_DEVICE:-$(find_device || true)}"
-[ -n "$DEVID" ] || { echo "!! no physical Vision Pro — pair it in Xcode, or set KLEPTON_DEVICE"; exit 1; }
-export KLEPTON_DEVICE="$DEVID"
+if [ "$RUN_MODE" = device ]; then
+  DEVID="${KLEPTON_DEVICE:-$(find_device || true)}"
+  [ -n "$DEVID" ] || { echo "!! no physical Vision Pro — pair it in Xcode, or set KLEPTON_DEVICE"; exit 1; }
+  export KLEPTON_DEVICE="$DEVID"
+else
+  DEVID="${KLEPTON_SIMULATOR:-$(xcrun simctl list devices booted -j | python3 -c '
+import json, sys
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    if ".xrOS-" in runtime:
+        for device in devices:
+            if device["state"] == "Booted":
+                print(device["udid"])
+                sys.exit(0)
+')}"
+  [ -n "$DEVID" ] || { echo "!! no booted visionOS simulator"; exit 1; }
+  export KLEPTON_SIMULATOR="$DEVID"
+fi
 
 # Pull the log, but never let a shorter one overwrite a longer one — the device
 # relaunches a dead app and the fresh process truncates klepton-boot.log, so
@@ -160,9 +177,15 @@ export KLEPTON_DEVICE="$DEVID"
 # build_run_vpro.sh, verbatim.
 pull_log() {
   local tmp; tmp="$(mktemp)"
-  xcrun devicectl device copy from --device "$DEVID" \
+  if [ "$RUN_MODE" = sim ]; then
+    local container
+    container=$(xcrun simctl get_app_container "$DEVID" "$BUNDLE_ID" data) || { rm -f "$tmp"; return 1; }
+    cp "$container/Documents/klepton-boot.log" "$tmp" || { rm -f "$tmp"; return 1; }
+  else
+    xcrun devicectl device copy from --device "$DEVID" \
     --domain-type appDataContainer --domain-identifier "$BUNDLE_ID" \
     --source Documents/klepton-boot.log --destination "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+  fi
   local new old
   new=$(wc -l < "$tmp" | tr -d ' ')
   old=0; [ -f "$LOCAL_LOG" ] && old=$(wc -l < "$LOCAL_LOG" | tr -d ' ')
@@ -274,16 +297,16 @@ if [ -n "$LOG_ONLY" ]; then
   exit 0
 fi
 
-[ -n "$STAGE" ] || export KL_SKIP_STAGE=1
+[ -z "$STAGE" ] || export KL_STAGE=1
 export KL_ALARM="${KL_ALARM:-180}"
 export KL_LOG_OUT="$LOCAL_LOG"
 
 echo "target    : $KLT_NAME ($BUNDLE_ID, $KLT_PRODUCT.app)"
-echo "device    : $DEVID"
+echo "$RUN_MODE    : $DEVID"
 echo "knobs     : ${KL_SLINK_SHELL:+KL_SLINK_SHELL=1 }${KL_SLINK_VR:+KL_SLINK_VR=1 }${KL_SLINK_SARGS:+KL_SLINK_SARGS=(carried) }${KL_SLINK_HOST:+KL_SLINK_HOST=$KL_SLINK_HOST }${KL_SLINK_WAIT:+KL_SLINK_WAIT=$KL_SLINK_WAIT }${KL_IMMERSIVE:+KL_IMMERSIVE=$KL_IMMERSIVE }${KL_GLFB:+KL_GLFB=$KL_GLFB }${KL_PERMISSIVE:+KL_PERMISSIVE=1 }${KL_TRACE_FS:+KL_TRACE_FS=1 }${KL_TRACE_NET:+KL_TRACE_NET=1 }KL_ALARM=$KL_ALARM${KL_SKIP_STAGE:+ (assets not re-staged)}"
 echo "            (unset knobs take the app's defaults: the 2D shell, ANGLE, the"
 echo "             space opened by the handoff rather than at launch, and the"
-echo "             Steam Link policy kl_app.c sets — 90 Hz, 240 ms audio, topmost"
+echo "             Steam Link policy kl_app.c sets — 90 Hz, 60 ms audio, topmost"
 echo "             layer, 2x eye. run.sh forwards every KL_* it sees)"
 echo
 
@@ -292,7 +315,7 @@ echo
 # pull it needs and then summarise the older run's file.
 rm -f "$LOCAL_LOG.streamed"
 
-visionos/run.sh device
+visionos/run.sh "$RUN_MODE"
 
 # run.sh polls or streams the log while the run is live; this is the final
 # read. A streamed log is already this run's — pulling the container's file on

@@ -7,6 +7,7 @@
 # Env overrides:
 #   KLEPTON_TARGET=<name>   which guest — `python3 targets.py --list`
 #   KLEPTON_DEVICE=<udid>   skip device auto-detection
+#   KLEPTON_SIMULATOR=<udid> select a booted visionOS simulator
 #   KLEPTON_TEAM=<teamid>   override signing team
 #   KLEPTON_BUNDLE_ID=...   override bundle id
 #   KL_SKIP_STAGE=1         never stage, even on a target that has never had it
@@ -396,7 +397,15 @@ fi
 # nothing — silently, right after "[2/5] project…", before the message below
 # ever prints. Cost a "build crash" report that was really a missing `device`
 # argument on a machine with no simulator booted.
-UDID=$(xcrun simctl list devices booted | grep -o '[0-9A-F-]\{36\}' | head -1 || true)
+UDID="${KLEPTON_SIMULATOR:-$(xcrun simctl list devices booted -j | python3 -c '
+import json, sys
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    if ".xrOS-" in runtime:
+        for device in devices:
+            if device["state"] == "Booted":
+                print(device["udid"])
+                sys.exit(0)
+' || true)}"
 [ -n "$UDID" ] || { echo "!! no booted visionOS simulator (did you mean ./run.sh device ?)"; exit 1; }
 
 echo "[3/5] building for the simulator…"
@@ -425,7 +434,7 @@ xcrun simctl install "$UDID" "$APP"
 # After install, not before: simctl rotates the data container on reinstall, so
 # assets staged earlier end up in an orphaned one and the app reports them
 # missing. Cost a confusing run once.
-stage_if_needed "sim-$UDID"
+KLEPTON_SIMULATOR="$UDID" stage_if_needed "sim-$UDID"
 
 echo "[5/5] launching…"
 # `env`, not a bare prefix: bash only treats NAME=value as an assignment when it

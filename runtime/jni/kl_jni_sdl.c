@@ -280,6 +280,17 @@ static klj_val klj_SDLA_setWindowStyle(void *env, void *self, const klj_val *a, 
     return (klj_val){.j = 0};
 }
 
+// SDL 3 in Steam Link 2.0.23 toggles Android's BACK-button trap during
+// startup. visionOS owns window dismissal and has no Android BACK button;
+// SDL's key events still reach the guest through kl_mono_key.
+static klj_val klj_SDLA_setBackButtonTrapEnabled(void *env, void *self,
+                                               const klj_val *a, int n) {
+    (void)env; (void)self;
+    KLJ_LOG("setBackButtonTrapEnabled(%d): dismissal is owned by visionOS",
+            n > 0 ? (int)a[0].j : 0);
+    return (klj_val){.j = 0};
+}
+
 // No haptic devices are presented, so a poll finds no changes — the same answer
 // the real one gives with nothing connected. (The guest already logged "no
 // rumble capable system haptic device found" off the back of this.)
@@ -337,6 +348,7 @@ const klj_binding klj_bind_sdl[] = {
     {"org/libsdl/app/SDL", "getContext", "()Landroid/app/Activity;", klj_SDLA_getContext},
     {KLJ_SDLA, "setActivityTitle", "(Ljava/lang/String;)Z", klj_SDLA_setActivityTitle},
     {KLJ_SDLA, "setWindowStyle", "(Z)V", klj_SDLA_setWindowStyle},
+    {KLJ_SDLA, "setBackButtonTrapEnabled", "(Z)V", klj_SDLA_setBackButtonTrapEnabled},
     {KLJ_SDLA, "getDeviceFormFactor", "()Ljava/lang/String;", klj_SDLA_formFactor},
     {KLJ_SDLA, "isChromebook", "()Z", klj_SDLA_false},
     {KLJ_SDLA, "isDeXMode", "()Z", klj_SDLA_false},
@@ -344,6 +356,8 @@ const klj_binding klj_bind_sdl[] = {
     // VR input is OpenXR, not a mouse — SDL's relative-mouse mode is unsupported,
     // and a custom hardware cursor cannot be created (0 = none; SDL keeps default).
     {KLJ_SDLA, "showTextInput", "(IIII)Z", klj_SDLA_showTextInput},
+    // New SDL3 also passes the text-input type after the rectangle.
+    {KLJ_SDLA, "showTextInput", "(IIIII)Z", klj_SDLA_showTextInput},
     {KLJ_SDLA, "isScreenKeyboardShown", "()Z", klj_SDLA_isScreenKeyboardShown},
     {KLJ_SDLA, "supportsRelativeMouse", "()Z", klj_SDLA_false},
     {KLJ_SDLA, "createCustomCursor", "([IIIII)I", klj_SDLA_false},
@@ -386,6 +400,10 @@ const klj_binding klj_bind_sdl[] = {
     {"com/valvesoftware/steamlink/SteamLink", "wasLaunchedFromVRLink", "()Z", klj_SDLA_false},
     {"com/valvesoftware/steamlink/SteamLink", "getWifiInfo",
      "()L" KLJ_WIFIINFO ";", klj_SL_getWifiInfo},
+    // 2.0.23 requests Android USB tethering before creating its shell window.
+    // visionOS provides the network interfaces; no Android tethering service
+    // exists here, so the request is a no-op and discovery uses the LAN.
+    {"com/valvesoftware/steamlink/SteamLink", "trySetupUsbNetwork", "()V", klj_SDLA_false},
     // Both are one-line reads of an intent extra — getStringExtra("displayTitle")
     // and ("displayMessage") — that another activity sets when it hands this one
     // a message to show on the way in. We launch it directly with no extras, so

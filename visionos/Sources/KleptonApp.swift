@@ -444,11 +444,9 @@ struct BootView: View {
         get { session.handedOff }
         nonmutating set { session.handedOff = newValue }
     }
-    // The visionOS system keyboard for an immersive guest: there is no on-screen
-    // keyboard in an immersive space, so when the guest asks for text entry
-    // (kl_mono_text_input_wanted, set by SDLActivity.showTextInput) we focus a
-    // hidden field to raise the system keyboard and feed what is typed back
-    // through kl_mono_key. cs1 needs this to name a local server.
+    // Shared system keyboard for the flat shell and immersive guests. SDL's
+    // showTextInput request focuses a hidden field; UTF-8 text goes through
+    // the IME commit path and edit keys through kl_mono_key.
     @State private var kbTyped = ""
     @State private var kbSuppress = false
     @FocusState private var kbFocused: Bool
@@ -519,6 +517,29 @@ struct BootView: View {
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
+        }
+        // Keep the keyboard bridge in the hierarchy when the shell replaces
+        // the boot report. SwiftUI provides text edits rather than key events.
+        .overlay(alignment: .bottom) {
+            TextField("", text: $kbTyped)
+                .focused($kbFocused)
+                .opacity(0.02)
+                .frame(width: 1, height: 1)
+                .onChange(of: kbTyped) { old, new in
+                    // A programmatic reset for a new field is not typing — skip it,
+                    // or the "" would read as deleting the previous field's text.
+                    if kbSuppress { kbSuppress = false; return }
+                    if new.count < old.count {
+                        // Deletion: backspace is an edit key, not text — keep it on
+                        // the key path (KEYCODE_DEL), which the field honours.
+                        for _ in 0..<(old.count - new.count) { kbSend(8) }
+                    } else if new.count > old.count {
+                        // New characters must go through the IME commit path or SDL
+                        // never raises SDL_TEXTINPUT and the field stays empty.
+                        String(new.dropFirst(old.count)).withCString { kl_mono_commit_text($0) }
+                    }
+                    if new.count > 128 { kbSuppress = true; kbTyped = "" }   // a keyboard, not a buffer
+                }
         }
         .disabled(session.quitting)
         .task { await watchPresentation() }
@@ -624,8 +645,10 @@ struct BootView: View {
         case .opened:
             session.openedSpace = true
             session.restorationBlocked = false
-            // Keep settings and Quit available on cold boot as well as re-entry.
-            if !klEnvOn("KL_BOOT_WINDOW", default: true) { dismissWindow(id: "main") }
+            // Steam Link's pairing window has finished its job once VR opens.
+            // Other guests keep settings and Quit available beside the game.
+            let keepWindow = kl_app_target_is_steamlink() == 0
+            if !klEnvOn("KL_BOOT_WINDOW", default: keepWindow) { dismissWindow(id: "main") }
         case .userCancelled:
             session.restorationBlocked = true
         case .error:
@@ -733,32 +756,6 @@ struct BootView: View {
             }
         }
         .padding(24)
-        // The system-keyboard bridge for immersive text entry — hidden, and it
-        // must stay in the hierarchy: dismissing the field is what tells the
-        // system to put the keyboard away. Characters, not key events (SwiftUI
-        // hands a windowed app the resulting STRING), translated to Android
-        // keycodes the guest's SDL turns back into text via kl_mono_key.
-        .overlay(alignment: .bottom) {
-            TextField("", text: $kbTyped)
-                .focused($kbFocused)
-                .opacity(0.02)
-                .frame(width: 1, height: 1)
-                .onChange(of: kbTyped) { old, new in
-                    // A programmatic reset for a new field is not typing — skip it,
-                    // or the "" would read as deleting the previous field's text.
-                    if kbSuppress { kbSuppress = false; return }
-                    if new.count < old.count {
-                        // Deletion: backspace is an edit key, not text — keep it on
-                        // the key path (KEYCODE_DEL), which the field honours.
-                        for _ in 0..<(old.count - new.count) { kbSend(8) }
-                    } else if new.count > old.count {
-                        // New characters must go through the IME commit path or SDL
-                        // never raises SDL_TEXTINPUT and the field stays empty.
-                        String(new.dropFirst(old.count)).withCString { kl_mono_commit_text($0) }
-                    }
-                    if new.count > 128 { kbSuppress = true; kbTyped = "" }   // a keyboard, not a buffer
-                }
-        }
         // Boots on its own. Tapping an app and then tapping Boot is a harness,
         // not a product — and the scripted paths (`visionos/run.sh`) wanted
         // this anyway, which is what KL_AUTOBOOT was for. `KL_AUTOBOOT=0`

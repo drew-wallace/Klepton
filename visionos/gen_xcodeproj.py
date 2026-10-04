@@ -32,6 +32,7 @@ import os, pathlib, subprocess, sys, re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import targets as targets_mod
+from entitlements import select_entitlements
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KLT = targets_mod.resolve(os.environ.get("KLEPTON_TARGET") or targets_mod.DEFAULT)
@@ -49,31 +50,21 @@ if STEAM_LOCAL:
     import mksteam
     mksteam.verify_staged()
 
-# Keep Increased Memory Limit on: the current Personal Team can provision it.
-# A 2026-09-28 device build confirmed that the same team refuses Extended
-# Virtual Addressing and Low-Latency Streaming. Those remain in the authored
-# plist, but are opt-in so rebuilding does not require hand-editing capabilities.
-# KLEPTON_EXTENDED_VA=1 requires a team/profile supporting that capability.
-# KLEPTON_LOW_LATENCY=1 additionally requires the streaming capability; it is
-# for Foveated Streaming, not standalone guest rendering or audio.
+# Standalone guests keep the Personal Team-compatible defaults. Steam Link
+# enables Extended Virtual Addressing and Low-Latency Streaming by default.
+# The latter permits low-latency wireless networking for streamed game content;
+# it is separate from com.apple.developer.foveated-streaming-session.
+# Set either override to 0 for a diagnostic build on an unsupported team.
 ENTITLEMENTS = os.environ.get("KLEPTON_ENTITLEMENTS", "1") != "0"
-OPTIONAL_ENTITLEMENTS = {
-    "com.apple.developer.kernel.extended-virtual-addressing": "KLEPTON_EXTENDED_VA",
-    "com.apple.developer.low-latency-streaming": "KLEPTON_LOW_LATENCY",
-}
 ENTITLEMENTS_FILE = "Klepton.entitlements"
-_dropped = [k for k, env in OPTIONAL_ENTITLEMENTS.items()
-            if os.environ.get(env, "0") != "1"]
+import plistlib
+src = pathlib.Path(__file__).with_name("Klepton.entitlements")
+d, _dropped = select_entitlements(plistlib.loads(src.read_bytes()), KLT['name'], os.environ)
 if ENTITLEMENTS and _dropped:
-    import plistlib
-    src = pathlib.Path(__file__).with_name("Klepton.entitlements")
-    d = plistlib.loads(src.read_bytes())
-    for k in _dropped:
-        d.pop(k, None)
-    out = pathlib.Path(__file__).with_name("build") / "Klepton-filtered.entitlements"
+    out = pathlib.Path(__file__).with_name("build") / f"{NAME}-filtered.entitlements"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(plistlib.dumps(d))
-    ENTITLEMENTS_FILE = "build/Klepton-filtered.entitlements"
+    ENTITLEMENTS_FILE = f"build/{NAME}-filtered.entitlements"
 
 ENTITLEMENTS_SETTING = (f"\t\t\t\tCODE_SIGN_ENTITLEMENTS = {ENTITLEMENTS_FILE};\n"
                         if ENTITLEMENTS else "")

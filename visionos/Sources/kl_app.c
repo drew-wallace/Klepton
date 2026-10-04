@@ -623,12 +623,12 @@ static void steamlink_policy(void) {
     //   - the 90 Hz pin (KL_DISPLAY_HZ): Steam Link's VR client dereferences a
     //     null frametime container on any rate the compositor MEASURES, so the
     //     rate it is told has to be fixed up front.
-    //   - a deeper audio buffer (KL_AUDIO_LATENCY_MS): the audio is a network
-    //     stream, and the 80 ms local-mixer default underruns on jitter — heard
-    //     as the micro-stutters. 180 ms buffers the jitter at a latency a
-    //     streamed title tolerates.
+    //   - a 60 ms audio fill target: the old 240 ms target added a quarter
+    //     second of delay. The simulator stream sustains 60 ms without
+    //     underruns after the swapchain cache fix. Headset wireless jitter
+    //     still needs measurement; KL_AUDIO_LATENCY_MS overrides this target.
     kl_ovrp_set_forced_hz_hint((float)kl_env_int("KL_DISPLAY_HZ_DEFAULT", 90));
-    kl_audio_set_latency_ms((unsigned)kl_env_int("KL_AUDIO_LATENCY_DEFAULT_MS", 240));
+    kl_audio_set_latency_ms((unsigned)kl_env_int("KL_AUDIO_LATENCY_DEFAULT_MS", 60));
 }
 
 // The 2D -> VR handoff — and the one thing about it that is

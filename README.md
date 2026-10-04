@@ -74,7 +74,7 @@ Currently working well on both macOS and visionOS with minor-to-no graphical iss
 
 WIP or not in a great state:
 
-- Steam VR Link (no AWDL mitigations due to entitlement restrictions, XR_EXT_hand_tracking not implemented yet)
+- [Steam Link VR](docs/steam/STEAMLINK-VR.md) (video/audio streaming verified in the simulator; headset testing and Low-Latency Streaming provisioning remain)
 - Xbox Cloud Gaming — a separate build that is essentially a web app (a PWA wrapper around the streaming client), not a translated APK
 - ZIX
 

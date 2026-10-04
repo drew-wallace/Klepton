@@ -475,6 +475,19 @@ static void kl_hexdump(const char *tag, const void *buf, ssize_t n) {
     fprintf(stderr, "|\n");
 }
 static void kl_sa_to_guest(struct sockaddr *sa, socklen_t *len);
+// Linux AF_INET6 is 10; Darwin's is 30. A raw inet_pton forward returns -1
+// even for a DNS name, which curl interprets as an IP literal and omits SNI.
+// Steam's HTTPS endpoint then rejects the otherwise valid ClientHello.
+static int kl_inet_pton(int family, const char *src, void *dst) {
+    int r = inet_pton(family == 10 ? AF_INET6 : family, src, dst);
+    if (r < 0) errno = kl_errno_to_linux(errno);
+    return r;
+}
+static const char *kl_inet_ntop(int family, const void *src, char *dst, socklen_t len) {
+    const char *r = inet_ntop(family == 10 ? AF_INET6 : family, src, dst, len);
+    if (!r) errno = kl_errno_to_linux(errno);
+    return r;
+}
 static int kl_getaddrinfo(const char *node, const char *serv,
                           const void *hints, void *res) {
     if (kl_net_offline()) {
@@ -1940,7 +1953,8 @@ X(klb_pthread_setspecific) X(klb_pthread_once)
 X(klb_pthread_create) X(klb_pthread_join) X(klb_pthread_detach) X(klb_pthread_exit)
 X(klb_pthread_self) X(klb_pthread_equal) X(klb_pthread_kill) X(klb_pthread_sigmask)
 X(klb_sigprocmask)
-X(klb_pthread_setname_np) X(klb_pthread_atfork)
+X(klb_pthread_setname_np) X(klb_pthread_getname_np) X(klb_pthread_atfork)
+X(klb_sched_setscheduler)
 X(klb_sem_init) X(klb_sem_destroy) X(klb_sem_post) X(klb_sem_wait)
 X(klb_sem_timedwait) X(klb_sem_getvalue) X(klb_sem_trywait)
 X(klb_sem_open) X(klb_sem_close)
@@ -2033,6 +2047,7 @@ static const kl_entry g_shim[] = {
     E("usleep", kl_usleep),
     E("close", klb_close), E("lseek", klb_lseek), E("pread", klb_pread),
     E("getaddrinfo", kl_getaddrinfo), E("connect", kl_connect),
+    E("inet_pton", kl_inet_pton), E("inet_ntop", kl_inet_ntop),
     E("socket", kl_socket),
     E("bind", kl_bind), E("sendto", kl_sendto), E("accept", kl_accept),
     E("getifaddrs", klb_getifaddrs), E("freeifaddrs", klb_freeifaddrs),
@@ -2250,6 +2265,8 @@ static const kl_entry g_shim[] = {
     E("pthread_kill", klb_pthread_kill), E("pthread_sigmask", klb_pthread_sigmask),
     E("sigprocmask", klb_sigprocmask),
     E("pthread_setname_np", klb_pthread_setname_np), E("pthread_atfork", klb_pthread_atfork),
+    E("pthread_getname_np", klb_pthread_getname_np),
+    E("sched_setscheduler", klb_sched_setscheduler),
     E("sem_init", klb_sem_init), E("sem_destroy", klb_sem_destroy),
     E("sem_post", klb_sem_post), E("sem_wait", klb_sem_wait),
     E("sem_timedwait", klb_sem_timedwait), E("sem_getvalue", klb_sem_getvalue),

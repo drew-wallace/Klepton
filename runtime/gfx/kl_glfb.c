@@ -4222,8 +4222,8 @@ static struct { uint32_t tex; int w, h; uint32_t fmt; uint32_t src; }
 // The key does NOT include the eye: the destinations are already per-eye
 // (g_eye_mirror[2][...]), so one slot number addresses both eyes' copies of the
 // same guest image and a layer that names only one eye simply leaves the other
-// half unused. That is what makes 16 slots cover Steam Link's three layers of
-// three images with room over, instead of half that.
+// half unused. Separate-eye swapchains still have different source keys, so
+// Steam Link's three layers need 18 slots, plus its retained menu images.
 //
 // `used` is the allocation clock, for the least-recently-used eviction: a guest
 // with more live images than slots has to degrade somehow, and reusing the

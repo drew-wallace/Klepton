@@ -109,6 +109,7 @@ final class KleptonShellView: UIView {
     }
 
     @objc private func tick() {
+        kl_mono_poke_tick()  // optional simulator input regression sequence
         // Take the frame under kl_mono's lock and let go immediately: the sink
         // that fills it runs INSIDE the guest's frame, so anything held here is
         // guest frame time.
@@ -223,8 +224,7 @@ struct ShellSurface: UIViewRepresentable {
 /// the translating.
 struct ShellWindow: View {
     @State private var box = ShellSurface.Box()
-    @State private var typed = ""
-    @FocusState private var keyboardFocused: Bool
+    @State private var pointerDown = false
 
     var body: some View {
         ShellSurface(box: box)
@@ -234,19 +234,21 @@ struct ShellWindow: View {
             // pinch as a drag whose location is where the person was looking.
             .gesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { g in send(g.location, phase: .down) }
-                    .onEnded   { g in send(g.location, phase: .up) }
+                    .onChanged { g in
+                        send(g.location, phase: pointerDown ? .move : .down)
+                        pointerDown = true
+                    }
+                    .onEnded { g in
+                        send(g.location, phase: .up)
+                        pointerDown = false
+                    }
             )
-            // A hidden field is how a windowed visionOS app gets characters at
-            // all: there is no key-event stream for a Metal layer, and the
-            // system keyboard is attached to a text input. It is the PIN and the
-            // host address that need it — see kl_mono_keycode_for_char for the
-            // list of keys we are willing to claim.
-            .overlay(alignment: .bottom) { keyboardTap }
+            // KleptonApp owns the shared keyboard field and consumes SDL's
+            // text-entry requests for both the shell and immersive guests.
             .background(.black)
     }
 
-    private enum Phase { case down, up }
+    private enum Phase { case down, move, up }
 
     private func send(_ p: CGPoint, phase: Phase) {
         guard let v = box.view, v.guestW > 0, v.guestH > 0 else { return }
@@ -262,36 +264,10 @@ struct ShellWindow: View {
             // the button took its highlight and nothing else).
             kl_mono_pointer(0, KL_MONO_HOVER_MOVE, x, y)
             kl_mono_pointer(Int32(KL_MONO_BTN_PRIMARY), KL_MONO_DOWN, x, y)
+        case .move:
+            kl_mono_pointer(Int32(KL_MONO_BTN_PRIMARY), KL_MONO_MOVE, x, y)
         case .up:
             kl_mono_pointer(0, KL_MONO_UP, x, y)
         }
-    }
-
-    /// Invisible, and it has to stay in the hierarchy: dismissing it is what
-    /// tells the system to put the keyboard away.
-    private var keyboardTap: some View {
-        TextField("", text: $typed)
-            .focused($keyboardFocused)
-            .opacity(0.02)
-            .frame(width: 1, height: 1)
-            .onChange(of: typed) { old, new in
-                // Characters, not key events: SwiftUI gives a windowed app the
-                // resulting STRING, so a backspace shows up as the field getting
-                // shorter. Both directions are translated, because a PIN entry
-                // that cannot be corrected is a PIN entry that fails.
-                if new.count < old.count {
-                    for _ in 0..<(old.count - new.count) { key(8) }   // KEYCODE_DEL
-                } else {
-                    for ch in new.dropFirst(old.count) { key(Int32(ch.asciiValue ?? 0)) }
-                }
-                if new.count > 64 { typed = "" }   // it is a keyboard, not a buffer
-            }
-    }
-
-    private func key(_ ch: Int32) {
-        let code = kl_mono_keycode_for_char(ch)
-        guard code != 0 else { return }
-        kl_mono_key(1, code)
-        kl_mono_key(0, code)
     }
 }
