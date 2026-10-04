@@ -245,19 +245,17 @@ static uint64_t klplat_called(const char *name) {
 #define KLPLAT_INIT_SUCCESS        0            // PlatformInitializeResult.Success
 #define KLPLAT_AGE_ADULT           3            // AccountAgeCategory.Ad
 
-// A ring, because the guest holds a message only until it has read it and calls
-// ovr_FreeMessage; three per run is the whole traffic, so 16 slots cannot wrap
-// under a live message. The mutex is not defensive — the requests are issued
-// from managed code on the main thread and the pump runs there too, but nothing
-// in the API promises that.
+// A bounded completion queue. Each popped message lives until FreeMessage,
+// including while a callback enqueues further requests and wraps this queue.
 #define KLPLAT_MSGQ 16
 // `str` is the STRING payload, for the messages whose managed wrapper is a
 // `Message<string>` — it is read through ovr_Message_GetString rather than
 // through the int payload above, and a message carries one or the other.
 typedef struct {
     uint32_t type; uint64_t request; int32_t payload; const char *str;
+    int error;
 } klplat_msg;
-static klplat_msg      g_msgq[KLPLAT_MSGQ];
+static klplat_msg     *g_msgq[KLPLAT_MSGQ];
 static unsigned        g_msg_head, g_msg_tail;
 static uint64_t        g_next_request = 1;
 static int             g_platform_up;
@@ -266,20 +264,30 @@ static pthread_mutex_t g_msg_mu = PTHREAD_MUTEX_INITIALIZER;
 // Issue a request and queue its completion. Returns the ovrRequest the guest
 // will wait on — non-zero, and matched by the message, which together are the
 // whole point.
-static uint64_t klplat_request_str(const char *what, uint32_t type,
-                                   int32_t payload, const char *str) {
+static uint64_t klplat_request_message(const char *what, uint32_t type,
+                                   int32_t payload, const char *str, int error) {
     pthread_mutex_lock(&g_msg_mu);
-    uint64_t id = g_next_request++;
+    uint64_t id = 0;
     if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
-        klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
-        m->type = type; m->request = id; m->payload = payload; m->str = str;
+        klplat_msg *m = calloc(1, sizeof *m);
+        if (m) {
+            id = g_next_request++;
+            m->type = type; m->request = id; m->payload = payload; m->str = str;
+            m->error = error;
+            g_msgq[g_msg_tail++ % KLPLAT_MSGQ] = m;
+        }
     }
     pthread_mutex_unlock(&g_msg_mu);
+    if (!id) return 0; // Never issue a request whose completion cannot be queued.
     fprintf(stderr, "  [plat] %s -> request %llu, completion queued "
                     "(type 0x%08x, payload %d%s%s)\n",
             what, (unsigned long long)id, type, payload,
             str ? ", string " : "", str ? str : "");
     return id;
+}
+static uint64_t klplat_request_str(const char *what, uint32_t type,
+                                   int32_t payload, const char *str) {
+    return klplat_request_message(what, type, payload, str, 0);
 }
 
 // ...and the int-payload spelling, which is all but one caller.
@@ -294,7 +302,11 @@ static void *klplat_PopMessage(void) {
     plat_hit("ovr_PopMessage");
     void *out = NULL;
     pthread_mutex_lock(&g_msg_mu);
-    if (g_msg_head != g_msg_tail) out = &g_msgq[g_msg_head++ % KLPLAT_MSGQ];
+    if (g_msg_head != g_msg_tail) {
+        unsigned slot = g_msg_head++ % KLPLAT_MSGQ;
+        out = g_msgq[slot];
+        g_msgq[slot] = NULL;
+    }
     pthread_mutex_unlock(&g_msg_mu);
     return out;
 }
@@ -303,18 +315,31 @@ static void *klplat_PopMessage(void) {
 // on that handle. Real functions rather than named trampolines, because these
 // take the handle in x0 and a trampoline would put the entry point's NAME there.
 //
-// ovr_Message_GetError is deliberately absent: nothing here is ever an error, so
-// the guest never asks, and the fail-closed default would name it if that
-// changed. Same for every other Message accessor — a message shape we do not
-// produce should stop the run by name rather than answer.
+// Error completions carry the local service-unavailable reason. Other payload
+// shapes still require an explicit implementation when a guest reaches them.
 static uint64_t klplat_Message_GetType(const klplat_msg *m) {
     plat_hit("ovr_Message_GetType");
     return m ? m->type : 0;
 }
 static uint64_t klplat_Message_IsError(const klplat_msg *m) {
     plat_hit("ovr_Message_IsError");
-    (void)m;
-    return 0;
+    return m && m->error;
+}
+static const klplat_msg *klplat_Message_GetError(const klplat_msg *m) {
+    plat_hit("ovr_Message_GetError");
+    return m && m->error ? m : NULL;
+}
+static const char *klplat_Error_GetMessage(const klplat_msg *m) {
+    plat_hit("ovr_Error_GetMessage");
+    return m && m->error ? m->str : "";
+}
+static int32_t klplat_Error_GetCode(const klplat_msg *m) {
+    plat_hit("ovr_Error_GetCode");
+    return m && m->error ? -1 : 0;
+}
+static int32_t klplat_Error_GetHttpCode(const klplat_msg *m) {
+    plat_hit("ovr_Error_GetHttpCode");
+    (void)m; return 0; // No HTTP request was made.
 }
 static uint64_t klplat_Message_GetRequestID(const klplat_msg *m) {
     plat_hit("ovr_Message_GetRequestID");
@@ -340,7 +365,7 @@ static const char *klplat_Message_GetString(const klplat_msg *m) {
 }
 static uint64_t klplat_FreeMessage(klplat_msg *m) {
     plat_hit("ovr_FreeMessage");
-    (void)m;                      // the ring owns it; see the KLPLAT_MSGQ note
+    free(m);
     return 0;
 }
 
@@ -804,13 +829,6 @@ static const char *const g_plat_request[] = {
     "ovr_User_GetOrgScopedID",
     "ovr_User_LaunchFriendRequestFlow",
     "ovr_User_GetLoggedInUserManagedInfo",
-    // Online leaderboard requests have no service here. Report an unavailable
-    // request so Robo Recall's mission-results UI can continue offline.
-    "ovr_Leaderboard_GetEntries", "ovr_Leaderboard_GetEntriesAfterRank",
-    "ovr_Leaderboard_GetEntriesByIds", "ovr_Leaderboard_GetEntriesByIdsAfterRank",
-    "ovr_Leaderboard_GetEntriesWithOptions", "ovr_Leaderboard_GetNextEntries",
-    "ovr_Leaderboard_GetPreviousEntries",
-    "ovr_Leaderboard_WriteEntry",
 };
 
 // Whole families where EVERY entry point is request-returning, so the same
@@ -831,6 +849,29 @@ static const char *const g_plat_request[] = {
 static const char *const g_plat_request_prefix[] = {
     "ovr_Achievements_", "ovr_GroupPresence_",
 };
+
+// Robo's native callback proxy registers even request 0 and waits forever.
+// Complete its leaderboard requests with an explicit local error instead;
+// this reports no scores and lets the existing failure callback finish the UI.
+// IDs are the Platform SDK's generated Message.MessageType values.
+static const struct { const char *name; uint32_t type; } g_leaderboard_errors[] = {
+    {"ovr_Leaderboard_GetEntries", 0x5DB3474Cu},
+    {"ovr_Leaderboard_GetEntriesAfterRank", 0x18378BEFu},
+    {"ovr_Leaderboard_GetEntriesByIds", 0x39607BFCu},
+    {"ovr_Leaderboard_GetNextEntries", 0x4E207CD9u},
+    {"ovr_Leaderboard_GetPreviousEntries", 0x4901DAC0u},
+    {"ovr_Leaderboard_WriteEntry", 0x117FC8FEu},
+};
+static uint32_t plat_leaderboard_error_type(const char *name) {
+    for (unsigned i = 0; i < sizeof g_leaderboard_errors / sizeof *g_leaderboard_errors; i++)
+        if (!strcmp(name, g_leaderboard_errors[i].name)) return g_leaderboard_errors[i].type;
+    return 0;
+}
+static uint64_t klplat_leaderboard_unavailable(const char *name) {
+    plat_hit(name);
+    return klplat_request_message(name, plat_leaderboard_error_type(name), 0,
+        "Leaderboard service unavailable on this host", 1);
+}
 
 // ---------------------------------------------------------------------------
 // Options objects: ovr_<Thing>Options_Create / _Set<Field> / _Destroy.
@@ -1112,6 +1153,10 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     // behind ours that it is not already holding.
     {"ovr_Message_GetNativeMessage", (void *)klplat_Message_GetPayload},
     {"ovr_Message_IsError",       (void *)klplat_Message_IsError},
+    {"ovr_Message_GetError",      (void *)klplat_Message_GetError},
+    {"ovr_Error_GetMessage",      (void *)klplat_Error_GetMessage},
+    {"ovr_Error_GetCode",         (void *)klplat_Error_GetCode},
+    {"ovr_Error_GetHttpCode",     (void *)klplat_Error_GetHttpCode},
     {"ovr_Message_GetRequestID",  (void *)klplat_Message_GetRequestID},
     {"ovr_Message_GetPlatformInitialize",      (void *)klplat_Message_GetPayload},
     {"ovr_PlatformInitialize_GetResult",       (void *)klplat_payload_int},
@@ -1158,6 +1203,8 @@ void *kl_ovrplat_sym(const char *name) {
     }
     for (size_t i = 0; i < sizeof g_plat_impl / sizeof g_plat_impl[0]; i++)
         if (strcmp(g_plat_impl[i].name, name) == 0) return g_plat_impl[i].fn;
+    if (plat_leaderboard_error_type(name))
+        return kl_named_stub(name, (void *)klplat_leaderboard_unavailable);
     if (plat_is_unity_hook(name))
         return kl_named_stub(name, (void *)klplat_void);
     if (plat_is_drop(name))

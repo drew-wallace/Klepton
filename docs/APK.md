@@ -141,7 +141,13 @@ Xcode 27's SDK stubs. `ANGLE_GN_ARGS` can override this selection.
   a native execution regression starts with stale shadow state and confirms the
   entry write reaches the later read. The mission-results crash aborted on
   `ovr_Leaderboard_GetEntries`. Leaderboard read/write requests now report the
-  unavailable online service (request 0), without invented scores or completions.
+  unavailable online service through matching asynchronous error completions,
+  without invented scores. Robo registers a callback even for request 0, so a
+  completed error is necessary to finish its existing failure path. Message IDs
+  were checked against Meta’s generated Platform SDK Message.Types.cs from the
+  [official SDK package](https://npm.developer.oculus.com/-/web/detail/com.meta.xr.sdk.platform).
+  Completed message handles remain valid until FreeMessage, including when a
+  callback enqueues more requests and wraps the completion queue.
   Intro video had three missing links: AVFoundation bypassed the OBB VFS,
   GetVideoTracks returned no track (so UE disabled video), and the GLES bitmap
   call returned true without writing the supplied texture. Archive ranges now
@@ -156,8 +162,9 @@ Xcode 27's SDK stubs. `ANGLE_GN_ARGS` can override this selection.
   headset save files were verified byte-for-byte unchanged after reinstall.
   One forced intro-to-hub-to-arena simulator sequence also crashed in Vorbis
   streaming on an unmapped source buffer. A fresh arena, scripted mission-results
-  display, and return to the hub ran with audio without reproducing it; that
-  additional transition failure remains unverified. Physical
+  display, and return to the hub did not reproduce that Vorbis fault, but later
+  hit a simulator CoreAudio RemoteIO Stop XPC timeout during an audio restart.
+  Those additional simulator audio failures remain unresolved. Physical
   throwing and complete mission/results/return-to-hub retesting is still needed;
   these checks do not establish full playability.
   The source folder supplies one matching main OBB containing the game pak and

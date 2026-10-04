@@ -20,20 +20,62 @@ enum { KL_JNI_SLOTS(JNI_SLOT_ENUM) };
 typedef union { int32_t i; int64_t j; void *l; } argument;
 
 int main(int argc, char **argv) {
-    const char *requests[] = {
-        "ovr_Leaderboard_GetEntries", "ovr_Leaderboard_GetEntriesAfterRank",
-        "ovr_Leaderboard_GetEntriesByIds", "ovr_Leaderboard_GetEntriesByIdsAfterRank",
-        "ovr_Leaderboard_GetEntriesWithOptions", "ovr_Leaderboard_GetNextEntries",
-        "ovr_Leaderboard_GetPreviousEntries",
-        "ovr_Leaderboard_WriteEntry",
+    const struct { const char *name; uint32_t type; } requests[] = {
+        {"ovr_Leaderboard_GetEntries", 0x5DB3474C},
+        {"ovr_Leaderboard_GetEntriesAfterRank", 0x18378BEF},
+        {"ovr_Leaderboard_GetEntriesByIds", 0x39607BFC},
+        {"ovr_Leaderboard_GetNextEntries", 0x4E207CD9},
+        {"ovr_Leaderboard_GetPreviousEntries", 0x4901DAC0},
+        {"ovr_Leaderboard_WriteEntry", 0x117FC8FE},
     };
-    for (unsigned i = 0; i < sizeof requests / sizeof *requests; i++) {
-        uint64_t (*request)(const char *, uint64_t, uint64_t, uint64_t) = kl_ovrplat_sym(requests[i]);
-        assert(request && request("mission", 10, 0, 0) == 0);
-    }
     void *(*pop)(void) = kl_ovrplat_sym("ovr_PopMessage");
-    assert(pop && pop() == NULL);
-    puts("PASS: unavailable leaderboard requests return failure without aborting or queuing results");
+    uint64_t (*idof)(void *) = kl_ovrplat_sym("ovr_Message_GetRequestID");
+    uint64_t (*typeofmsg)(void *) = kl_ovrplat_sym("ovr_Message_GetType");
+    uint64_t (*iserror)(void *) = kl_ovrplat_sym("ovr_Message_IsError");
+    void *(*geterror)(void *) = kl_ovrplat_sym("ovr_Message_GetError");
+    const char *(*reason)(void *) = kl_ovrplat_sym("ovr_Error_GetMessage");
+    int32_t (*code)(void *) = kl_ovrplat_sym("ovr_Error_GetCode");
+    int32_t (*http)(void *) = kl_ovrplat_sym("ovr_Error_GetHttpCode");
+    void (*release)(void *) = kl_ovrplat_sym("ovr_FreeMessage");
+    assert(pop && idof && typeofmsg && iserror && geterror && reason && code && http && release);
+    for (unsigned round = 0; round < 4; round++) {
+        uint64_t ids[6];
+        for (unsigned i = 0; i < 6; i++) {
+            uint64_t (*request)(const char *, uint64_t, uint64_t, uint64_t) = kl_ovrplat_sym(requests[i].name);
+            assert(request && (ids[i] = request("mission", 10, 0, 0)) != 0);
+            if (i) assert(ids[i] != ids[i-1]);
+        }
+        for (unsigned i = 0; i < 6; i++) {
+            void *m = pop();
+            assert(m && idof(m) == ids[i] && typeofmsg(m) == requests[i].type && iserror(m));
+            void *error = geterror(m);
+            assert(error && strstr(reason(error), "unavailable") && code(error) == -1 && http(error) == 0);
+            release(m);
+        }
+        assert(pop() == NULL);
+        // Ring reuse must clear error state on ordinary completions.
+        uint64_t (*version)(void) = kl_ovrplat_sym("ovr_Application_GetVersion");
+        uint64_t id = version();
+        void *m = pop();
+        assert(m && idof(m) == id && !iserror(m) && !geterror(m));
+        release(m);
+    }
+    uint64_t (*request)(const char *, uint64_t, uint64_t, uint64_t) = kl_ovrplat_sym(requests[0].name);
+    uint64_t held_id = request("mission", 10, 0, 0);
+    void *held = pop();
+    assert(held);
+    for (unsigned i = 0; i < 32; i++) {
+        uint64_t next = request("mission", 10, 0, 0);
+        void *m = pop();
+        assert(m && idof(m) == next && idof(held) == held_id);
+        release(m);
+    }
+    release(held);
+    for (unsigned i = 0; i < 16; i++) assert(request("mission", 10, 0, 0));
+    assert(request("mission", 10, 0, 0) == 0);
+    for (unsigned i = 0; i < 16; i++) { void *m = pop(); assert(m); release(m); }
+    assert(pop() == NULL);
+    puts("PASS: leaderboard error callbacks, message lifetime, queue reuse and exhaustion");
 
     setenv("KL_GLFB", "1", 1);
     setenv("KL_GLFB_SIZE", "64x64", 1);
