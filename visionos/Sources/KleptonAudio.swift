@@ -33,8 +33,9 @@ enum KleptonAudio {
     // notifications on main. Keep category restoration and activation together.
     private static let sessionLock = NSRecursiveLock()
     nonisolated(unsafe) private static var interrupted = false // guarded by sessionLock
+    nonisolated(unsafe) private static var suspended = false // guarded by sessionLock
     nonisolated(unsafe) private static var interruptionReason: UInt? // guarded by sessionLock
-    private enum SessionError: Error { case interrupted }
+    private enum SessionError: Error { case interrupted, suspended }
 
     /// Restore policy before activation: a scene or route transition can replace
     /// the category options even though the session object itself survives.
@@ -45,6 +46,7 @@ enum KleptonAudio {
         // A route or guardian style update is not permission to override a call.
         // Only an ended notification or explicit foreground return can recover.
         guard !interrupted || foregroundResume else { throw SessionError.interrupted }
+        guard !suspended || foregroundResume else { throw SessionError.suspended }
         let otherAudioBefore = session.isOtherAudioPlaying
         try setCategoryForMic(session, mic)
         // Game sound should mix alongside the user's chosen video/music app.
@@ -66,7 +68,7 @@ enum KleptonAudio {
         if !preserveOtherRoute && session.preferredOutputNumberOfChannels != 2 {
             try session.setPreferredOutputNumberOfChannels(2)
         }
-        if foregroundResume { interrupted = false }
+        if foregroundResume { interrupted = false; suspended = false }
     }
 
     /// Immersion-style changes may preserve the renderer. Restore mixing without
@@ -83,13 +85,31 @@ enum KleptonAudio {
     /// A foreground transition can deactivate the session as well as its
     /// output unit. Reactivate first, then rebuild C's output against that route.
     static func resume() {
-        guard started else { return }
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        guard started else { suspended = false; return }
         let session = AVAudioSession.sharedInstance()
         do {
             try activate(session, mic: KleptonMic.shared.settings.enabled, foregroundResume: true)
             kl_audio_resume()
         } catch {
             NSLog("[au] session resume failed: \(error)")
+        }
+    }
+
+    /// Hand audio back to other apps at Home. Stop native I/O before deactivating
+    /// the session, and keep background notifications from reacquiring it.
+    static func suspend() {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        guard !suspended else { return }
+        suspended = true
+        guard started else { return }
+        kl_audio_suspend()
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        } catch {
+            NSLog("[au] session release failed: \(error)")
         }
     }
 
@@ -100,6 +120,7 @@ enum KleptonAudio {
         guard immersiveActive, started else { return }
         sessionLock.lock()
         defer { sessionLock.unlock() }
+        guard !suspended else { return }
         // Default / scene-backgrounded interruptions can accompany window
         // closure. A disconnected route or muted microphone must still wait.
         guard !interrupted || interruptionReason == 0 || interruptionReason == 3 else { return }
@@ -110,10 +131,13 @@ enum KleptonAudio {
     /// Configure and activate the session, then tell the C side what the
     /// hardware rate turned out to be. Safe to call more than once.
     static func start() {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
         guard !started else { return }
         started = true
         // The C watchdog must not guess that an OS interruption has ended.
         kl_audio_set_session_managed(1)
+        if suspended { kl_audio_suspend() }
 
         let session = AVAudioSession.sharedInstance()
         do {

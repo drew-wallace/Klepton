@@ -1436,6 +1436,7 @@ final class KleptonCompositor {
                     KleptonSession.shared.rendererStarted(rendererID)
                 }
                 self.renderLoop(resuming: self.guestStarted)
+                KleptonAudio.suspend()
                 kl_app_guest_suspend()
                 self.rendererCondition.lock()
                 self.layerRenderer.onSpatialEvent = { _ in }
@@ -1581,10 +1582,12 @@ final class KleptonCompositor {
             case .invalidated:
                 break loop
             case .paused:
+                KleptonAudio.suspend()
                 kl_app_guest_suspend()
                 KLGuardianRuntime.shared.suspendTracking()
                 NSLog("[cp] layer paused at iteration \(iterations) — waiting")
                 layerRenderer.waitUntilRunning()
+                guard layerRenderer.state == .running else { break loop }
                 NSLog("[cp] layer running again")
                 // ...and the audio, which does NOT come back on its own.
                 //

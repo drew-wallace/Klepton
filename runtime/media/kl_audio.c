@@ -36,6 +36,7 @@ static int          g_running;        // ...and AudioOutputUnitStart succeeded
 static int          g_playing;        // the guest wants sound
 static _Atomic int  g_interrupted;    // the OS took the stream
 static _Atomic int  g_session_managed; // Swift owns interruption recovery
+static _Atomic int  g_host_suspended;  // no audio I/O while the display is away
 static uint64_t     g_interrupt_ns;   // ...when, so a lost `.ended` is escapable
 static unsigned     g_interrupt_max_ms = 1500;
 // The recovery machinery lives at the bottom of the file, beside the producer
@@ -125,6 +126,7 @@ static unsigned long    g_silent_buffers;
 static AudioUnit        g_cap_unit;
 static _Atomic int      g_mic_enabled;    // the KleptonMic toggle
 static int              g_mic_open;       // a capture unit exists and is running
+static int              g_mic_host_stopped; // retained capture paused by the host
 static unsigned         g_mic_rate;       // the CLIENT rate the ring holds (== guest rate when the converter took it)
 static unsigned         g_mic_dev_rate;   // the hardware's own capture rate, for the log / fallback
 static unsigned         g_mic_ch = 1;     // capture channels (1 or 2)
@@ -353,7 +355,7 @@ static void unit_destroy(void) {
 }
 
 static int unit_start(void) {
-    if (g_interrupted) return -1;
+    if (g_interrupted || g_host_suspended) return -1;
     if (!g_unit || g_running) return 0;
     OSStatus s = AudioOutputUnitStart(g_unit);
     if (s != noErr) {
@@ -469,7 +471,7 @@ void kl_audio_close(void) {
     pthread_mutex_unlock(&g_lock);
 }
 
-int kl_audio_active(void) { return g_open && g_running; }
+int kl_audio_active(void) { return g_open && g_running && !g_host_suspended; }
 
 void kl_audio_play(void) {
     if (!g_open) return;
@@ -522,7 +524,7 @@ void kl_audio_interrupted(int began) {
 int kl_audio_restart(void) {
     if (!g_open) return -1;
     pthread_mutex_lock(&g_lock);
-    if (g_interrupted) { pthread_mutex_unlock(&g_lock); return -1; }
+    if (g_interrupted || g_host_suspended) { pthread_mutex_unlock(&g_lock); return -1; }
     unit_destroy();
     int rc = unit_create();
     if (rc == 0) {
@@ -636,7 +638,7 @@ static size_t convert(const int16_t *src, size_t n, float **out) {
 // second for as long as that lasts, which buries the one line that says what
 // actually happened.
 static void watchdog(void) {
-    if (!g_open || g_interrupted) return;
+    if (!g_open || g_interrupted || g_host_suspended) return;
     uint64_t last = atomic_load_explicit(&g_last_render_ns, memory_order_relaxed);
     uint64_t idle = now_ns() - last;
     uint64_t limit = 500ull * 1000000ull;
@@ -679,7 +681,7 @@ static void watchdog(void) {
 //     the run with nothing left running to notice.
 //
 static void watchdog_tick(void) {
-    if (!g_open) return;
+    if (!g_open || g_host_suspended) return;
     if (g_interrupted && g_playing) {
         // An interruption can be a live Discord call, not a missing ended
         // notification. Rebuilding after 1.5 seconds fought over the route.
@@ -734,22 +736,41 @@ static void watchdog_start(void) {
     started = 1;
 }
 
-// The app is back on screen. Whatever this file believes about its own state,
-// rebuild — and this is deliberately NOT conditional on the heartbeat.
-//
-// The heartbeat costs up to a second to notice, and it notices by finding
-// silence that has already been heard. A compositor coming out of `.paused`
-// knows the transition exactly, at the moment it happens, so the gap it leaves
-// is the rebuild itself. The two overlap on purpose: this is precise and can be
-// missed, the heartbeat is late and cannot.
+// Stop native I/O before the host releases its audio session. This hold is
+// independent of OS interruptions and never expires in the watchdog.
+void kl_audio_suspend(void) {
+    g_host_suspended = 1;
+    pthread_mutex_lock(&g_lock);
+    if (g_unit && g_running) { AudioOutputUnitStop(g_unit); g_running = 0; }
+    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_lock(&g_mic_lock);
+    if (g_cap_unit && g_mic_open && !g_mic_host_stopped) {
+        AudioOutputUnitStop(g_cap_unit);
+        g_mic_host_stopped = 1;
+        atomic_store(&g_mic_r, atomic_load(&g_mic_w));
+    }
+    pthread_mutex_unlock(&g_mic_lock);
+}
+
+// The display is back. Rebuild output only after the host has reactivated its
+// session, and restart any opted-in capture unit retained across Home.
 void kl_audio_resume(void) {
-    if (!g_open) return;
+    g_host_suspended = 0;
     int was = g_interrupted;
     g_interrupted = 0;
     g_interrupt_ns = now_ns();
     g_wd_streak = 0;
-    fprintf(stderr, "  [au] resume%s\n", was ? " (was interrupted)" : "");
-    kl_audio_restart();
+    if (g_open) {
+        fprintf(stderr, "  [au] resume%s\n", was ? " (was interrupted)" : "");
+        kl_audio_restart();
+    }
+    pthread_mutex_lock(&g_mic_lock);
+    if (g_cap_unit && g_mic_open && g_mic_host_stopped && g_mic_enabled) {
+        OSStatus status = AudioOutputUnitStart(g_cap_unit);
+        if (status == noErr) g_mic_host_stopped = 0;
+        else fprintf(stderr, "  [au] capture resume failed: %d\n", (int)status);
+    }
+    pthread_mutex_unlock(&g_mic_lock);
 }
 
 size_t kl_audio_write(const void *pcm, size_t bytes) {
@@ -757,7 +778,7 @@ size_t kl_audio_write(const void *pcm, size_t bytes) {
 }
 
 size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
-    if (!g_open || !pcm || !bytes) return 0;
+    if (!g_open || g_host_suspended || !pcm || !bytes) return 0;
     unsigned in_frame = g_in_ch * 2;              // 16-bit, checked at open
     size_t n = bytes / in_frame;
     if (!n) return 0;
@@ -862,7 +883,7 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
 
         // Full. A stop / interruption / lost device must break the loop, or the
         // feeder wedges holding nothing and the guest's mixer stalls behind it.
-        if (!g_playing || g_interrupted) break;
+        if (!g_playing || g_interrupted || g_host_suspended) break;
         watchdog();
         if (now_ns() > deadline) { g_short_writes++; break; }
         nap_ms(2);
@@ -1223,6 +1244,7 @@ int kl_audio_mic_open(unsigned want_rate, unsigned want_channels) {
     // opens ONE input stream, so this is the common path; a later stream at a
     // different rate does not re-open the unit — it captures at the first rate and
     // lets kl_aaudio.c resample the difference (see klaa_capture_into).
+    if (g_host_suspended) { pthread_mutex_unlock(&g_mic_lock); return -1; }
     if (g_mic_open) { pthread_mutex_unlock(&g_mic_lock); return 0; }
 
     if (cap_unit_create(want_rate, want_channels) != 0) {
@@ -1275,6 +1297,7 @@ void kl_audio_mic_close(void) {
         g_cap_unit = NULL;
     }
     g_mic_open = 0;
+    g_mic_host_stopped = 0;
     free(g_mic_ring);    g_mic_ring = NULL;    g_mic_cap = 0;
     free(g_cap_scratch); g_cap_scratch = NULL; g_cap_scratch_frames = 0;
     atomic_store(&g_mic_w, 0); atomic_store(&g_mic_r, 0);
@@ -1289,7 +1312,7 @@ int kl_audio_mic_read_i16(int16_t *buf, int frames) {
     // Consumers run off the render thread. Serialize ring access with disable /
     // close so a live Photon worker cannot read storage being freed by the UI.
     pthread_mutex_lock(&g_mic_lock);
-    if (!g_mic_open || !g_mic_enabled || !g_mic_ring) {
+    if (!g_mic_open || !g_mic_enabled || !g_mic_ring || g_host_suspended) {
         pthread_mutex_unlock(&g_mic_lock); return 0;
     }
     size_t r = atomic_load_explicit(&g_mic_r, memory_order_relaxed);

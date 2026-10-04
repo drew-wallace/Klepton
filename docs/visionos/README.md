@@ -241,19 +241,32 @@ C watchdog's timeout override until an ended notification or successful explicit
 foreground recovery. The watchdog still repairs stopped render callbacks when
 there is no active interruption.
 
+Home, compositor pause/invalidation, and Quit stop native output and opted-in
+capture before deactivating the session with `notifyOthersOnDeactivation`.
+The guest's playback state and capture unit survive, but a separate host hold
+blocks producer, watchdog, route, reset, and interruption-ended recovery while
+the display is away. Opening only the settings window does not resume an
+immersive guest's audio. A live renderer reactivates the session before releasing
+the hold; a paused renderer that becomes invalidated cannot reactivate it.
+Failed activation leaves I/O held. Physical-device testing confirmed that this
+handoff did not restore Discord audio during immersion.
+
 Closing the settings window while immersion remains active restores game audio
 after the scene transition. The user verified this fix on the headset. Home,
 Quit, route disconnection, and microphone-mute interruptions do not use that
 window-close recovery. Run `python3 tests/test_visionos_audio.py` to exercise
-policy restoration, failed activations, interruption handling, and window-close
+policy restoration, failed activations, Home handoff, interruption handling, and window-close
 recovery with a simulated session and the real C watchdog.
 
 Mixing requests cannot guarantee another app's background behavior. Discord
 347.0 (112799) on visionOS 27.0.1 still stopped in both mixed and full native
 RealityKit immersion in a separate app with no explicit audio code. This
 reproduced without Klepton's guardian, game, or compositor. No Discord workaround
-was confirmed; Home/Resume recovery was intermittent. Safari music continued
-mixing in the tester's comparisons.
+was confirmed; Home/Resume recovery was intermittent. Retesting the parent
+commit, restoring the earlier `ambient` category, and disabling spatial audio
+also failed to restore Discord. Safari music continued mixing in the tester's
+comparisons. These controls do not establish whether Discord or visionOS is
+responsible, or exclude a possible workaround.
 
 ## Language boundary
 
