@@ -65,6 +65,15 @@ static void arena_arm(arena *a) {
 }
 static void arena_free(arena *a) { munmap(a->code, a->cap * 2); }
 
+static void *g_call_return;
+__attribute__((noinline))
+static uint64_t call_target(uint64_t a, uint64_t b, uint64_t c, uint64_t d,
+                            uint64_t e, uint64_t f, uint64_t g, uint64_t h,
+                            uint64_t stack_arg) {
+    g_call_return = __builtin_return_address(0);
+    return a + b + c + d + e + f + g + h + stack_arg;
+}
+
 // Emit `body` into the arena, run the emitter over it, and hand back a callable.
 // The emitter takes the addresses the buffers will have when executed, which
 // here are simply the buffers themselves — the degenerate case kl_x18_patch
@@ -250,6 +259,52 @@ int main(void) {
         ck(st.patched == 2 && st.refused == 0 && value == target,
            "`adr x18` preserves its original PC target through the shadow slot");
         arena_free(&a2);
+
+        // Robo's SpinPthread calls through x18. On a physical headset an
+        // unpatched BLR through the zeroed architectural register is a fatal
+        // CODESIGNING Invalid Page kill, so signal recovery cannot rescue it.
+        // Poison architectural x18 AFTER translation to make the test
+        // deterministic. Exercise a real native callee with eight register
+        // arguments and one stack argument, and verify its original guest LR.
+        arena call = arena_new();
+        uint32_t call_body[] = {
+            SUB_SP_16, 0xF90007FEu,           // save LR at sp+8
+            0xF9400BE9u, STR_SP(9),           // forward stack argument from sp+16
+            0xD503201Fu,                     // poison x18 after emission
+            0xD63F0240u,                     // blr x18
+            0xF94007FEu, ADD_SP_16, RET,
+        };
+        memcpy(call.code, call_body, sizeof call_body);
+        size_t used = 0;
+        const uint64_t slide = 0x10000000ULL;
+        kl_x18_emit(call.code, sizeof call_body,
+                    (uint64_t)(uintptr_t)call.code - slide,
+                    call.pool, call.cap, (uint64_t)(uintptr_t)call.pool - slide,
+                    &st, &used);
+        ck(st.patched == 1 && st.refused == 0, "`blr x18` is translated rather than refused");
+        int clean_call = used != 0;
+        for (size_t i = 0; i < used / 4; i++) {
+            klx_info in;
+            klx_decode(((uint32_t *)call.pool)[i], &in);
+            if (!in.ok || in.nfields) clean_call = 0;
+        }
+        ck(clean_call, "the call veneer never uses architectural x18");
+        ((uint32_t *)call.code)[4] = MOVZ(18, 0);
+        arena_arm(&call);
+        pthread_setspecific(KLX_TSD_SLOT, (void *)call_target);
+        typedef uint64_t (*call_fn)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+        call_fn run_call = (call_fn)(void *)call.code;
+        int arguments = st.patched == 1 && st.refused == 0;
+        int returns = arguments;
+        if (arguments) for (unsigned i = 0; i < 4096; i++) {
+            if (run_call(1, 2, 3, 4, 5, 6, 7, 8, 9) != 45) arguments = 0;
+            if (g_call_return != call.code + 24) returns = 0;
+        }
+        ck(arguments, "calls preserve eight register arguments and the stack argument");
+        ck(returns, "callee LR is the original guest return site under ASLR");
+        pthread_setspecific(KLX_TSD_SLOT, NULL);
+        arena_free(&call);
     }
 
     // ---- 6. the shape the guest actually has ----

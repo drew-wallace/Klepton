@@ -61,15 +61,15 @@ typedef struct {
 // branches back. Two things break that contract outright, so the emitter
 // refuses them and names them rather than producing something plausible.
 #define KLX_HZ_NONE     0
-#define KLX_HZ_NOFALL   1   // blr/ret: control leaves before the restore runs
+#define KLX_HZ_NOFALL   1   // ret: control leaves before the restore runs
 #define KLX_HZ_SPWRITE  2   // modifies sp, so the restore would read elsewhere
 // `br x18` alone. Still a no-fallthrough site, but the ONE shape the emitter can
 // serve anyway, so it is separated from KLX_HZ_NOFALL rather than folded into it
 // (see the emitter for why it is sound, and for the one-instruction window it
-// cannot close). blr and ret keep KLX_HZ_NOFALL: blr would leave x30 pointing
-// into the veneer, and ret is a return-predictor hint whose register is x30's
-// business, not x18's.
+// cannot close). Calls can use the ABI's IP0 scratch register and explicitly
+// set x30 to the original return site; returns still keep KLX_HZ_NOFALL.
 #define KLX_HZ_TERMBR   3
+#define KLX_HZ_CALLBR   4   // blr: IP0 may be clobbered at a function call
 
 // System registers that need translating, which is a different job from x18 but
 // the same machinery: the site is rewritten in place to a branch into a stub

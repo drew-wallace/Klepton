@@ -125,10 +125,16 @@ Xcode 27's SDK stubs. `ANGLE_GN_ARGS` can override this selection.
   the restored surfaces; audio output continues through scene transitions.
   `KL_GLFB_COPY_SELFTEST=1` runs the same GPU checks before a
   simulator guest starts. Unsigned simulator and device apps build successfully.
-  Signing the patched target is currently blocked by Xcode's `No Accounts`
-  error and lack of a matching provisioning profile; the existing 41778 profile
-  does not cover this bundle ID. Headset input and physical rendering still require
-  validation; these simulator results do not establish full playability.
+  The signed patched target and its matching APK/main OBB were installed on the
+  physical Vision Pro on October 4. All 23 GPU samples and five validation cases
+  also pass on its Apple M5 GPU. The first physical launch exposed an unpatched
+  `blr x18` in UE's `SpinPthread`: jumping through Darwin's cleared platform
+  register caused a `CODESIGNING Invalid Page` kill, while the simulator's fault
+  handler recovered. The call now uses IP0 and explicitly sets LR to the original
+  return site, preserving stack arguments and ASLR. The updated headset build
+  starts and continuously submits rendered frames with tracked head/hand input.
+  Hub/mission visuals and physical gameplay still require player validation;
+  startup and GPU checks alone do not establish full playability.
   The source folder supplies one matching main OBB containing the game pak and
   intro video; no supplied Robo Recall variant has a patch OBB. The generic
   missing-patch warning therefore does not establish missing content here.
