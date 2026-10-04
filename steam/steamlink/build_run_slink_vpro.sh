@@ -261,6 +261,8 @@ summarise() {
   echo "  -- the stream --"
   g -E 'first frame published|codec "|reader:|submitted, [0-9]+ decoded|parameter sets:|CoreAudio:|\[aaudio\]|\[au\] (restart|session|no render callback)' \
     "$LOCAL_LOG" | sed 's/^ *//; s/^/    /' | awk '!seen[$0]++' | head -12 || true
+  g -E 'Eye gaze interaction supported:|FB Eye tracking Social supported:' \
+    "$LOCAL_LOG" | sed 's/^/    /' | awk '!seen[$0]++' || true
 
   echo "  -- how it ended --"
   # The heartbeat separates the three failures that otherwise look identical:
@@ -271,7 +273,7 @@ summarise() {
   # generic "fatal:" wrapper, and one stop reported twice reads as two.
   local stops
   stops=$(g -E 'called unresolved import|UNIMPLEMENTED JNIEnv slot|no host implementation for|no host value for field|klepton\] fatal:' \
-          "$LOCAL_LOG" | awk '!seen[$0]++' | head -3)
+          "$LOCAL_LOG" | awk '!seen[$0]++' | head -3) || true
   [ -z "$stops" ] || echo "$stops" | sed 's/^/    STOPPED: /'
   if g -q 'klepton\] fault' "$LOCAL_LOG"; then
     echo "    FAULT:"
@@ -314,6 +316,9 @@ echo
 # and a leftover from the previous one would make a KL_CONSOLE=0 run skip the
 # pull it needs and then summarise the older run's file.
 rm -f "$LOCAL_LOG.streamed"
+# Keep the previous launch separately. The longest-log rule protects a run
+# from automatic relaunches, but must not choose an older launch over this one.
+if [ -f "$LOCAL_LOG" ]; then mv "$LOCAL_LOG" "$LOCAL_LOG.previous"; fi
 
 visionos/run.sh "$RUN_MODE"
 
