@@ -122,13 +122,6 @@ void kl_ovrp_set_frame_pacer(void (*wait)(void));
 typedef int (*kl_ovrp_head_at_fn)(double time_s, float *pose7);
 void kl_ovrp_set_head_at(kl_ovrp_head_at_fn fn);
 
-// A measured Sense pose and motion queried independently of graphics frames.
-// motion13 = {qx,qy,qz,qw,px,py,pz,vx,vy,vz,wx,wy,wz}, all in tracking space.
-// Return 0 if tracking is unavailable; this does not publish or latch a pose.
-typedef int (*kl_ovrp_hand_at_fn)(int hand, double time_s, float *motion13);
-void kl_ovrp_set_hand_at(kl_ovrp_hand_at_fn fn);
-int kl_ovrp_hand_motion_at(int hand, double time_s, float *motion13);
-
 // The rigid delta from the CURRENT head pose to the one predicted for
 // `time_s`, as a left-multiplied correction: pose' = delta o pose. Returns 0
 // if there is no provider or it declined, and then nothing should move.

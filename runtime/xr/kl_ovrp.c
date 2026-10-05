@@ -3035,21 +3035,6 @@ void kl_ovrp_ctrl_trace(const char *where, int hand, const float *euler_deg,
 }
 
 static kl_ovrp_head_at_fn g_head_at;
-static kl_ovrp_hand_at_fn g_hand_at;
-
-void kl_ovrp_set_hand_at(kl_ovrp_hand_at_fn fn) {
-    __atomic_store_n(&g_hand_at, fn, __ATOMIC_RELEASE);
-}
-
-int kl_ovrp_hand_motion_at(int hand, double time_s, float *motion13) {
-    if ((unsigned)hand > 1 || !motion13 || !isfinite(time_s)) return 0;
-    kl_ovrp_hand_at_fn fn = __atomic_load_n(&g_hand_at, __ATOMIC_ACQUIRE);
-    float v[13];
-    if (!fn || !fn(hand, time_s, v)) return 0;
-    for (int i = 0; i < 13; i++) if (!isfinite(v[i])) return 0;
-    memcpy(motion13, v, sizeof v);
-    return 1;
-}
 
 void kl_ovrp_set_head_at(kl_ovrp_head_at_fn fn) {
     __atomic_store_n(&g_head_at, fn, __ATOMIC_RELEASE);

@@ -148,26 +148,8 @@ wrist rotation. `KL_SENSE_VEL_FRAME=grip` restores the old conversion for an
 A/B test. The pure Swift regression checks world-axis conversion, a wrist
 rotation, and velocity against a finite difference of the reported grip pose.
 The 2.0.24 simulator build still streams the SteamVR library; both platform
-slices and the signed device build pass. The user reported stable tracking
-with some residual overshoot on the headset.
-
-Steam Link also enables `KL_XR_SENSE_QUERY=1`. Inspection of the 2.0.24 guest's
-`QSVLXRInput::GetControllerState` confirms that it calls `XRQGetTimeNow` before
-locating the controller for a tracking packet. Previously, that request received
-the pose and velocity latched at `xrWaitFrame`, even if a wrist had since stopped.
-Near-now requests now query the Sense provider directly, without writing to the
-published-pose seam. Requests for the same hand and instant within one graphics
-frame reuse one sample; predicted-time rendering still uses its original latch.
-No velocity scaling or additional future prediction is applied. Missing tracker
-data falls back to the existing path. `KL_XR_SENSE_QUERY=0` provides an A/B.
-The OpenXR regression verifies current-time refresh, matching motion, per-hand
-caching, frame expiry, unchanged rendering queries, and unavailable/invalid
-tracker fallback with the policy enabled and disabled. Both runtime slices and
-the signed device build pass. The simulator rendered the SteamVR library before
-a longer run aborted in CoreAudio's RemoteIO stop/restart RPC timeout. A rebuild
-with audio disabled boots without that audio path; its host Connect button was
-unavailable, so the longer streaming check could not be repeated. The device
-build retains audio. Controller query behavior still needs physical validation.
+slices and the signed device build pass. Physical improvement still needs a
+headset test.
 
 ## Decoded-frame backlog
 

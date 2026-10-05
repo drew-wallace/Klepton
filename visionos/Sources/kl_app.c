@@ -602,9 +602,6 @@ static void steamlink_policy(void) {
     // even a 5 ms ahead-of-now pose still overshot on rapid movement.
     // Explicit diagnostic overrides continue to win.
     setenv("KL_SENSE_PREDICT_MS", "0", 0);
-    // Input packets ask for NOW, separately from rendering. Re-query the
-    // tracker rather than sending the old motion latched by xrWaitFrame.
-    setenv("KL_XR_SENSE_QUERY", "1", 0);
     // Catch up after decode/consumer stalls without presenting a backlog.
     // Only completed output is skipped; encoded reference frames are decoded.
     setenv("KL_VTDEC_LATEST", "1", 0);
