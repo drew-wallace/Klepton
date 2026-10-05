@@ -602,6 +602,9 @@ static void steamlink_policy(void) {
     // even a 5 ms ahead-of-now pose still overshot on rapid movement.
     // Explicit diagnostic overrides continue to win.
     setenv("KL_SENSE_PREDICT_MS", "0", 0);
+    // Catch up after decode/consumer stalls without presenting a backlog.
+    // Only completed output is skipped; encoded reference frames are decoded.
+    setenv("KL_VTDEC_LATEST", "1", 0);
     // Steam Link's VR door composites several OpenXR projection layers: layer 0
     // is the environment/room (black in an empty space) and the streamed screen
     // is stacked ON TOP. The compositor shows one projection layer, so tell it

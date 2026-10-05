@@ -61,8 +61,11 @@ void      kl_vtdec_destroy(kl_vtdec *d);
 int kl_vtdec_submit(kl_vtdec *d, const uint8_t *annexb, size_t len,
                     int64_t pts_us);
 
-// Take the oldest decoded frame, or NULL if none is ready. The caller owns one
-// reference and must CVPixelBufferRelease it.
+// Take a decoded frame, or NULL if none is ready. Normally this is the oldest.
+// KL_VTDEC_LATEST=1 (sampled at creation) discards older completed output and
+// returns the newest instead, preserving its presentation timestamp. Steam
+// Link enables this policy; other guests retain FIFO by default. The caller
+// owns one reference and must CVPixelBufferRelease it.
 //
 // Frames come out in the order VideoToolbox emits them. For this guest that is
 // also presentation order: the stream is a real-time game capture with no

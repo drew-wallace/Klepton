@@ -596,6 +596,13 @@ result is gated against the BGRA path by `make vidtex`.
   Simulator forces this mode — the private pixel formats do not exist there.
   Host and device. Default 0.
 
+- `KL_VTDEC_LATEST=1` — discard older completed decoder output when multiple
+  frames are waiting and return the newest frame with its original timestamp.
+  Steam Link defaults to 1; other guests retain FIFO (0). Compressed frames are
+  still decoded, so this does not discard reference frames or reset the session.
+  The decoder report includes queue high-water and stale-output drop counts.
+  This targets catch-up delay after a consumer stall, not network transit time.
+
 - `KL_VTDEC_DUMP=<path>` — write the elementary stream exactly as the guest
   queued it, as plain Annex-B that `ffprobe` reads directly, plus a sidecar
   `<path>.idx` of `access_unit pts_us bytes` per line. Off by default.

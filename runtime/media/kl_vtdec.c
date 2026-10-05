@@ -63,6 +63,7 @@ typedef struct { CVPixelBufferRef pb; int64_t pts_us; } klvt_frame;
 
 struct kl_vtdec {
     int codec;
+    int latest_output;          // live streams may discard stale decoded output
     int bgra;                   // sessions request 32BGRA (KL_VTDEC_BGRA=1, or
                                 // the Simulator); 0 = decoder's native format
 
@@ -83,6 +84,7 @@ struct kl_vtdec {
     int ring_head, ring_count;
 
     unsigned n_submitted, n_decoded, n_dropped, n_failed;
+    unsigned n_stale_dropped, queue_high_water;
     // Parameter-set bookkeeping. Separated because they answer different
     // questions: how often the host re-describes the stream (n_set_change),
     // how often that description is genuinely new (n_fmt_built), and how often
@@ -188,6 +190,8 @@ static void klvt_output(void *decompressionOutputRefCon, void *sourceFrameRefCon
     d->ring[slot].pb = (CVPixelBufferRef)CFRetain(image);
     d->ring[slot].pts_us = (int64_t)(CMTimeGetSeconds(pts) * 1e6 + 0.5);
     d->ring_count++;
+    if ((unsigned)d->ring_count > d->queue_high_water)
+        d->queue_high_water = (unsigned)d->ring_count;
     pthread_mutex_unlock(&d->lock);
 }
 
@@ -399,6 +403,7 @@ kl_vtdec *kl_vtdec_create(const char *mime) {
     kl_vtdec *d = calloc(1, sizeof *d);
     if (!d) return NULL;
     d->codec = codec;
+    d->latest_output = kl_env_on("KL_VTDEC_LATEST", 0);
     pthread_mutex_init(&d->lock, NULL);
     klvt_open_dump(d);
     g_last = d;
@@ -574,6 +579,21 @@ CVPixelBufferRef kl_vtdec_pull(kl_vtdec *d, int64_t *pts_us_out) {
     if (!d) return NULL;
     pthread_mutex_lock(&d->lock);
     CVPixelBufferRef pb = NULL;
+    unsigned stale = 0;
+    int first_stale = d->n_stale_dropped == 0;
+    // All compressed access units have already been decoded, so discarding
+    // completed output cannot damage the codec's inter-frame reference state.
+    // A live client recovering from a stall needs the newest picture, rather
+    // than walking a FIFO backlog before acquireLatestImage can discard it.
+    while (d->latest_output && d->ring_count > 1) {
+        CVPixelBufferRelease(d->ring[d->ring_head].pb);
+        d->ring[d->ring_head].pb = NULL;
+        d->ring_head = (d->ring_head + 1) % KLVT_RING;
+        d->ring_count--;
+        d->n_dropped++;
+        d->n_stale_dropped++;
+        stale++;
+    }
     if (d->ring_count) {
         pb = d->ring[d->ring_head].pb;
         if (pts_us_out) *pts_us_out = d->ring[d->ring_head].pts_us;
@@ -582,6 +602,9 @@ CVPixelBufferRef kl_vtdec_pull(kl_vtdec *d, int64_t *pts_us_out) {
         d->ring_count--;
     }
     pthread_mutex_unlock(&d->lock);
+    if (stale && first_stale)
+        fprintf(stderr, "  [vtdec] latest output: discarded %u stale decoded "
+                        "frame(s) after a backlog\n", stale);
     return pb;                  // the caller now owns the retain taken in klvt_output
 }
 
@@ -627,6 +650,9 @@ void kl_vtdec_report(FILE *f) {
     if (!d) return;
     pthread_mutex_lock(&d->lock);
     fprintf(f, "\n=== video decoder (VideoToolbox) ===\n");
+    fprintf(f, "  output: %s; queue high-water %u; %u stale frames discarded\n",
+            d->latest_output ? "latest" : "FIFO", d->queue_high_water,
+            d->n_stale_dropped);
     fprintf(f, "  %s %dx%d: %u submitted, %u decoded, %u dropped, %u failed,"
                " %d held\n",
             d->codec == KLVT_HEVC ? "HEVC" : "H.264", d->width, d->height,

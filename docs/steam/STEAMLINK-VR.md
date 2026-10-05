@@ -132,9 +132,26 @@ comparison; this was the behavior of the earlier zero-cap diagnostic.
 On the headset, the original default predicted about 26.5 ms ahead. A 10 ms
 cap improved accuracy, but 5 ms still overshot during rapid motion. Raw samples
 removed overshoot but visibly trailed. Network lag also increased trailing in
-the 5 ms test. Updating to the current time addresses sample age separately from future prediction;
-its physical accuracy and latency still need validation. Simulator testing
-cannot validate this behavior. This change does not eliminate network delay.
+the 5 ms test. Updating to the current time addresses sample age separately
+from future prediction; the user reported a clear improvement on the physical
+headset. Simulator testing cannot validate this behavior. This change does not
+eliminate network delay.
+
+## Decoded-frame backlog
+
+Steam Link defaults to `KL_VTDEC_LATEST=1`: when multiple decoded frames are
+waiting, the decoder hands out the newest completed frame and discards older
+completed output. All compressed frames are still decoded, preserving reference
+state, and the returned image keeps its original presentation timestamp. Other
+guests retain FIFO. `KL_VTDEC_LATEST=0` restores FIFO for comparison.
+
+The decoder reports queue high-water and stale-output drops. This policy targets
+catch-up delay after a decoder/consumer stall; it does not reduce network transit
+time. The HEVC regression models an eight-frame backlog, checks recovery to the
+newest timestamp, and verifies subsequent dependent frames still decode.
+The 2.0.24 simulator stream renders SteamVR's library at 1152x4608 with this
+policy, and its log confirms a stale decoded frame was discarded. Native
+video-texture checks pass. The effect on physical headset latency is unmeasured.
 
 ## Regression checks
 

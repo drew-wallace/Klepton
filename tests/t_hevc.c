@@ -89,6 +89,78 @@ static int is_wrappable_biplanar(uint32_t pf) {
     }
 }
 
+// Model a stalled consumer with a burst of eight decoded frames. A live
+// stream must jump to the latest timestamp while ordinary playback keeps FIFO.
+// Then resume decoding dependent frames to prove output dropping leaves the
+// decoder's reference state intact.
+static void check_stall_recovery(const unsigned char *buf, const long *cuts,
+                                  int n_cuts, int latest) {
+    setenv("KL_VTDEC_LATEST", latest ? "1" : "0", 1);
+    kl_vtdec *d = kl_vtdec_create("video/hevc");
+    check(d != NULL, latest ? "latest: stalled-consumer decoder created"
+                           : "FIFO: stalled-consumer decoder created");
+    if (!d) return;
+    const int burst = 8;
+    int errors = 0;
+    long prev = 0;
+    for (int c = 0; c < burst; c++) {
+        errors += kl_vtdec_submit(d, buf + prev, (size_t)(cuts[c] - prev),
+                                  (int64_t)c * 33333) < 0;
+        prev = cuts[c];
+    }
+    unsigned decoded = 0;
+    for (int spin = 0; spin < 2000; spin++) {
+        kl_vtdec_stats(d, NULL, &decoded, NULL, NULL, NULL);
+        if (decoded == (unsigned)burst) break;
+        usleep(1000);
+    }
+    check(decoded == (unsigned)burst, "consumer stall: all eight frames decoded");
+    int64_t pts = -1;
+    CVPixelBufferRef pb = kl_vtdec_pull(d, &pts);
+    check(pb && pts == (latest ? (burst - 1) * 33333LL : 0),
+          latest ? "latest: first resumed output has the newest timestamp"
+                 : "FIFO: first resumed output keeps the oldest timestamp");
+    if (pb) CVPixelBufferRelease(pb);
+    unsigned dropped = 0;
+    kl_vtdec_stats(d, NULL, NULL, &dropped, NULL, NULL);
+    check(dropped == (unsigned)(latest ? burst - 1 : 0),
+          latest ? "latest: seven stale completed frames discarded"
+                 : "FIFO: no completed frames discarded");
+    int remaining = 0;
+    while ((pb = kl_vtdec_pull(d, NULL))) {
+        remaining++;
+        CVPixelBufferRelease(pb);
+    }
+    check(remaining == (latest ? 0 : burst - 1),
+          latest ? "latest: no backlog remains after recovery"
+                 : "FIFO: remaining frames remain available");
+
+    int resumed = 0, bad_pts = 0;
+    for (int c = burst; c < n_cuts; c++) {
+        errors += kl_vtdec_submit(d, buf + prev, (size_t)(cuts[c] - prev),
+                                  (int64_t)c * 33333) < 0;
+        prev = cuts[c];
+        pb = NULL;
+        for (int spin = 0; spin < 500 && !pb; spin++) {
+            pb = kl_vtdec_pull(d, &pts);
+            if (!pb) usleep(1000);
+        }
+        if (pb) {
+            resumed++;
+            bad_pts += pts != (int64_t)c * 33333;
+            CVPixelBufferRelease(pb);
+        }
+    }
+    check(errors == 0 && resumed == n_cuts - burst && bad_pts == 0,
+          "after stall: dependent frames decode with matching timestamps");
+    unsigned sessions = 0;
+    kl_vtdec_param_stats(d, NULL, NULL, &sessions);
+    check(sessions == 1, "stall recovery preserves the decompression session");
+    kl_vtdec_report(stdout);
+    kl_vtdec_destroy(d);
+    unsetenv("KL_VTDEC_LATEST");
+}
+
 int main(void) {
     printf("=== HEVC decode (kl_vtdec, VideoToolbox) ===\n");
 
@@ -270,6 +342,9 @@ int main(void) {
     unsetenv("KL_VTDEC_BGRA");
     check(bgra_frames == EXPECT_FRAMES, "KL_VTDEC_BGRA=1: 30 frames decoded");
     check(bgra_bad_fmt == 0, "KL_VTDEC_BGRA=1: every frame is BGRA");
+
+    check_stall_recovery(buf, cuts, n_cuts, 0);
+    check_stall_recovery(buf, cuts, n_cuts, 1);
 
     free(pfx);
     free(cuts);
