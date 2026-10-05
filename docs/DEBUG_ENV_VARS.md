@@ -1562,6 +1562,13 @@ The composite/timewarp pass — one file, compiled by both compositors
   the last delivered sensor sample, preserving the earlier zero-prediction
   diagnostic. This ignores `KL_SENSE_PREDICT_MS` and may repeat older samples
   across render frames. Off by default.
+- `KL_XR_SENSE_QUERY=1` — re-query the Sense tracker for OpenXR controller
+  locations within 5 ms of the current time, independently of the rendering
+  frame's pose latch. Steam Link enables this for its current-time tracking
+  packets. Repeated queries for the same hand, time, and graphics frame reuse
+  one pose/motion sample. Rendering at the frame's predicted time retains the
+  latch; unavailable or invalid tracker data falls back to it. `=0` restores
+  the earlier path. Steam's zero ahead-of-now cap still applies.
 
 - `KL_REPROJECT_NOCANT=1` — treat `device_from_view` as having no rotation;
   the A/B for the eye-cant handling.

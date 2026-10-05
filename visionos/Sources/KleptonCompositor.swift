@@ -549,6 +549,10 @@ final class KleptonCompositor {
 
     init(_ layerRenderer: LayerRenderer) {
         pendingRenderer = layerRenderer
+        Self.controllerAtLock.lock()
+        Self.controllerAtSource = controllers
+        Self.controllerAtLock.unlock()
+        kl_ovrp_set_hand_at(Self.controllerAt)
     }
 
     private func configureSpatialEvents() {
@@ -3594,6 +3598,17 @@ final class KleptonCompositor {
     /// Static because kl_ovrp takes a plain C function pointer, which cannot
     /// capture. Written once during setup and only read afterwards.
     nonisolated(unsafe) static var headAtTracker: WorldTrackingProvider?
+
+    private static let controllerAtLock = NSLock()
+    nonisolated(unsafe) private static var controllerAtSource: KleptonControllers?
+    nonisolated(unsafe) private static let controllerAt: @convention(c)
+        (Int32, Double, UnsafeMutablePointer<Float>?) -> Int32 = { hand, time, out in
+        guard let out else { return 0 }
+        KleptonCompositor.controllerAtLock.lock()
+        let source = KleptonCompositor.controllerAtSource
+        KleptonCompositor.controllerAtLock.unlock()
+        return source?.senseMotion(hand: Int(hand), at: time, into: out) == true ? 1 : 0
+    }
 
     /// A head pose for an instant, for `kl_ovrp_set_head_at`.
     ///

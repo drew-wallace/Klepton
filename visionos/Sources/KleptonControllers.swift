@@ -669,7 +669,7 @@ final class KleptonControllers {
     /// Falling back to the raw anchor if prediction refuses keeps a
     /// controller that has just appeared (or one the tracker has lost) visible
     /// instead of snapping it to the synthetic head-relative pose.
-    private func sensePose(hand: Int, at time: TimeInterval)
+    private func sensePose(hand: Int, at time: TimeInterval, requireResampling: Bool = false)
         -> (SIMD3<Float>, simd_quatf, SIMD3<Float>, SIMD3<Float>)? {
         lock.lock()
         let stored = accessoryAnchor[hand]
@@ -688,7 +688,10 @@ final class KleptonControllers {
         let targetTime = now + min(max(ahead, 0), capS)
         let predicted = KLSenseTune.senseUseRawAnchor ? nil
             : provider.predictAnchor(for: stored, at: targetTime)
-        if !KLSenseTune.senseUseRawAnchor {
+        // A direct packet query must not replace an already resampled frame
+        // pose with an older raw anchor if the tracker declines this instant.
+        if requireResampling && predicted == nil { return nil }
+        if !KLSenseTune.senseUseRawAnchor && !requireResampling {
             let available = predicted != nil
             lock.lock()
             let changed = accessoryPredictionAvailable[hand] != available
@@ -745,6 +748,21 @@ final class KleptonControllers {
         return (p, q, v, w)
     }
 
+    /// Read a Sense sample for a tracking packet without publishing a second
+    /// pose or polling buttons. The render thread remains the pose seam's sole
+    /// writer. Anchor/provider snapshots and live tuning already use locks.
+    func senseMotion(hand: Int, at time: TimeInterval,
+                     into out: UnsafeMutablePointer<Float>) -> Bool {
+        guard (0...1).contains(hand), !KLGuardianRuntime.shared.suppressInput,
+              let (p, q, v, w) = sensePose(hand: hand, at: time, requireResampling: true)
+        else { return false }
+        out[0] = q.imag.x; out[1] = q.imag.y; out[2] = q.imag.z; out[3] = q.real
+        out[4] = p.x; out[5] = p.y; out[6] = p.z
+        out[7] = v.x; out[8] = v.y; out[9] = v.z
+        out[10] = w.x; out[11] = w.y; out[12] = w.z
+        return true
+    }
+
     /// Say, once, how far ahead the frame's presentation time actually is and
     /// whether the cap reaches it.
     ///
@@ -753,7 +771,10 @@ final class KleptonControllers {
     /// the cap never binds and the prediction is the full one that overshoots.
     /// The number that decides it is measured here and nowhere else.
     private static var loggedHorizon = false
+    private static let horizonLogLock = NSLock()
     private static func notePredictionHorizon(ahead: Double, cap: Double) {
+        horizonLogLock.lock()
+        defer { horizonLogLock.unlock() }
         if loggedHorizon || !ahead.isFinite { return }
         loggedHorizon = true
         NSLog(String(format: "[ctrl] sense prediction: presentation is %.1f ms "

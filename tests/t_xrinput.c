@@ -21,6 +21,7 @@ int main(void) {
     // so pin the head at the origin, or "the left hand is at x = -0.2" would be
     // a statement about wherever the default head happened to be.
     setenv("KL_OVRP_EYE_HEIGHT", "0", 0);
+    setenv("KL_XR_SENSE_QUERY", "1", 0);
 
     printf("=== OpenXR actions, poses and haptics ===\n");
     int ok = kl_openxr_input_selftest(stdout);

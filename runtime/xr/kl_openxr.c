@@ -40,6 +40,7 @@
 #include <time.h>
 #include <math.h>
 #include <unistd.h>
+#include <pthread.h>
 #include "kl_openxr.h"
 #include "kl_jni.h"
 #include "kl_ovrp.h"
@@ -1699,6 +1700,12 @@ typedef struct {
     int64_t  predict_time;
     int      predict_valid;
     float    predict_q[4], predict_p[3];
+    // Current-time input queries are independent of the rendering latch.
+    // Repeated locations of the same hand at the same instant still agree.
+    uint64_t hand_query_frame[2];
+    int64_t hand_query_time[2];
+    int hand_query_valid[2];
+    float hand_query_motion[2][13];
     // KL_XR_POSE_TRACE: the head this frame was answered with, per entry
     // point, so "the guest draws from one head and declares another" is a
     // measurement rather than a reading of the guest's source. Indexed by
@@ -2846,9 +2853,44 @@ static XrPosef klxr_head_predicted(XrPosef p, const klxr_head_delta *d) {
 // publishes pose only has them derived (kl_ovrp), and the first sample after a
 // gap has no basis at all. That case must reach the guest as velocityFlags == 0
 // and not as a velocity of zero, which asserts the controller is stationary.
+static int klxr_current_hand_motion(klxr_session *s, int hand, int64_t time,
+                                   float motion[13]) {
+    if (!s || (unsigned)hand > 1 || time <= 0 ||
+        time == s->frame_predicted_time) return 0;
+    // Steam Link's GetControllerState calls XRQGetTimeNow, then locates the
+    // grip at that instant. Its rendering uses predictedDisplayTime instead.
+    // Only the near-now queries bypass the rendering latch; future/historical
+    // queries retain their existing behavior. No additional future prediction.
+    static pthread_mutex_t query_lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&query_lock);
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_XR_SENSE_QUERY", 0);
+    if (!on) { pthread_mutex_unlock(&query_lock); return 0; }
+    if (s->hand_query_time[hand] != time ||
+        s->hand_query_frame[hand] != s->frames_waited) {
+        if (llabs(time - klxr_now()) > 5000000LL) {
+            pthread_mutex_unlock(&query_lock);
+            return 0;
+        }
+        s->hand_query_time[hand] = time;
+        s->hand_query_frame[hand] = s->frames_waited;
+        s->hand_query_valid[hand] = kl_ovrp_hand_motion_at(hand, (double)time / 1e9,
+                                                        s->hand_query_motion[hand]);
+        static int said;
+        if (!said && s->hand_query_valid[hand]) {
+            said = 1;
+            fprintf(stderr, "  [xr] current controller queries: direct tracker pose and motion\n");
+        }
+    }
+    int valid = s->hand_query_valid[hand];
+    if (valid) memcpy(motion, s->hand_query_motion[hand], 13 * sizeof(float));
+    pthread_mutex_unlock(&query_lock);
+    return valid;
+}
+
 static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
                                   float *lin, float *ang, int *motion_known,
-                                  const klxr_head_delta *pred) {
+                                  const klxr_head_delta *pred, int64_t time) {
     XrPosef base = { {0, 0, 0, 1}, {0, 0, 0} };   // STAGE, and the tracking space
     if (tracked) *tracked = 1;
     if (motion_known) *motion_known = 0;
@@ -2879,14 +2921,24 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
     } else if (sp->reference_type == KLXR_REF_SPACE_LOCAL) {
         base.position.y = kl_ovrp_eye_height();
     } else if (sp->reference_type == 0) {
-        // An ACTION space — anchored to whatever its pose action is following,
-        // which here is one of the two hands. The pose and its motion come out
-        // of the same latched sample the ovrp guest sees, and out of one call,
-        // so a velocity can never be paired with another frame's pose.
+        // An ACTION space, following a hand. Rendering uses the latched sample;
+        // Steam's current-time input requests can query the tracker directly.
+        // In either case the pose and measured motion come from one sample.
         int is_aim = 0;
         int hand = klxr_action_space_hand(sp, &is_aim);
         float pos[3], quat[4], v[3], a[3];
-        int present = hand >= 0 && kl_ovrp_hand_motion(hand, pos, quat, v, a);
+        float fresh[13];
+        int queried = klxr_current_hand_motion(sp->session, hand, time, fresh);
+        int present;
+        if (queried) {
+            memcpy(quat, fresh, sizeof quat);
+            memcpy(pos, fresh + 4, sizeof pos);
+            memcpy(v, fresh + 7, sizeof v);
+            memcpy(a, fresh + 10, sizeof a);
+            present = 1;
+        } else {
+            present = hand >= 0 && kl_ovrp_hand_motion(hand, pos, quat, v, a);
+        }
         if (tracked) *tracked = present;
         if (!present) return base;
         base.position    = (XrVector3f){ pos[0], pos[1], pos[2] };
@@ -2895,7 +2947,7 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         klxr_ctrl_trace(&base, hand, is_aim);
         if (lin) memcpy(lin, v, sizeof v);
         if (ang) memcpy(ang, a, sizeof a);
-        if (motion_known) *motion_known = kl_ovrp_hand_motion_known(hand);
+        if (motion_known) *motion_known = queried || kl_ovrp_hand_motion_known(hand);
     }
 
     // ...and the pose the guest asked its space to sit at within that reference
@@ -2918,7 +2970,7 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
 // head-locked layer placed against an unpredicted head would sit where the
 // picture around it is not.
 static XrPosef klxr_space_pose(const klxr_space *sp, const klxr_head_delta *pred) {
-    return klxr_space_pose_ex(sp, NULL, NULL, NULL, NULL, pred);
+    return klxr_space_pose_ex(sp, NULL, NULL, NULL, NULL, pred, 0);
 }
 
 // The three reference spaces klxr_space_pose can place, and no others —
@@ -6454,8 +6506,8 @@ static XrResult klxr_LocateSpace(void *space, void *base_space, int64_t time,
     int sp_motion_known = 0;
     klxr_head_delta pred = klxr_frame_head_delta(sp->session, time);
     XrPosef sp_pose = klxr_space_pose_ex(sp, &sp_tracked, lin, ang, &sp_motion_known,
-                                         &pred);
-    XrPosef bs_pose = klxr_space_pose_ex(bs, &bs_tracked, NULL, NULL, NULL, &pred);
+                                         &pred, time);
+    XrPosef bs_pose = klxr_space_pose_ex(bs, &bs_tracked, NULL, NULL, NULL, &pred, time);
 
     // The census key distinguishes the two hands, because a left action space
     // and a right one are different questions with different answers and
@@ -6933,6 +6985,22 @@ static void klxr_st_sync(void) {
     klxr_SyncActions(&g_session, &si);
 }
 
+static int klxr_st_hand_calls, klxr_st_hand_decline;
+static float klxr_st_hand_x;
+static double klxr_st_hand_time;
+static int klxr_st_hand_at(int hand, double time, float *v) {
+    klxr_st_hand_calls++;
+    klxr_st_hand_time = time;
+    if (klxr_st_hand_decline == 1) return 0;
+    memset(v, 0, 13 * sizeof(float));
+    v[3] = 1;
+    v[4] = klxr_st_hand_x + hand;
+    if (klxr_st_hand_decline == 2) v[4] = NAN;
+    v[7] = 0.4f;
+    v[11] = 2.0f;
+    return 1;
+}
+
 int kl_openxr_input_selftest(FILE *f) {
     int ok = 1;
     klxr_st_boot();
@@ -7216,6 +7284,73 @@ int kl_openxr_input_selftest(FILE *f) {
         ok &= klxr_st_ok(f, "the aim delta applies on top of the grip pitch",
                          fabsf(a.pose.orientation.x - want_aim)  < 1e-3f &&
                          fabsf(g.pose.orientation.x - want_grip) < 1e-3f);
+    }
+
+    // The streaming guest requests NOW for tracking packets, independently of
+    // the graphics frame's predicted time. A wrist stop must reach that query
+    // even when rendering is still holding its earlier sample.
+    {
+        fprintf(f, "  --- current-time controller queries ---\n");
+        int enabled = kl_env_on("KL_XR_SENSE_QUERY", 0);
+        kl_ovrp_frame_latch();
+        kl_ovrp_set_hand_at(klxr_st_hand_at);
+        klxr_st_hand_calls = 0;
+        klxr_st_hand_decline = 0;
+        klxr_st_hand_x = 0.7f;
+        struct {
+            int32_t type; void *next; uint64_t flags;
+            float lin[3], ang[3];
+        } velocity = { .type = KLXR_TYPE_SPACE_VELOCITY };
+        XrSpaceLocation loc = { .type = XR_TYPE_SPACE_LOCATION, .next = &velocity };
+        int64_t time = klxr_now();
+        klxr_LocateSpace(sp[0], stage_sp, time, &loc);
+        float want = enabled ? 0.7f : -0.2f;
+        ok &= klxr_st_ok(f, enabled ? "NOW re-queries the tracker instead of the frame latch"
+                                    : "disabled querying preserves the frame latch",
+                         fabsf(loc.pose.position.x - want) < 1e-4f &&
+                         klxr_st_hand_calls == enabled);
+        if (enabled) {
+            ok &= klxr_st_ok(f, "the query returns matching measured motion and monotonic time",
+                velocity.flags == 3 && fabsf(velocity.lin[0] - 0.4f) < 1e-4f &&
+                fabsf(velocity.ang[1] - 2.0f) < 1e-4f &&
+                fabs(klxr_st_hand_time - (double)time / 1e9) < 1e-6);
+            klxr_st_hand_x = 0.9f;
+            usleep(7000); // The same instant must stay coherent after the near-now window.
+            klxr_LocateSpace(sp[0], stage_sp, time, &loc);
+            ok &= klxr_st_ok(f, "the same hand and instant have one answer",
+                             fabsf(loc.pose.position.x - 0.7f) < 1e-4f && klxr_st_hand_calls == 1);
+            int64_t next_time = klxr_now();
+            if (next_time == time) next_time++;
+            klxr_LocateSpace(sp[0], stage_sp, next_time, &loc);
+            ok &= klxr_st_ok(f, "a later tracking request refreshes within the same graphics frame",
+                             fabsf(loc.pose.position.x - 0.9f) < 1e-4f && klxr_st_hand_calls == 2);
+            klxr_LocateSpace(sp[1], stage_sp, next_time, &loc);
+            ok &= klxr_st_ok(f, "the hands keep independent query samples",
+                             fabsf(loc.pose.position.x - 1.9f) < 1e-4f && klxr_st_hand_calls == 3);
+            klxr_st_hand_x = 1.1f;
+            g_session.frames_waited++;
+            klxr_LocateSpace(sp[0], stage_sp, next_time, &loc);
+            ok &= klxr_st_ok(f, "a new graphics frame expires the current-time query cache",
+                             fabsf(loc.pose.position.x - 1.1f) < 1e-4f && klxr_st_hand_calls == 4);
+        }
+        int calls = klxr_st_hand_calls;
+        klxr_LocateSpace(sp[0], stage_sp, klxr_now() + 20000000LL, &loc);
+        ok &= klxr_st_ok(f, "future rendering queries retain the original latched pose",
+                         fabsf(loc.pose.position.x + 0.2f) < 1e-4f && klxr_st_hand_calls == calls);
+        g_session.frame_predicted_time = klxr_now();
+        klxr_LocateSpace(sp[0], stage_sp, g_session.frame_predicted_time, &loc);
+        ok &= klxr_st_ok(f, "the exact rendering instant retains its latch even when near NOW",
+                         fabsf(loc.pose.position.x + 0.2f) < 1e-4f && klxr_st_hand_calls == calls);
+        g_session.frame_predicted_time = 0;
+        klxr_st_hand_decline = 1;
+        klxr_LocateSpace(sp[0], stage_sp, klxr_now(), &loc);
+        ok &= klxr_st_ok(f, "an unavailable tracker falls back to the existing pose",
+                         fabsf(loc.pose.position.x + 0.2f) < 1e-4f);
+        klxr_st_hand_decline = 2;
+        klxr_LocateSpace(sp[0], stage_sp, klxr_now(), &loc);
+        ok &= klxr_st_ok(f, "invalid tracker motion cannot replace the latched pose",
+                         fabsf(loc.pose.position.x + 0.2f) < 1e-4f);
+        kl_ovrp_set_hand_at(NULL);
     }
 
     // Haptics: what is checked is that the order REACHES kl_ovrp's queue — the
