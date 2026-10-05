@@ -151,6 +151,19 @@ The 2.0.24 simulator build still streams the SteamVR library; both platform
 slices and the signed device build pass. Physical improvement still needs a
 headset test.
 
+The subsequent direct-query experiment (`fe6c919`) was reverted after the user
+reported multiple crashes and no perceptible tracking improvement. It queried
+the accessory provider from a guest tracking-packet thread as well as the
+render thread. The physical boot log confirms that direct querying was active
+and records a SIGABRT inside `ODTTrackingClient_Update_WithTrackingOutput` /
+`AccessoryTrackingProvider.predictAnchor`, reached from guardian tracking on
+the render path. Concurrent provider calls are a likely cause, not a proven
+diagnosis of every crash. The restored code matches `017ea9f`: current-time
+pose resampling, corrected anchor/grip velocities, and newest decoded output
+remain; accessory prediction is again queried only from the render thread.
+The previously validated signed device build was reinstalled with both optional
+capabilities disabled. Controller-motion and OpenXR input/space regressions pass.
+
 ## Decoded-frame backlog
 
 Steam Link defaults to `KL_VTDEC_LATEST=1`: when multiple decoded frames are
