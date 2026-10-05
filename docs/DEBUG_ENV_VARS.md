@@ -2543,8 +2543,12 @@ written down is a value found twice.
   Oculus Touch constant).
 - `KL_SENSE_VEL_FRAME=world` — read `AccessoryAnchor.velocity`/`angularVelocity`
   as already being in tracking space. Default treats them as accessory-local
-  and rotates them by the grip orientation, matching Apple's documented local
-  coordinate system. Retained for coordinate-frame diagnostics.
+  and rotates them by the accessory anchor orientation, matching Apple's
+  documented anchor-local coordinate system. Both modes transfer linear
+  velocity from the tracked origin to the reported grip using `omega × offset`.
+  `KL_SENSE_VEL_FRAME=grip` restores the older grip-axis rotation and omits that
+  offset term, for comparison. Sense's grip and anchor axes differ by about
+  34.81 degrees in the headset logs.
 - `KL_HAND_MIRROR=1` — left hand back on ALVR's *mirrored* wrist→grip
   constant. The default left constant is `R · Rx(180)`, forced by four
   playtests.

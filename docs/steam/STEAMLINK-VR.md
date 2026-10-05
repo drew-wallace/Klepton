@@ -137,6 +137,20 @@ from future prediction; the user reported a clear improvement on the physical
 headset. Simulator testing cannot validate this behavior. This change does not
 eliminate network delay.
 
+Controller motion is converted using the accessory anchor's orientation,
+then transferred to the reported grip position with `v_grip = v_anchor +
+omega × (p_grip - p_anchor)`. [Apple's velocity vectors are anchor-local](https://developer.apple.com/documentation/arkit/tracking-accessories-in-volumetric-windows), while
+the prior code rotated them using the grip axes. Headset probes show a
+34.81-degree difference between those frames. Sending incorrectly rotated
+motion could misdirect host prediction during rapid movement even when the
+pose itself is accurate. The grip offset also changes linear velocity during
+wrist rotation. `KL_SENSE_VEL_FRAME=grip` restores the old conversion for an
+A/B test. The pure Swift regression checks world-axis conversion, a wrist
+rotation, and velocity against a finite difference of the reported grip pose.
+The 2.0.24 simulator build still streams the SteamVR library; both platform
+slices and the signed device build pass. Physical improvement still needs a
+headset test.
+
 ## Decoded-frame backlog
 
 Steam Link defaults to `KL_VTDEC_LATEST=1`: when multiple decoded frames are
@@ -151,7 +165,8 @@ time. The HEVC regression models an eight-frame backlog, checks recovery to the
 newest timestamp, and verifies subsequent dependent frames still decode.
 The 2.0.24 simulator stream renders SteamVR's library at 1152x4608 with this
 policy, and its log confirms a stale decoded frame was discarded. Native
-video-texture checks pass. The effect on physical headset latency is unmeasured.
+video-texture checks pass. The user reported a small improvement on the headset;
+the effect on physical headset latency is unmeasured.
 
 ## Regression checks
 
@@ -159,6 +174,8 @@ video-texture checks pass. The effect on physical headset latency is unmeasured.
 make slinkcheck                        # JNI startup and text input; signing policy
 make hevc vidtex xrinput bcast         # video decode/textures, XR input, discovery
 make xros                             # compile/link both visionOS platforms
+xcrun swiftc visionos/Sources/KleptonControllerMotion.swift tests/visionos/ControllerMotionTests.swift -o /tmp/klepton-controller-motion-tests
+/tmp/klepton-controller-motion-tests   # anchor/grip velocity conversion
 ```
 
 `vidtex` needs the vendored patched ANGLE build. The JNI regression exercises

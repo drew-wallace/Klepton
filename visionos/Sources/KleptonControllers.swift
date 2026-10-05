@@ -374,9 +374,10 @@ struct KLSenseTune {
     /// `KL_SENSE_VEL_FRAME=world` — treat `AccessoryAnchor.velocity` as already
     /// being in tracking space instead of the accessory's own frame.
     ///
-    /// Apple describes both velocities as accessory-local. Rotate them by
-    /// the grip orientation to publish tracking-space motion. The world
-    /// override is retained for coordinate-frame diagnostics.
+    /// Apple describes both velocities as accessory-anchor-local. Rotate by
+    /// the anchor orientation, then transfer linear velocity to the grip.
+    /// `KL_SENSE_VEL_FRAME=grip` restores the old grip-axis conversion without
+    /// the lever-arm term for an explicit comparison.
     /// `KL_SENSE_PREDICT_MS=<ms>` — how far into the future a Sense controller
     /// pose may be predicted, measured ahead of now. 0 still asks the tracker
     /// for a pose at NOW, compensating for the age of the delivered sample;
@@ -392,6 +393,9 @@ struct KLSenseTune {
 
     static let velocityIsLocal =
         ProcessInfo.processInfo.environment["KL_SENSE_VEL_FRAME"] != "world"
+
+    static let velocityUsesLegacyGrip =
+        ProcessInfo.processInfo.environment["KL_SENSE_VEL_FRAME"] == "grip"
 
     static let senseUseRawAnchor =
         ProcessInfo.processInfo.environment["KL_SENSE_RAW_ANCHOR"] == "1"
@@ -419,11 +423,9 @@ final class KleptonControllers {
     /// a 90 Hz picture.
     ///
     /// Keeping the anchor keeps `AccessoryTrackingProvider.predictAnchor(for:at:)`
-    /// available, which is the platform's own extrapolator: ask it for the
-    /// frame's *presentation* time and every frame gets its own pose, forward to
-    /// where the controller will be when the light reaches the eye. That is the
-    /// same thing `queryDeviceAnchor(atTimestamp:)` already does for the head —
-    /// the controllers were simply never given the equivalent.
+    /// available, so every display frame can get a fresh pose. Steam Link asks
+    /// for the current time; native guests may request presentation time within
+    /// the ahead-of-now cap.
     private var accessoryAnchor: [Int: AccessoryAnchor] = [:]
     /// Held so the render thread can predict against it. `makeAccessoryProvider`
     /// is the only writer, and it runs before the session that feeds it.
@@ -622,6 +624,9 @@ final class KleptonControllers {
         if senseFramesProbed[hand] { return }
         senseFramesProbed[hand] = true
         let side = hand == 0 ? "left" : "right"
+        NSLog("[ctrl] %@ Sense motion: %@", side,
+              KLSenseTune.velocityUsesLegacyGrip ? "legacy grip axes, no lever arm"
+              : "anchor axes to tracking space, velocity at reported grip")
         guard a.accessory.locations.contains(.grip) else {
             NSLog("[cp] sense frames (\(side)): \(a.accessory.name) publishes no .grip")
             return
@@ -725,12 +730,18 @@ final class KleptonControllers {
         var p = SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z) + raw.act(tpos)
         if tpivot != SIMD3<Float>(0, 0, 0) { p += raw.act(tpivot) - q.act(tpivot) }
 
-        // Motion, rotated out of the accessory's own frame if that is what it
-        // is in — by the UNCORRECTED orientation, because the correction above
-        // is a change of convention applied to the pose we report, not a claim
-        // about the frame the tracker measured in.
-        var v = a.velocity, w = a.angularVelocity
-        if KLSenseTune.velocityIsLocal { v = raw.act(v); w = raw.act(w) }
+        // Motion is measured in the ANCHOR frame, not .grip's frame (Sense
+        // differs by ~35 degrees). Publish world-space motion at the same
+        // corrected point as the pose, including the rotational lever arm.
+        let v: SIMD3<Float>, w: SIMD3<Float>
+        if KLSenseTune.velocityUsesLegacyGrip {
+            v = raw.act(a.velocity)
+            w = raw.act(a.angularVelocity)
+        } else {
+            (v, w) = KLControllerMotion.atGrip(anchor: a.originFromAnchorTransform,
+                position: p, linear: a.velocity, angular: a.angularVelocity,
+                local: KLSenseTune.velocityIsLocal)
+        }
         return (p, q, v, w)
     }
 
@@ -1782,9 +1793,9 @@ final class KleptonControllers {
     /// The hand anchors are the fallback: used for a hand's *pose* and its
     /// pinch trigger, and only where a Sense controller has not supplied one.
     ///
-    /// `presentationTime` is when the frame being built will be shown. Every
-    /// pose here is predicted to it, so the controllers move at display rate
-    /// and describe the same instant the head pose does.
+    /// `presentationTime` is when the frame being built will be shown. Sense
+    /// poses are resampled each frame subject to the ahead-of-now cap; Steam
+    /// Link's zero cap resamples to now. Hand fallbacks use presentation time.
     func update(leftHand: HandAnchor?, rightHand: HandAnchor?,
                 at presentationTime: TimeInterval) {
         if KLGuardianRuntime.shared.suppressInput {

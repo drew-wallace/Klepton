@@ -186,6 +186,7 @@ for _stack in (_icon_base, f"{_icon_base}-launcher"):
 # renderer adds. A list rather than an id pair each, for the same reason
 # the guest libraries are one.
 SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift",
+         "KleptonControllerMotion.swift",
          "KleptonAudio.swift", "KleptonShell.swift", "KleptonTuning.swift",
          "KleptonChroma.swift", "KleptonMic.swift",
          "KleptonGuardian.swift", "KleptonGuardianGeometry.swift", "KleptonGuardianRuntime.swift",
