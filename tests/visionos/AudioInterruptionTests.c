@@ -5,6 +5,7 @@ static int device_attempts;
 static int device_stops, device_starts;
 static OSStatus fake_stop(AudioUnit unit) { (void)unit; device_stops++; return noErr; }
 static OSStatus fake_start(AudioUnit unit) { (void)unit; device_starts++; return noErr; }
+static OSStatus fake_dispose(AudioUnit unit) { (void)unit; return noErr; }
 static AudioComponent no_device(AudioComponent previous, const AudioComponentDescription *description) {
     (void)previous; (void)description;
     device_attempts++;
@@ -13,6 +14,8 @@ static AudioComponent no_device(AudioComponent previous, const AudioComponentDes
 #define AudioComponentFindNext no_device
 #define AudioOutputUnitStop fake_stop
 #define AudioOutputUnitStart fake_start
+#define AudioUnitUninitialize fake_dispose
+#define AudioComponentInstanceDispose fake_dispose
 #include "../../runtime/media/kl_audio.c"
 
 int main(void) {
@@ -71,6 +74,40 @@ int main(void) {
     g_cap_unit = NULL;
     g_mic_open = 0;
     g_mic_enabled = 0;
+
+    // Repeated foreground/window-close events must preserve a live callback
+    // and queued audio. Bookkeeping can say stopped while callbacks still run.
+    g_unit = (AudioUnit)(uintptr_t)1;
+    g_running = 1;
+    atomic_store(&g_last_render_ns, now_ns());
+    atomic_store(&g_r, 17);
+    atomic_store(&g_w, 42);
+    int before_restarts = g_restarts;
+    kl_audio_resume();
+    g_running = 0;
+    kl_audio_resume();
+    assert(device_attempts == 4 && g_restarts == before_restarts);
+    assert(atomic_load(&g_r) == 17 && atomic_load(&g_w) == 42);
+
+    // A unit that has disappeared still needs repair even with a recent stamp.
+    g_unit = NULL;
+    kl_audio_resume();
+    assert(device_attempts == 5 && g_restarts == before_restarts + 1);
+    g_unit = (AudioUnit)(uintptr_t)1;
+    atomic_store(&g_last_render_ns, now_ns() - 1000000000ull);
+    kl_audio_resume();
+    assert(device_attempts == 6);
+
+    // Actual Home/interrupt recovery must rebuild even with a recent heartbeat.
+    g_unit = (AudioUnit)(uintptr_t)1;
+    atomic_store(&g_last_render_ns, now_ns());
+    kl_audio_suspend();
+    kl_audio_resume();
+    assert(device_attempts == 7);
+    g_unit = (AudioUnit)(uintptr_t)1;
+    kl_audio_interrupted(1);
+    kl_audio_resume();
+    assert(device_attempts == 8 && !g_interrupted);
     // Releasing the hold must also work when no guest output exists yet.
     g_open = 0;
     kl_audio_suspend();

@@ -752,17 +752,24 @@ void kl_audio_suspend(void) {
     pthread_mutex_unlock(&g_mic_lock);
 }
 
-// The display is back. Rebuild output only after the host has reactivated its
-// session, and restart any opted-in capture unit retained across Home.
+// The host has reactivated its session. A window closing during immersion can
+// call this without interrupting output: preserve its ring and healthy callback.
+// Real suspension/interruption, a missing unit, or a dead callback still needs
+// a rebuild. The watchdog catches a callback that stops after this check.
 void kl_audio_resume(void) {
-    g_host_suspended = 0;
-    int was = g_interrupted;
-    g_interrupted = 0;
+    int was_suspended = atomic_exchange(&g_host_suspended, 0);
+    int was = atomic_exchange(&g_interrupted, 0);
     g_interrupt_ns = now_ns();
     g_wd_streak = 0;
     if (g_open) {
-        fprintf(stderr, "  [au] resume%s\n", was ? " (was interrupted)" : "");
-        kl_audio_restart();
+        pthread_mutex_lock(&g_lock);
+        uint64_t last = atomic_load_explicit(&g_last_render_ns, memory_order_relaxed);
+        int healthy = g_unit && last && now_ns() - last <= 500ull * 1000000ull;
+        pthread_mutex_unlock(&g_lock);
+        if (was_suspended || was || !healthy) {
+            fprintf(stderr, "  [au] resume%s\n", was ? " (was interrupted)" : "");
+            kl_audio_restart();
+        }
     }
     pthread_mutex_lock(&g_mic_lock);
     if (g_cap_unit && g_mic_open && g_mic_host_stopped && g_mic_enabled) {

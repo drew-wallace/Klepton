@@ -30,3 +30,37 @@ Physical streaming behavior, controller latency/overshoot, and sustained
 stability still require a headset test against Carrara (`192.168.147.10`).
 This does not add eye-tracking input or the separate Foveated Streaming
 Provider entitlement.
+
+## Audio and eye-focus follow-up
+
+The first paid-capability headset session contains four Steam Link audio jitter
+buffer underflows and three settings-window closures followed by native audio
+restarts. These are separate sources of gaps: the native restart discards queued
+PCM even if playback was healthy, while a Steam jitter-buffer underflow happens
+before PCM reaches Klepton.
+
+`kl_audio_resume` now preserves an existing output unit with a recent render
+callback when neither Home nor an OS interruption held it. Actual hold recovery,
+a missing unit, or a callback idle for over 500 ms still rebuilds output. The
+independent watchdog repairs a callback that stops after the resume check. This
+keeps window-close session activation without forcing a gap in healthy sound.
+Native recovery tests cover preserved queued PCM, stale bookkeeping, dead or
+missing output, Home, and interruptions. Swift session/mixing lifecycle tests
+pass, and both visionOS platform builds succeed. Wireless audio improvement
+still requires listening on the headset; this does not repair upstream packet
+loss or change Steam Link's jitter-buffer algorithm.
+
+Device artifact: `visionos/build/dd-device-steamlink-vr-audio-resume/Build/Products/Debug-xros/KleptonSteamLink.app`.
+All three existing capabilities remain verified in its signature and profile.
+
+Dynamic eye-directed Steam streaming is still unimplemented. The APK requests
+`XR_EXT_eye_gaze_interaction`, but ordinary app ARKit/Compositor Services APIs
+do not expose the gaze input that would satisfy it. The visionOS 27 custom
+streaming-provider API exposes an approximate focus region inside a provider
+extension; [Apple requires separate provider approval](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.foveated-streaming-provider).
+Approval status for team `DS9FZL757P` has been requested from the user and is not
+yet confirmed. The [request form](https://developer.apple.com/contact/request/foveated-streaming-provider/)
+is separate from joining the paid developer program. Adding the entitlement to
+the current ordinary app would not itself supply gaze. A provider extension,
+session/rendering integration, and a tested OpenXR gaze bridge are required;
+the current build does not advertise eye-tracking support.

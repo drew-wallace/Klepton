@@ -82,8 +82,8 @@ enum KleptonAudio {
         }
     }
 
-    /// A foreground transition can deactivate the session as well as its
-    /// output unit. Reactivate first, then rebuild C's output against that route.
+    /// Reactivate the session before native recovery. C preserves a healthy
+    /// callback and rebuilds only after a hold or when output has stopped.
     static func resume() {
         sessionLock.lock()
         defer { sessionLock.unlock() }
