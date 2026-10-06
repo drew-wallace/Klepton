@@ -52,6 +52,11 @@ loss or change Steam Link's jitter-buffer algorithm.
 
 Device artifact: `visionos/build/dd-device-steamlink-vr-audio-resume/Build/Products/Debug-xros/KleptonSteamLink.app`.
 All three existing capabilities remain verified in its signature and profile.
+It was installed with matching APK/assets staged afterward, and device launch
+succeeded (PID 627). The dedicated simulator reached the SteamVR library and
+published streamed video, with no Klepton fatal/fault marker during the short
+check. Two upstream Steam audio underflows still occurred. The simulator was
+terminated after the check to release Carrara for physical testing.
 
 Dynamic eye-directed Steam streaming is still unimplemented. The APK requests
 `XR_EXT_eye_gaze_interaction`, but ordinary app ARKit/Compositor Services APIs
