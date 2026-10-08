@@ -655,7 +655,9 @@ struct BootView: View {
         session.openingSpace = true
         KLGuardianRuntime.shared.beginImmersion()
         KleptonGuardian.shared.setPassthroughRequired(false)
+        KleptonAudio.diagnose("before openImmersiveSpace")
         let result = await openImmersiveSpace(id: Immersive.id)
+        KleptonAudio.diagnose("after openImmersiveSpace: \(result)")
         session.openingSpace = false
         NSLog("[cp] openImmersiveSpace (session) -> \(result)")
         guard !session.quitting else { return }

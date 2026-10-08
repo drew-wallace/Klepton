@@ -1159,6 +1159,22 @@ static int cap_build(OSType subtype, const char *name, int vpio) {
                                            kAudioUnitScope_Global, 0, &off, sizeof off);
         OSStatus ag = AudioUnitSetProperty(g_cap_unit, kAUVoiceIOProperty_VoiceProcessingEnableAGC,
                                            kAudioUnitScope_Global, 0, &on, sizeof on);
+        // VPIO ducks other apps independently of AVAudioSession's duckOthers
+        // option, even for capture-only use. Minimize that separate attenuation;
+        // this API has no "none" level. Mic OFF remains the control that avoids
+        // VPIO and competing for capture altogether.
+        AUVoiceIOOtherAudioDuckingConfiguration ducking = {
+            .mEnableAdvancedDucking = false,
+            .mDuckingLevel = kAUVoiceIOOtherAudioDuckingLevelMin,
+        };
+        OSStatus duck = AudioUnitSetProperty(g_cap_unit,
+            kAUVoiceIOProperty_OtherAudioDuckingConfiguration,
+            kAudioUnitScope_Global, 0, &ducking, sizeof ducking);
+        if (duck != noErr) {
+            char b[8];
+            fprintf(stderr, "  [au] VPIO minimum other-audio ducking rejected (non-fatal): %s\n",
+                    fourcc(duck, b));
+        }
         if (vp != noErr || ag != noErr) {
             char b1[8], b2[8];
             fprintf(stderr, "  [au] VPIO props (non-fatal): bypass=%s, AGC=%s\n",
@@ -1213,7 +1229,11 @@ static int cap_unit_create(unsigned want_rate, unsigned want_ch) {
     // it coexists with the .voiceChat session instead of being starved by it. If
     // VPIO will not initialise, fall back to plain RemoteIO — "works but raw"
     // rather than silent.
-    if (cap_build(kAudioUnitSubType_VoiceProcessingIO, "VoiceProcessingIO", 1) != 0) {
+    if (kl_env_on("KL_MIC_RAW", 0)) {
+        // Isolate VPIO's cross-app ducking from microphone/route competition.
+        // Diagnostic only: this sacrifices noise suppression and automatic gain.
+        if (cap_build(kAudioUnitSubType_RemoteIO, "RemoteIO (KL_MIC_RAW)", 0) != 0) return -1;
+    } else if (cap_build(kAudioUnitSubType_VoiceProcessingIO, "VoiceProcessingIO", 1) != 0) {
         fprintf(stderr, "  [au] VPIO capture unavailable — falling back to plain "
                         "RemoteIO (raw mic)\n");
         if (cap_build(kAudioUnitSubType_RemoteIO, "RemoteIO", 0) != 0) return -1;

@@ -26,7 +26,7 @@ private func checkPolicy() {
     precondition(s.category == (KleptonMic.shared.settings.enabled ? .playAndRecord : .playback))
     precondition(s.mode == .default && s.categoryOptions.contains(.mixWithOthers))
     precondition(!s.isNowPlayingCandidate)
-    if KleptonMic.shared.settings.enabled || !s.isOtherAudioPlaying {
+    if KleptonMic.shared.settings.enabled && !s.isOtherAudioPlaying {
         precondition(s.preferredSampleRate == 48000 && s.preferredIOBufferDuration == 0.010)
         precondition(s.preferredOutputNumberOfChannels == 2)
     }
@@ -35,6 +35,20 @@ private func checkPolicy() {
 @main struct AudioSessionTests {
     static func main() {
         let s = AVAudioSession.sharedInstance()
+        if CommandLine.arguments.contains("--disabled-audio") {
+            KleptonAudio.start()
+            KleptonAudio.applyMicCategory(true)
+            KleptonAudio.resume()
+            KleptonAudio.refreshMixing()
+            KleptonAudio.settingsWindowClosed(immersiveActive: true)
+            KleptonAudio.suspend()
+            precondition(s.activations == 0 && s.deactivations == 0 && s.categoryChanges == 0)
+            precondition(s.rateRequests == 0 && s.bufferRequests == 0 && s.channelRequests == 0)
+            precondition(AVAudioApplication.permissionRequests == 0 && !sessionManaged)
+            precondition(resumes == 0 && restarts == 0 && suspends == 0)
+            print("Audio disabled-session tests passed")
+            return
+        }
         s.beforeDeactivation = { precondition(nativeSuspended, "native I/O must stop before session release") }
         if CommandLine.arguments.contains("--suspended-boot") {
             KleptonAudio.suspend()
@@ -103,6 +117,46 @@ private func checkPolicy() {
             object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(0)])
         precondition(interruptions == [1, 0])
         checkPolicy()
+        // An explicit OS refusal to resume must survive route/style/window
+        // callbacks. Only an allowed end or explicit foreground entry releases it.
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(1),
+                                 AVAudioSessionInterruptionReasonKey: UInt(0)])
+        let beforeDeniedResume = s.activations
+        let beforeDeniedRestarts = restarts
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(0),
+                                 AVAudioSessionInterruptionOptionKey: UInt(0)])
+        KleptonAudio.refreshMixing()
+        KleptonAudio.settingsWindowClosed(immersiveActive: true)
+        NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification,
+            object: s, userInfo: [AVAudioSessionRouteChangeReasonKey: UInt(8)])
+        precondition(s.activations == beforeDeniedResume && restarts == beforeDeniedRestarts)
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(0),
+                                 AVAudioSessionInterruptionOptionKey: UInt(1)])
+        precondition(s.activations == beforeDeniedResume + 1 && interruptions.last == 0)
+        checkPolicy()
+        // Failed permitted recovery must retain the hold, including against
+        // later route notifications and malformed interruption payloads.
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(1)])
+        s.rejectActivation = true
+        let beforeFailedEnd = s.activations
+        let beforeFailedSignals = interruptions.count
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(0),
+                                 AVAudioSessionInterruptionOptionKey: UInt(1)])
+        s.rejectActivation = false
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: s)
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(99)])
+        KleptonAudio.refreshMixing()
+        precondition(s.activations == beforeFailedEnd && interruptions.count == beforeFailedSignals)
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: s, userInfo: [AVAudioSessionInterruptionTypeKey: UInt(0),
+                                 AVAudioSessionInterruptionOptionKey: UInt(1)])
+        precondition(s.activations == beforeFailedEnd + 1 && interruptions.last == 0)
         s.losePolicy()
         NotificationCenter.default.post(name: AVAudioSession.mediaServicesWereResetNotification, object: s)
         checkPolicy()
@@ -199,11 +253,12 @@ private func checkPolicy() {
         KleptonAudio.resume()
         precondition(!nativeSuspended && resumes == beforeReleaseError + 1)
 
-        // Solo playback can request the guest's preferred format. A later call
-        // route must survive all subsequent foreground and style updates.
+        // A silent/backgrounded call is indistinguishable from solo playback.
+        // Neither observation permits playback-only hardware renegotiation.
         s.isOtherAudioPlaying = false
         KleptonAudio.resume()
         checkPolicy()
+        precondition(s.rateRequests == 0 && s.bufferRequests == 0 && s.channelRequests == 0)
         s.isOtherAudioPlaying = true
         s.preferredSampleRate = 44100
         s.preferredIOBufferDuration = 0.020
@@ -216,10 +271,16 @@ private func checkPolicy() {
         KleptonMic.shared.settings.enabled = true
         KleptonAudio.applyMicCategory(true)
         checkPolicy()
+        precondition(s.rateRequests == 0 && s.bufferRequests == 0 && s.channelRequests == 0,
+                     "enabling capture must preserve a reported caller's route preferences")
         precondition(s.categoryOptions.contains([.allowBluetooth, .defaultToSpeaker]))
         s.losePolicy()
         KleptonAudio.resume()
         checkPolicy()
+        s.isOtherAudioPlaying = false
+        KleptonAudio.resume()
+        checkPolicy()
+        precondition(s.rateRequests == 1 && s.bufferRequests == 1 && s.channelRequests == 1)
         KleptonMic.shared.settings.enabled = false
         KleptonAudio.applyMicCategory(false)
         checkPolicy()

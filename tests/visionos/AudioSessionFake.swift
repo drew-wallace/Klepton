@@ -4,6 +4,7 @@ import Foundation
 
 public let AVAudioSessionInterruptionTypeKey = "type"
 public let AVAudioSessionInterruptionReasonKey = "interruptionReason"
+public let AVAudioSessionInterruptionOptionKey = "interruptionOptions"
 public let AVAudioSessionRouteChangeReasonKey = "reason"
 public protocol AVAudioSessionSpatialExperience {}
 public extension AVAudioSessionSpatialExperience where Self == AVAudioSession.FixedSpatialExperience {
@@ -15,7 +16,12 @@ public final class AVAudioSession: NSObject {
         public static let playback = Self(rawValue: "playback")
         public static let playAndRecord = Self(rawValue: "playAndRecord")
     }
-    public enum Mode { case `default`, voiceChat }
+    public enum Mode: String { case `default`, voiceChat }
+    public struct InterruptionOptions: OptionSet {
+        public let rawValue: UInt
+        public init(rawValue: UInt) { self.rawValue = rawValue }
+        public static let shouldResume = Self(rawValue: 1)
+    }
     public struct CategoryOptions: OptionSet {
         public let rawValue: Int
         public init(rawValue: Int) { self.rawValue = rawValue }
@@ -40,7 +46,7 @@ public final class AVAudioSession: NSObject {
         case override = 4, routeConfigurationChange = 8
     }
     public struct Port { public let portType: Category }
-    public struct Route { public let inputs: [Port] = [] }
+    public struct Route { public let inputs: [Port] = []; public let outputs: [Port] = [] }
     public static let interruptionNotification = Notification.Name("interruption")
     public static let routeChangeNotification = Notification.Name("route")
     public static let mediaServicesWereResetNotification = Notification.Name("reset")
@@ -51,6 +57,7 @@ public final class AVAudioSession: NSObject {
     public var categoryOptions: CategoryOptions = []
     public var isNowPlayingCandidate = true
     public var isOtherAudioPlaying = true
+    public var secondaryAudioShouldBeSilencedHint = false
     public var preferredSampleRate: Double = 0
     public var preferredIOBufferDuration: Double = 0
     public var preferredOutputNumberOfChannels = 0
@@ -110,7 +117,9 @@ public final class AVAudioSession: NSObject {
     }
 }
 public enum AVAudioApplication {
+    public static var permissionRequests = 0
     public static func requestRecordPermission(_ completion: @escaping (Bool) -> Void) {
+        permissionRequests += 1
         completion(true)
     }
 }

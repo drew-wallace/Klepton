@@ -3103,6 +3103,9 @@ final class KleptonCompositor {
     /// use. The loading videos are staged beside the rest of the asset tree, so
     /// the path comes from kl_app_assets_dir(). nil until a frame is decoded.
     private func loadingVideoTexture() -> MTLTexture? {
+        // A muted AVPlayer still coordinates with the shared audio session.
+        // Exclude it from the completely silent immersion control as well.
+        guard KleptonAudio.enabled else { return nil }
         // DIAGNOSTIC (KL_SCRATCH_DEBUG=1): draw the wild-handle scratch — the one
         // image AC Nexus actually composites its frame into — as the skybox, so
         // we can SEE what the guest produced. Spread over the sphere it is
@@ -4101,7 +4104,13 @@ final class LoadingVideoPlayer {
             p?.play()
         }
         player = p
-        p.play()
+        if #available(visionOS 27.0, *) {
+            // Muting only suppresses samples; it does not prevent AVPlayer's
+            // implicit activation and route recovery. The guest owns audio.
+            p.setDisconnectedFromSystemAudio(true) { [weak p] in p?.play() }
+        } else {
+            p.play()
+        }
     }
 
     /// The newest decoded frame, or the last one if none is ready this vsync.

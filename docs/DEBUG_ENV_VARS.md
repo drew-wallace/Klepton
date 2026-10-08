@@ -1695,7 +1695,9 @@ The composite/timewarp pass — one file, compiled by both compositors
 The CoreAudio output sink behind `kl_opensl.c`'s buffer queue (which itself
 reads no knobs).
 
-- `KL_AUDIO=0` — no CoreAudio device at all: the OpenSL feeder goes back to
+- `KL_AUDIO=0` — no CoreAudio device at all. On visionOS, also skip Swift audio
+  session activation, microphone permission requests, and the muted loading-video
+  player so this is a complete audio isolation control. The OpenSL feeder goes back to
   pacing each buffer with `usleep` and dropping it, which is what this runtime
   did for its whole life before `kl_audio.c`. The A/B for anything that looks
   like an audio-induced timing change — and read **by value** (`kl_env_on`),
@@ -1723,6 +1725,15 @@ reads no knobs).
 - `KL_AUDIO_TRACE=1` — one line every 200 writes: input/output frame counts,
   ring fill in frames and ms, underruns. What to turn on when the sound is
   present but wrong.
+- `KL_AUDIO_DIAGNOSTICS=1` — visionOS only. Log category/mode/options, Now Playing
+  candidacy, other-audio hints, interruption/suspension holds, and the hardware
+  rate, buffer, and input/output ports around immersive entry, activation, and
+  interruption. With `KL_AUDIO=0`, log the event without obtaining a session.
+- `KL_MIC_RAW=1` — visionOS diagnostic capture only. Use plain RemoteIO rather
+  than VoiceProcessingIO to isolate voice-processing ducking from microphone
+  ownership and route changes. Requires the guest microphone to be enabled and
+  a guest input stream. Sacrifices noise suppression and automatic gain; the
+  normal VPIO path requests minimum other-audio ducking.
 - `KL_AUDIO_SPATIAL=1` — visionOS only. Leave the system's spatialiser in the
   default configuration instead of requesting an unanchored, non-head-tracked
   `.fixed(soundStageSize: .small)` experience. The normal fixed experience keeps

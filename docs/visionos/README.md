@@ -229,8 +229,10 @@ Enabling the guest microphone uses `playAndRecord` with mixing; leave it off
 when another app handles the call microphone. Simultaneous microphone capture
 is not guaranteed. Klepton opts out of Now Playing eligibility and uses a small,
 fixed spatial experience so game audio remains independent of its settings
-window. When other audio is already playing and the guest microphone is off,
-it preserves the route's sample-rate, buffer, and channel preferences. The C
+window. Playback-only never requests hardware rate, buffer, or channel changes,
+including when another app is temporarily silent during immersion entry. With
+the guest microphone on it preserves those preferences when other audio is
+reported. The C
 output measures the hardware rate and resamples the guest audio.
 
 Startup, immersive entry, foreground returns, guardian-style changes, route
@@ -238,7 +240,9 @@ changes, and media-services resets restore mixing policy before activation.
 Category changes are skipped when the policy already matches, avoiding route
 notification loops. An OS interruption blocks route/style reactivation and the
 C watchdog's timeout override until an ended notification or successful explicit
-foreground recovery. The watchdog still repairs stopped render callbacks when
+foreground recovery. An ended notification explicitly withholding `shouldResume`
+keeps the interruption hold; a failed permitted recovery does too. The watchdog
+still repairs stopped render callbacks when
 there is no active interruption.
 
 Home, compositor pause/invalidation, and Quit stop native output and opted-in
@@ -267,6 +271,19 @@ commit, restoring the earlier `ambient` category, and disabling spatial audio
 also failed to restore Discord. Safari music continued mixing in the tester's
 comparisons. These controls do not establish whether Discord or visionOS is
 responsible, or exclude a possible workaround.
+
+The [immersion audio investigation](immersive-audio-investigation.md) audits
+session exclusivity, implicit AVPlayer activation, voice-processing ducking,
+microphone/route competition, all immersion styles, process suspension, jetsam,
+and workload. It includes remaining controlled headset tests and a standalone
+[RealityKit probe](../../spikes/immersive-audio-probe/README.md).
+`KL_AUDIO=0` now skips Swift session activation and microphone permission as
+well as native I/O and loading-video playback. `KL_AUDIO_DIAGNOSTICS=1` logs
+session state at immersion/activation/interruption boundaries. Guest VPIO
+capture requests minimum other-audio ducking; `KL_MIC_RAW=1` isolates plain
+capture from VPIO processing. On visionOS 27, loading videos disconnect their
+AVPlayer from system audio before playback. These changes are safeguards and
+isolation tools; a physical Discord-call fix has not yet been confirmed.
 
 ## Language boundary
 

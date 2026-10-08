@@ -37,15 +37,43 @@ enum KleptonAudio {
     nonisolated(unsafe) private static var interruptionReason: UInt? // guarded by sessionLock
     private enum SessionError: Error { case interrupted, suspended }
 
+    // Match the C device gate, including its false-valued spellings. A silent
+    // isolation run must not activate an otherwise unused audio session.
+    static var enabled: Bool {
+        guard let value = ProcessInfo.processInfo.environment["KL_AUDIO"] else { return true }
+        return !["", "0", "no", "n", "off", "false"].contains(value.lowercased())
+    }
+
+    /// Opt-in snapshots at the transition boundaries. These hints describe our
+    /// session, not whether another process is alive or allowed to record.
+    static func diagnose(_ event: String) {
+        guard ProcessInfo.processInfo.environment["KL_AUDIO_DIAGNOSTICS"] == "1" else { return }
+        guard enabled else {
+            NSLog("[au-diag] \(event): KL_AUDIO=0; session untouched")
+            return
+        }
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        let session = AVAudioSession.sharedInstance()
+        NSLog("[au-diag] \(event): category=\(session.category.rawValue) mode=\(session.mode.rawValue) "
+              + "options=\(session.categoryOptions.rawValue) nowPlaying=\(session.isNowPlayingCandidate) "
+              + "otherAudio=\(session.isOtherAudioPlaying) secondarySilenced=\(session.secondaryAudioShouldBeSilencedHint) "
+              + "interrupted=\(interrupted) suspended=\(suspended) "
+              + "rate=\(session.sampleRate) buffer=\(session.ioBufferDuration) "
+              + "inputs=\(session.currentRoute.inputs.map { $0.portType.rawValue }) "
+              + "outputs=\(session.currentRoute.outputs.map { $0.portType.rawValue })")
+    }
+
     /// Restore policy before activation: a scene or route transition can replace
     /// the category options even though the session object itself survives.
     private static func activate(_ session: AVAudioSession, mic: Bool,
-                                 foregroundResume: Bool = false) throws {
+                                 foregroundResume: Bool = false,
+                                 interruptionEnded: Bool = false) throws {
         sessionLock.lock()
         defer { sessionLock.unlock() }
         // A route or guardian style update is not permission to override a call.
         // Only an ended notification or explicit foreground return can recover.
-        guard !interrupted || foregroundResume else { throw SessionError.interrupted }
+        guard !interrupted || foregroundResume || interruptionEnded else { throw SessionError.interrupted }
         guard !suspended || foregroundResume else { throw SessionError.suspended }
         let otherAudioBefore = session.isOtherAudioPlaying
         try setCategoryForMic(session, mic)
@@ -54,7 +82,12 @@ enum KleptonAudio {
         if session.isNowPlayingCandidate {
             try session.setIsNowPlayingCandidate(false)
         }
-        let preserveOtherRoute = otherAudioBefore && !mic
+        // A call may be temporarily silent/backgrounded at this exact instant.
+        // Its absence from isOtherAudioPlaying is not permission to renegotiate
+        // shared hardware. Playback-only needs no particular device format:
+        // C already measures and resamples it. Capture also preserves an active
+        // caller's preferences when the system reports one.
+        let preserveOtherRoute = !mic || otherAudioBefore
         try configureStereoExperience(session)
         // Let the active call keep its hardware rate, buffer and channel route.
         // C measures the actual output format and resamples the guest itself.
@@ -69,6 +102,7 @@ enum KleptonAudio {
             try session.setPreferredOutputNumberOfChannels(2)
         }
         if foregroundResume { interrupted = false; suspended = false }
+        diagnose("activated")
     }
 
     /// Immersion-style changes may preserve the renderer. Restore mixing without
@@ -131,6 +165,10 @@ enum KleptonAudio {
     /// Configure and activate the session, then tell the C side what the
     /// hardware rate turned out to be. Safe to call more than once.
     static func start() {
+        guard enabled else {
+            NSLog("[au] KL_AUDIO=0 — no session activation or microphone permission")
+            return
+        }
         sessionLock.lock()
         defer { sessionLock.unlock() }
         guard !started else { return }
@@ -152,20 +190,35 @@ enum KleptonAudio {
         kl_audio_session_ready(session.sampleRate)
 
         observe(AVAudioSession.interruptionNotification) { note in
-            let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
-            let began = AVAudioSession.InterruptionType(rawValue: raw) == .began
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            let began = type == .began
             let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
             sessionLock.lock()
-            interrupted = began
-            interruptionReason = began ? reason : nil
-            sessionLock.unlock()
+            defer { sessionLock.unlock() }
+            let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            // If the system explicitly withholds automatic resumption, retain
+            // the interruption hold until the user returns to the foreground.
+            // Missing options keep the existing scene-transition recovery.
+            if !began, let options,
+               !AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume) {
+                interrupted = true
+                interruptionReason = nil
+                kl_audio_interrupted(1)
+                diagnose("interruption ended without shouldResume; held")
+                return
+            }
+            if began { interrupted = true; interruptionReason = reason }
+            diagnose("interruption type=\(raw) reason=\(String(describing: reason)) options=\(String(describing: options))")
             if !began {
                 // The session is deactivated for us on the way in but NOT
                 // reactivated on the way out — an interruption that ends leaves
                 // an inactive session, and a unit started against one produces
                 // silence with no error. Reactivate before telling C to rebuild.
                 do {
-                    try activate(session, mic: KleptonMic.shared.settings.enabled)
+                    try activate(session, mic: KleptonMic.shared.settings.enabled, interruptionEnded: true)
+                    interrupted = false
+                    interruptionReason = nil
                 } catch {
                     NSLog("[au] interruption recovery failed: \(error)")
                     return
@@ -257,6 +310,7 @@ enum KleptonAudio {
     /// the visionOS prompt appears the moment the user opts in (and never
     /// before). The C capture side is armed separately via kl_audio_mic_set_enabled.
     static func applyMicCategory(_ on: Bool) {
+        guard enabled else { return }
         let session = AVAudioSession.sharedInstance()
         do {
             try activate(session, mic: on)

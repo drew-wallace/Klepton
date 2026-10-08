@@ -113,6 +113,15 @@ int main(void) {
     kl_audio_suspend();
     kl_audio_resume();
     assert(!g_host_suspended);
+    // The complete silent control never attempts an output or capture device,
+    // including when a guest still asks for an opted-in microphone stream.
+    int before_silent_attempts = device_attempts;
+    int before_silent_starts = device_starts;
+    setenv("KL_AUDIO", "0", 1);
+    g_mic_enabled = 1;
+    assert(kl_audio_open(48000, 2, 16) == -1);
+    assert(kl_audio_mic_open(48000, 1) == -1);
+    assert(device_attempts == before_silent_attempts && device_starts == before_silent_starts);
     puts("Audio interruption watchdog tests passed");
     return 0;
 }
