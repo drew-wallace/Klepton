@@ -85,6 +85,7 @@ static int session_run(kl_image *image, void *engine, void *steam_user, void *cl
         const struct timespec interval = {0, 10000000}; nanosleep(&interval, NULL);
     }
     game_shutdown();
+    version_finish();
     logout(user, backend_pipe);
     kl_steam_session_cancel();
     printf("[steam-probe] interactive session LogOff returned\n");

@@ -466,3 +466,45 @@ or email codes, using Valve's pinned encryption/authentication modules. No
 password or code is retained. Reusable credentials keep the existing Keychain
 policy. Fresh physical code approval and outgoing voice need retesting with
 the updated build.
+
+## Game date display
+
+Steam-enabled game builds show **Installed APK** and **Latest on Steam (public)**
+in the scrollable Steam window panel, with dates only. Version names, version
+codes, Steam build IDs and branch descriptions are not shown. APK provenance,
+including its dates, is frozen in the signed app's Info.plist during project
+generation; replacing staged assets does not change it. Explicit publisher
+`releaseDate`/`release_date` and
+`buildDate`/`build_date` manifest metadata (ISO dates/timestamps or Unix seconds)
+take precedence. Otherwise the original APK's macOS Spotlight downloaded date,
+then its quarantine acquisition timestamp, supplies the **Downloaded** fallback.
+Missing date provenance displays `Unknown`. File modification times, ZIP entry
+timestamps, certificate dates and Android compile SDK versions are not used as
+release dates. Date-only publisher values retain their calendar day; timestamps
+display in the headset's local time zone.
+
+After native login and SDK initialization, the existing Steam worker reads
+`ISteamApps::GetNumBetas` and `GetBetaInfo` for the default public branch.
+**Released / updated** shows the public branch's last-update timestamp, rather
+than the game's original store launch date. The branch build ID is used
+internally to validate metadata availability. Dates make no equivalence or
+compatibility claim between the installed APK and the Steam release.
+
+The optional date query requests the public SDK 1.64 `ISteamApps009` interface
+using `SteamInternal_FindOrCreateUserInterface` and its documented vtable slots
+30/31. The pinned backend advertises this interface. If it is unavailable, the
+query falls back to the packaged SDK 1.63 Apps008 flat wrappers, which supply a
+build ID and description without a date. The dated signature is never passed
+through the old flat wrapper. Missing dates show `Not provided by Steam`;
+unsupported APIs, empty metadata and failed queries never substitute the local
+build or block game startup. The UI reads a mutex-protected snapshot, and a
+successful result remains visible after the startup SDK hands off to the game.
+Pending queries retry once per second for up to thirty seconds while that SDK
+is available. Sign-in, checking and unavailable states are explicit. There are
+no game downloads, installations or update compatibility decisions in this path.
+
+Validation covers the public-branch result, delayed metadata, invalid/zero
+results, missing APIs, SDK login gating and preservation across startup handoff,
+plus installed-version/date parsing, download metadata fallback, versioned API
+selection and generated-plist provenance. Live metadata
+display on a physical headset has not yet been verified.
