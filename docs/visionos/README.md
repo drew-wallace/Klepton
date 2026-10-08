@@ -241,7 +241,9 @@ Category changes are skipped when the policy already matches, avoiding route
 notification loops. An OS interruption blocks route/style reactivation and the
 C watchdog's timeout override until an ended notification or successful explicit
 foreground recovery. An ended notification explicitly withholding `shouldResume`
-keeps the interruption hold; a failed permitted recovery does too. The watchdog
+keeps the interruption hold; a failed permitted recovery does too. Failed startup
+also holds native recovery and reports session readiness only after successful
+activation. The watchdog
 still repairs stopped render callbacks when
 there is no active interruption.
 

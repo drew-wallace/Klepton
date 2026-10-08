@@ -12,11 +12,15 @@ private var interruptions: [Int32] = []
 private var sessionManaged = false
 private var nativeSuspended = false
 private var suspends = 0
+private var readinessNotifications = 0
 func kl_audio_set_session_managed(_ managed: Int32) { sessionManaged = managed != 0 }
 func kl_audio_suspend() { nativeSuspended = true; suspends += 1 }
 func kl_audio_resume() { resumes += 1; nativeSuspended = false; checkPolicy() }
 func kl_audio_restart() -> Int32 { restarts += 1; checkPolicy(); return 0 }
-func kl_audio_session_ready(_ rate: Double) { if !nativeSuspended { checkPolicy() } }
+func kl_audio_session_ready(_ rate: Double) {
+    readinessNotifications += 1
+    if !nativeSuspended { checkPolicy() }
+}
 func kl_audio_interrupted(_ began: Int32) {
     interruptions.append(began)
     if began == 0 { checkPolicy() }
@@ -35,6 +39,23 @@ private func checkPolicy() {
 @main struct AudioSessionTests {
     static func main() {
         let s = AVAudioSession.sharedInstance()
+        if CommandLine.arguments.contains("--failed-boot") {
+            s.rejectActivation = true
+            KleptonAudio.start()
+            precondition(s.activations == 0 && readinessNotifications == 0 && interruptions == [1])
+            s.rejectActivation = false
+            KleptonAudio.refreshMixing()
+            KleptonAudio.settingsWindowClosed(immersiveActive: true)
+            NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification,
+                object: s, userInfo: [AVAudioSessionRouteChangeReasonKey: UInt(8)])
+            precondition(s.activations == 0 && restarts == 0 && resumes == 0,
+                         "startup failure must not permit a route/style callback to reclaim audio")
+            KleptonAudio.resume()
+            precondition(s.activations == 1 && resumes == 1)
+            checkPolicy()
+            print("Audio failed-startup hold tests passed")
+            return
+        }
         if CommandLine.arguments.contains("--disabled-audio") {
             KleptonAudio.start()
             KleptonAudio.applyMicCategory(true)
@@ -54,7 +75,7 @@ private func checkPolicy() {
             KleptonAudio.suspend()
             precondition(s.deactivations == 0 && suspends == 0)
             KleptonAudio.start()
-            precondition(s.activations == 0 && nativeSuspended)
+            precondition(s.activations == 0 && nativeSuspended && readinessNotifications == 0)
             KleptonAudio.refreshMixing()
             precondition(s.activations == 0)
             KleptonAudio.resume()

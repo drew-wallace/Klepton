@@ -42,9 +42,51 @@ new memory kill or prove why a current call stops. Device sysdiagnose collection
 failed with CoreDeviceCLISupport.DiagnoseError and yielded an empty partial
 archive. Unified log collection requires root; passwordless sudo was unavailable.
 The Console UI fallback was also inaccessible because the Mac was locked.
-No diagnostic data was sent to Apple. Raw device reports stay in `/tmp`, outside
-Git. Fresh, timestamped call observations and system audio/lifecycle logs remain
+No diagnostic data was sent to Apple. Raw jetsam reports and device diagnostic
+bundles stay in `/tmp`, outside Git. Fresh, timestamped call observations and system audio/lifecycle logs remain
 required before declaring the OS the exclusive cause.
+
+### Recovered historical system trace
+
+A separate October 3–4 reproduction bundle was recovered from
+`/tmp/klepton-discord-immersion-repro.zip`. Its archived native probe source was
+inspected: SwiftUI, RealityKit, and Foundation only, with a single unlit sphere;
+no explicit audio session, output/capture unit, controller, guest, or ARKit
+provider. Its event log confirms mixed/full open and close requests; the archived
+tester report supplies the audibility results. That report also describes a
+separate fully silent Klepton control and an empty Compositor Services control
+that failed before guest/tracking startup. These are historical reported controls,
+not new device measurements or results of the current `KL_AUDIO=0` implementation.
+
+The bundle also contains five raw `audiomxd` events from an older Klepton entry,
+now preserved in [the evidence file](evidence/discord-audio-system-events-2026-10-03.txt):
+
+| October 3 local time (EDT) | Direct system evidence for the same Discord primary session |
+| --- | --- |
+| 21:50:41.278472 | AudioToolboxServerHandleInterruption: `Stop Now` |
+| 21:50:41.278585 | Original status: `interrupted` |
+| 21:50:41.282557 | Updated status: `non-resumable.PlayAndRecord_WithBluetooth` |
+| 21:50:41.282636 | `PlayAndRecord_WithBluetooth/VideoChat`, **Mixable**, going inactive; NowPlayingApp: NO |
+| 21:50:41.832676 | **BackgroundTaskSuspended**, **Background entitlement: YES** |
+
+This directly establishes an audio-session stop/deactivation followed by task
+suspension in that captured run. It supplies a stronger explanation of the cut
+than attenuation alone or a guessed memory kill. The trace already labels the
+caller's session mixable and entitled for background execution; missing mixing
+or a missing background entitlement is not established by these events.
+The archived report places Klepton's open at 21:50:40.327 and compositor audio
+resume at 21:50:41.367, after the caller's deactivation. Those two boundary times
+come from the report; their original full log was not recovered in this pass.
+
+The raw excerpt omits the initiating reason and the OS policy decision. It does
+not prove whether suspension caused the stop or the loss of the active audio
+assertion allowed suspension, nor whether the rule is intentional or a defect.
+It has no outgoing-microphone result. Apple exposes
+[`sceneWasBackgrounded`](https://developer.apple.com/documentation/avfaudio/avaudiosession/interruptionreason)
+as an interruption reason, which is consistent with this sequence; that exact
+reason was not captured here. Do not attribute these system events to the native
+probe's later run. Fresh controls are still needed to confirm a reliable host-side
+workaround or show that all candidate workarounds fail.
 
 ## Avenues audited
 
@@ -54,10 +96,12 @@ required before declaring the OS the exclusive cause.
 | Implicit media session activation | LoadingVideoPlayer is the one native AVPlayer. `isMuted` silences samples but does not disconnect AVPlayer from session activation/recovery. Now disconnected before playback on visionOS 27; excluded from `KL_AUDIO=0` on all supported OS versions. | Relevant only to guests presenting this loading video; cannot explain the prior empty native-app reproduction. |
 | Spatial audio exclusivity | Normal game policy is fixed spatial audio; `KL_AUDIO_SPATIAL=1` leaves system defaults. SDK documentation describes bypassed audio as mixing directly into output, not claiming exclusive hardware. Probe compares default, fixed, and bypassed spatial behavior. | Physical comparison; spatialization can change apparent loudness/location without process suspension. |
 | Now Playing replacement | Klepton already opts out of Now Playing candidacy. Candidacy is separate from category mixing. No MediaPlayer remote-command/Now Playing metadata path was found. | Check other audio hints and actual caller lifecycle, rather than assuming candidacy grants background rights. |
+| System attention ducking | Apple's audio guidance says a non-Now-Playing app's audio can duck when attention moves to another app. This is separate from VPIO ducking and may sound like loss of audio. The recovered failing trace explicitly goes inactive and suspended, so attention attenuation alone cannot account for that run. | Record partial volume reduction separately from silence and verify session activation in the same timed test. |
 | Route/sample-rate renegotiation | C measures device rate and resamples. Previously Swift requested 48 kHz, 10 ms, and stereo if no other audio was reported at that instant. A newly backgrounded or silent call can disappear from that hint. Playback-only now never requests those hardware preferences. Capture preserves them when other audio is reported. | Compare speakers and AirPods; inspect route changes, not only sample rate. |
 | Microphone contention | Mic is opt-in and defaults off, but the toggle is persisted and `KL_MIC` can override it. Playback-only creates no capture unit. `defaultToSpeaker`/Bluetooth HFP options are used only when mic is on. Mixing does not guarantee concurrent capture. | Force `KL_MIC=0` for the baseline and record incoming and outgoing audio separately. |
 | Voice-processing ducking | Native VoiceProcessingIO ducks other audio independently of the session's options, including use as a capture unit. It had default ducking. Now requests minimum ducking with advanced ducking disabled. This API offers no zero-ducking level. | `KL_MIC_RAW=1` chooses plain RemoteIO to isolate voice processing from capture/route contention. Raw capture sacrifices noise suppression and gain. |
 | Reclaiming audio during interruption | Route/style recovery and the C watchdog already defer during interruptions. Ended notifications previously resumed unconditionally, and failed recovery cleared Swift's hold early. Now explicit absence of `shouldResume` retains the hold, and failed permitted recovery retains it. Malformed notifications are ignored. | A real foreground return still deliberately restores the game with mixing. Record actual OS interruption reason/options. |
+| Failed startup activation | Startup previously announced an active/ready session even after activation threw, leaving the native watchdog free to attempt audio I/O. It now reports readiness only after successful setup and holds native recovery after failure. | Covered by a fresh-process failed-startup regression test; this is a separate recovery safeguard, not the cause established by the historical independent repro. |
 | Background/recreated scene | App phase is observed at App scope; closing a window does not by itself background the immersive renderer. Home, renderer pause/invalidation, and Quit stop output/capture before deactivating. `notifyOthersOnDeactivation` applies only to releasing our session. | Compare closing settings, Digital Crown/Home, leaving immersion, and reopening. The known window-close recovery is retained. |
 | Mixed/full/progressive | System guardian normally uses full; custom guardians and passthrough warnings use mixed. Both are Full Space. Progressive still backgrounds other apps and needs custom Metal portal/stencil rendering to work correctly in Klepton. | The RealityKit probe supports all three without altering guardian safety or the production renderer. |
 | Shared Space and system Environments | A normal or volumetric window avoids app Full Space. Apple's system Environments are another useful control, distinct from opening an app ImmersiveSpace. | Compare a call while only a volume is open, and while turning up a system Environment. A shared-space stereo presentation would be a rendering feature, not a category flag. |
@@ -75,6 +119,8 @@ The new AVPlayer disconnect API explicitly avoids session activation and route
 reconfiguration: [AVPlayer system audio](https://developer.apple.com/documentation/avfoundation/avplayer/setdisconnectedfromsystemaudio(_:completionhandler:)).
 Interruption policy: [Handling interruptions](https://developer.apple.com/documentation/avfaudio/handling-audio-interruptions).
 Memory evidence: [Jetsam reports](https://developer.apple.com/documentation/xcode/identifying-high-memory-use-with-jetsam-event-reports).
+Attention-dependent audio behavior:
+[Playing audio](https://developer.apple.com/design/human-interface-guidelines/playing-audio).
 
 ## Remaining controlled device tests
 
@@ -129,7 +175,8 @@ through repeated entry/exit and Home/Resume on the physical headset.
 
 - `python3 tests/test_visionos_audio.py`: real C watchdog/interruption and device
   gates, Swift policy recovery/failure, explicit denied resumption, malformed
-  notifications, silent-session variants, and route-preference preservation.
+  notifications, silent-session variants, route-preference preservation, and
+  failed-startup holds without falsely announcing native session readiness.
 - `python3 tests/test_visionos_session.py`: frame-clock suspend/resume behavior.
 - `make swiftcheck`: all production Swift against the visionOS SDK/C bridge.
 - Native C audio syntax check against the visionOS SDK, deployment target 26.

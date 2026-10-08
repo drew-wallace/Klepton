@@ -32,6 +32,8 @@ def main():
                        env={**os.environ, "DYLD_LIBRARY_PATH": temp})
         subprocess.run([str(binary), "--suspended-boot"], check=True, timeout=10,
                        env={**os.environ, "DYLD_LIBRARY_PATH": temp})
+        subprocess.run([str(binary), "--failed-boot"], check=True, timeout=10,
+                       env={**os.environ, "DYLD_LIBRARY_PATH": temp})
         for disabled in ["0", "off", "false", "no", "n", ""]:
             subprocess.run([str(binary), "--disabled-audio"], check=True, timeout=10,
                            env={**os.environ, "DYLD_LIBRARY_PATH": temp, "KL_AUDIO": disabled})

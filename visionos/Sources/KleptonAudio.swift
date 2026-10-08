@@ -180,14 +180,22 @@ enum KleptonAudio {
         let session = AVAudioSession.sharedInstance()
         do {
             try activate(session, mic: KleptonMic.shared.settings.enabled)
+            NSLog("[au] session active: \(session.sampleRate) Hz, "
+                  + "\(session.outputNumberOfChannels) ch out, "
+                  + "IO buffer \(String(format: "%.1f", session.ioBufferDuration * 1000)) ms")
+            kl_audio_session_ready(session.sampleRate)
         } catch {
             NSLog("[au] AVAudioSession setup failed: \(error) — expect silence")
+            // A failed activation is not a live session. Hold the native unit
+            // and its watchdog until a permitted interruption end or explicit
+            // foreground resume succeeds, just as with a failed later recovery.
+            // Home already owns a separate hold if startup was backgrounded.
+            if !suspended {
+                interrupted = true
+                interruptionReason = nil
+                kl_audio_interrupted(1)
+            }
         }
-
-        NSLog("[au] session active: \(session.sampleRate) Hz, "
-              + "\(session.outputNumberOfChannels) ch out, "
-              + "IO buffer \(String(format: "%.1f", session.ioBufferDuration * 1000)) ms")
-        kl_audio_session_ready(session.sampleRate)
 
         observe(AVAudioSession.interruptionNotification) { note in
             guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,

@@ -1,0 +1,11 @@
+# Historical capture recovered from /tmp/klepton-discord-immersion-repro.zip
+# Member: Evidence/prior-klepton-system-events.txt
+# Date comes from the bundle's REPORT.md; timestamps below are the raw capture.
+# This is the older Klepton run, not the separate RealityKit probe run.
+# It does not include the triggering interruption reason or call microphone result.
+
+default	21:50:41.278472-0400	audiomxd	   AudioToolboxServers.mm:1175  ================= <- AudioToolboxServerHandleInterruption Stop Now process 'sid:0x78b6b, Discord(3953), 'prim'', fading 1, async 0 =================
+default	21:50:41.278585-0400	audiomxd	-CMSessionMgr- MXCoreSessionEndInterruption_WithSecTaskAndStatus: client 'sid:0x78b6b, Discord(3953), 'prim'' [0xb000077da3b1c00]: original status = interrupted
+default	21:50:41.282557-0400	audiomxd	-CMSessionMgr- MXCoreSessionEndInterruption_WithSecTaskAndStatus: client 'sid:0x78b6b, Discord(3953), 'prim'' [0xb000077da3b1c00]: updated status = non-resumable.PlayAndRecord_WithBluetooth
+default	21:50:41.282636-0400	audiomxd	-CMSessionMgr- cmsSetIsActive:5700 'sid:0x78b6b, Discord(3953), 'prim'' with [PlayAndRecord_WithBluetooth/VideoChat] [Mixable] [System Music] siriEndpointID: (null) going inactive NowPlayingApp:NO IsSharedAVAudioSessionInstance:YES
+default	21:50:41.832676-0400	audiomxd	-CMSessionMgr- CMSessionMgrHandleApplicationStateChange:18436 Client com.hammerandchisel.discord with session sid:0x78b6b, Discord(3953), 'prim' [0xb000077da3b1c00] with pid '3953' is now BackgroundTaskSuspended. Background entitlement: YES ActiveLongFormVideoSession: NO IsLongFormVideoApp NO
