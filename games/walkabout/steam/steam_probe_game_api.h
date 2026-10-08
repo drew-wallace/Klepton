@@ -2,6 +2,7 @@
 #ifndef KL_STEAM_PROBE_GAME_API_H
 #define KL_STEAM_PROBE_GAME_API_H
 #include "../../../steam/tools/steam_probe_ticket_gate.h"
+#include "../../../steam/tools/steam_probe_versions.h"
 static pthread_mutex_t game_status_lock = PTHREAD_MUTEX_INITIALIZER;
 static int game_status, game_result, game_retry_requested, game_retry_allowed;
 static void game_publish(int stage, int result) {
@@ -43,6 +44,10 @@ static struct {
     int (*dlc_count)(void *);
     _Bool (*dlc_data)(void *, int, uint32_t *, _Bool *, char *, int);
     _Bool (*dlc_installed)(void *, uint32_t);
+    probe_num_betas_fn num_betas;
+    probe_beta_info_fn beta_info;
+    probe_find_user_interface_fn find_user_interface;
+    probe_release_api release_api;
     _Bool (*set_recipient)(void *, const char *);
     uint32_t (*get_app_id)(void *);
     uint32_t (*session_ticket)(void *, void *, int, uint32_t *, const void *);
@@ -76,6 +81,7 @@ static int game_initialize(void) {
     uint32_t app_id = game_api.get_app_id(game_api.utils);
     printf("[steam-probe] Walkabout SDK interfaces present; app_id=%u pipe=%d user=%d\n", app_id, game_api.pipe, game_api.user);
     if (app_id != 1408230) { game_publish(3, 0); game_api.failed = 1; return 0; }
+    game_api.release_api = version_release_api(game_api.find_user_interface, game_api.user);
     game_api.tickets.user = game_api.user;
     game_api.manual_init();
     game_publish(4, 0); // SDK initialized; login is independently required.
@@ -106,6 +112,10 @@ static void game_prepare(kl_image *backend_image) {
     GAME_SYM(manual_frame, "SteamAPI_ManualDispatch_RunFrame"); GAME_SYM(manual_next, "SteamAPI_ManualDispatch_GetNextCallback");
     GAME_SYM(manual_free, "SteamAPI_ManualDispatch_FreeLastCallback");
 #undef GAME_SYM
+    // Optional read-only metadata must never make login or game startup fail.
+    game_api.num_betas = (void *)kl_sym(game_api.image, "SteamAPI_ISteamApps_GetNumBetas");
+    game_api.beta_info = (void *)kl_sym(game_api.image, "SteamAPI_ISteamApps_GetBetaInfo");
+    game_api.find_user_interface = (void *)kl_sym(game_api.image, "SteamInternal_FindOrCreateUserInterface");
     printf("[steam-probe] Walkabout genuine SDK loaded; requesting real initialization\n");
     game_publish(1, 0); game_initialize();
 }
@@ -185,6 +195,13 @@ static void game_advance(int native_logged_on) {
     if (native_logged_on && !game_api.logged_on(game_api.steam_user)) {
         if (session_now() >= game_api.init_retry_deadline) { game_allow_retry(1); game_publish(8, 3); }
         return;
+    }
+    if (native_logged_on && game_api.logged_on(game_api.steam_user)) {
+        if (game_api.release_api.apps)
+            version_check_release(game_api.release_api.apps, game_api.release_api.count,
+                                  NULL, game_api.release_api.info, session_now());
+        else
+            version_check(game_api.apps, game_api.num_betas, game_api.beta_info, session_now());
     }
     if (native_logged_on && game_api.logged_on(game_api.steam_user) && !game_api.reported &&
         session_now() >= game_api.ticket_request_retry_at) {
@@ -278,6 +295,7 @@ static int game_release_for_host(void) {
     // Release all startup ticket/callback ownership before Unity starts. The
     // backend remains alive; the game owns its subsequent original SDK pipe.
     game_allow_retry(0); game_shutdown(); game_api.enabled = 0;
+    version_finish();
     game_publish(9, 1);
     printf("[steam-probe] local backend ready for game; startup SDK released\n");
     return 1;

@@ -42,12 +42,25 @@ KLT = targets_mod.resolve(os.environ.get("KLEPTON_TARGET") or targets_mod.DEFAUL
 NAME = KLT["product"]
 BUNDLE_ID = os.environ.get("KLEPTON_BUNDLE_ID", KLT["bundle"])
 STEAM_LOCAL = os.environ.get("KLEPTON_STEAM_LOCAL", "0") == "1"
+GAME_INFO_PLIST = "Info.plist"
 if STEAM_LOCAL:
     if not KLT.get('steam_local', False):
         raise ValueError('KLEPTON_STEAM_LOCAL requires a target with an audited Steam profile')
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../steam/visionos"))
     import mksteam
     mksteam.verify_staged()
+    import plistlib
+    from game_version import installed_version
+    # Freeze the APK's version with its translated executable. Documents data
+    # can be replaced independently and must not determine the installed version.
+    _info = plistlib.loads(pathlib.Path(HERE, "Info.plist").read_bytes())
+    _root = pathlib.Path(HERE).parent
+    _info.update(installed_version(_root / KLT['tree'],
+                                  _root / KLT['apk'] if KLT.get('apk') else None))
+    GAME_INFO_PLIST = f"build/GameInfo-{KLT['name']}.plist"
+    _info_path = pathlib.Path(HERE, GAME_INFO_PLIST)
+    _info_path.parent.mkdir(parents=True, exist_ok=True)
+    _info_path.write_bytes(plistlib.dumps(_info))
 
 # Keep Increased Memory Limit on: the current Personal Team can provision it.
 # A 2026-09-28 device build confirmed that the same team refuses Extended
@@ -277,7 +290,7 @@ COMMON = f"""
 				DEVELOPMENT_TEAM = "{TEAM}";
 				ENABLE_PREVIEWS = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-{ASSETCATALOG_SETTING}				INFOPLIST_FILE = Info.plist;
+{ASSETCATALOG_SETTING}				INFOPLIST_FILE = "{GAME_INFO_PLIST}";
 				// One entry per runtime source directory: a runtime header is
 				// included by BARE NAME everywhere, including from
 				// Klepton-Bridging-Header.h, so each directory holding one has

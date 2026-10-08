@@ -11,6 +11,12 @@ func steamTicketStatus(_ result: UnsafeMutablePointer<Int32>) -> Int32
 func steamTicketRetry() -> Int32
 @_silgen_name("kl_steam_session_cancel")
 func steamSessionCancel()
+#if KL_STEAM_GAME_HOST
+@_silgen_name("kl_steam_game_version_status")
+func steamGameVersionStatus(_ latestBuild: UnsafeMutablePointer<UInt32>) -> Int32
+@_silgen_name("kl_steam_game_release_details")
+func steamGameReleaseDetails(_ updated: UnsafeMutablePointer<UInt32>, _ description: UnsafeMutablePointer<CChar>?, _ capacity: UInt32)
+#endif
 
 // Only refresh token + account name are reusable. Passwords, Guard codes,
 // challenge URLs and access tokens are never persisted by this controller.
@@ -39,6 +45,38 @@ private enum SteamLoginKeychain {
     static func delete() { SecItemDelete(query as CFDictionary) }
 }
 @MainActor final class SteamLoginModel: ObservableObject {
+#if KL_STEAM_GAME_HOST
+    @Published var latestGameReleaseDate = "Sign in to check"
+    private func installedMetadata(_ key: String) -> String {
+        Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "Unknown"
+    }
+    var installedGameDates: [(label: String, value: String)] {
+        var dates: [(label: String, value: String)] = []
+        for (key, label) in [("Release", "Released"), ("Build", "Built")] {
+            if let date = Self.displayMetadataDate(installedMetadata("KleptonGame\(key)Date")) {
+                dates.append((label, date))
+            }
+        }
+        if dates.isEmpty {
+            let date = Self.displayMetadataDate(installedMetadata("KleptonGameDownloadDate"))
+            dates.append(("Downloaded", date ?? "Unknown"))
+        }
+        return dates
+    }
+    private static func displayDate(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
+    }
+    private static func displayMetadataDate(_ value: String) -> String? {
+        if value.count == 10 {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.dateFormat = "yyyy-MM-dd"
+            return formatter.date(from: value)?.formatted(date: .abbreviated, time: .omitted)
+        }
+        return ISO8601DateFormatter().date(from: value).map(displayDate)
+    }
+#endif
     @Published var ticketStatus = ""
     @Published var codeLogin = false
     @Published var accountName = ""
@@ -118,6 +156,9 @@ private enum SteamLoginKeychain {
     }
     func refresh() {
 #if KL_STEAM_GAME_HOST
+        defer { refreshGameDates() }
+#endif
+#if KL_STEAM_GAME_HOST
         if !automaticStarted, nativeState == 1 {
             if savedAvailable { automaticStarted = true; useSaved() }
             else if modulesReady, !codeLogin { automaticStarted = true; startQR() }
@@ -169,6 +210,26 @@ private enum SteamLoginKeychain {
             }
         }
     }
+#if KL_STEAM_GAME_HOST
+    private func refreshGameDates() {
+        var build: UInt32 = 0
+        let versionState = steamGameVersionStatus(&build)
+        if nativeState == 3 {
+            switch versionState {
+            case 2 where build != 0:
+                var updated: UInt32 = 0
+                steamGameReleaseDetails(&updated, nil, 0)
+                latestGameReleaseDate = updated == 0 ? "Not provided by Steam" :
+                    Self.displayDate(Date(timeIntervalSince1970: TimeInterval(updated)))
+            case 3: latestGameReleaseDate = "Unavailable"
+            case 0 where [3, 8].contains(ticketStage): latestGameReleaseDate = "Unavailable"
+            default: latestGameReleaseDate = "Checking…"
+            }
+        } else {
+            latestGameReleaseDate = [4, 5].contains(nativeState) ? "Unavailable — Steam disconnected" : "Sign in to check"
+        }
+    }
+#endif
     func stop(logout: Bool = false) {
         if logout { SteamLoginKeychain.delete(); savedAvailable = false }
         if stopped { return }; stopped = true
@@ -273,8 +334,25 @@ struct SteamLoginProbeView: View {
     @StateObject private var model = SteamLoginModel()
 #endif
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 16) {
             Text("Standalone Steam login").font(.title)
+#if KL_STEAM_GAME_HOST
+            GroupBox("Installed APK") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.installedGameDates, id: \.label) { date in
+                        LabeledContent(date.label, value: date.value)
+                    }
+                }
+                .font(.callout)
+                .textSelection(.enabled)
+            }
+            GroupBox("Latest on Steam (public)") {
+                LabeledContent("Released / updated", value: model.latestGameReleaseDate)
+                .font(.callout)
+                .textSelection(.enabled)
+            }
+#endif
             Text(model.status)
             if !model.ticketStatus.isEmpty { Text(model.ticketStatus).font(.callout) }
             if model.nativeState == 1 {
@@ -316,7 +394,8 @@ struct SteamLoginProbeView: View {
             }
             Text("Experimental client. Steam login, ownership, signed tickets and Walkabout authentication require verification.").font(.caption)
             SteamLoginWebView(model: model).frame(width: 1, height: 1).opacity(0).accessibilityHidden(true)
-        }.padding(32).frame(width: 650).task {
+        }.padding(32)
+        }.frame(width: 650).task {
 #if KL_STEAM_GAME_HOST
             SteamHostLifecycle.start()
             while !Task.isCancelled {

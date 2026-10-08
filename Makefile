@@ -210,7 +210,11 @@ build/t_steam_callbacks: steam/tests/t_steam_callbacks.c steam/tools/steam_probe
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_callbacks.c
 
-build/t_steam_init_retry: games/walkabout/tests/t_steam_init_retry.c games/walkabout/steam/steam_probe_game_api.h steam/tools/steam_probe_callbacks.h steam/tools/steam_probe_ticket_gate.h
+build/t_steam_versions: steam/tests/t_steam_versions.c steam/tools/steam_probe_versions.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_versions.c -lpthread
+
+build/t_steam_init_retry: games/walkabout/tests/t_steam_init_retry.c games/walkabout/steam/steam_probe_game_api.h steam/tools/steam_probe_callbacks.h steam/tools/steam_probe_ticket_gate.h steam/tools/steam_probe_versions.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ games/walkabout/tests/t_steam_init_retry.c -lpthread
 
@@ -238,12 +242,13 @@ build/t_jni_refcache: tests/t_jni_refcache.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_jni_refcache.c $(RUNTIME) $(LDLIBS)
 
-steamcheck: assetcheck build/t_jni_refcache build/t_jump_mask build/t_signal_wait build/t_mprobe_gate build/t_steam_init_retry build/t_fadvise build/t_steam_callbacks build/t_steam_ticket_gate build/t_steam_mailbox build/t_steam build/t_eventfd build/t_tls_classifier build/t_steam_ipc build/t_dladdr
+steamcheck: assetcheck build/t_jni_refcache build/t_jump_mask build/t_signal_wait build/t_mprobe_gate build/t_steam_init_retry build/t_steam_versions build/t_fadvise build/t_steam_callbacks build/t_steam_ticket_gate build/t_steam_mailbox build/t_steam build/t_eventfd build/t_tls_classifier build/t_steam_ipc build/t_dladdr
 	./build/t_jni_refcache
 	./build/t_jump_mask
 	./build/t_signal_wait
 	./build/t_mprobe_gate
 	./build/t_steam_init_retry
+	./build/t_steam_versions
 	./build/t_fadvise
 	./build/t_steam_callbacks
 	./build/t_steam_ticket_gate

@@ -24,6 +24,27 @@ static int sdk_logged_on, session_requests, web_requests;
 static int shutdowns, cancellations;
 static uint32_t session_handle, web_handle;
 static int owns = 1;
+static int version_queries;
+static int num_betas(void *p, int *available, int *private_count) {
+    version_queries++; return 1;
+}
+static _Bool beta_info(void *p, int index, uint32_t *flags, uint32_t *build,
+                       char *name, int name_size, char *description, int description_size) {
+    assert(index == 0); *flags = 0; *build = 123456;
+    snprintf(name, name_size, "public"); description[0] = 0; return 1;
+}
+static _Bool beta_info_dated(void *p, int index, uint32_t *flags, uint32_t *build,
+                             char *name, int name_size, char *description, int description_size,
+                             uint32_t *updated) {
+    *updated = 1780000000;
+    return beta_info(p, index, flags, build, name, name_size, description, description_size);
+}
+static void *apps_table[33];
+static void **apps_object = apps_table;
+static void *find_user_interface(int32_t user, const char *version) {
+    assert(user == 1 && !strcmp(version, "STEAMAPPS_INTERFACE_VERSION009"));
+    return &apps_object;
+}
 static int init(char *error) {
     calls++;
     return success_after && calls >= success_after ? 0 : response;
@@ -48,6 +69,7 @@ static void cancel(void *p, uint32_t handle) { assert(handle != 0); cancellation
 static void frame(int32_t pipe) { assert(pipe == 1); }
 static _Bool callback(int32_t pipe, probe_callback *p) { return 0; }
 static void reset(void) {
+    version_publish(0, 0); version_next_check = version_deadline = 0; version_queries = 0;
     memset(&game_api, 0, sizeof game_api);
     game_retry_requested = game_retry_allowed = game_status = game_result = 0;
     session_handle = web_handle = 0; owns = 1;
@@ -137,5 +159,32 @@ int main(void) {
     assert(!game_api.requested && !game_api.initialized && !game_api.tickets.session_size);
     assert(!game_release_for_host() && shutdowns == 1);
     game_advance(1); assert(!calls); // startup code cannot consume game callbacks
+    // Version lookup waits for SDK login, runs even while tickets are delayed,
+    // and remains available after startup releases the SDK to the game.
+    reset(); success_after = 1;
+    game_api.num_betas = num_betas; game_api.beta_info = beta_info;
+    game_advance(1); assert(version_queries == 0);
+    sdk_logged_on = 1; game_advance(1); assert(version_queries == 1);
+    uint32_t latest = 0;
+    assert(kl_steam_game_version_status(&latest) == 2 && latest == 123456);
+    session_handle = 11; web_handle = 12; clock_now = 5; game_advance(1);
+    session.handle = 11; web.handle = 12;
+    assert(probe_ticket_callback(&game_api.tickets,1,163,&session,sizeof session)==1);
+    assert(probe_ticket_callback(&game_api.tickets,1,168,&web,sizeof web)==1);
+    game_advance(1); assert(game_release_for_host());
+    assert(kl_steam_game_version_status(&latest) == 2 && latest == 123456);
+    game_advance(1); assert(version_queries == 1);
+    // Resolve Apps009 after initialization and use its dated method instead
+    // of the packaged Apps008 wrapper, without changing the game's SDK.
+    reset(); success_after = 1;
+    apps_table[30] = (void *)num_betas; apps_table[31] = (void *)beta_info_dated;
+    game_api.find_user_interface = find_user_interface;
+    game_advance(1); assert(version_queries == 0);
+    assert(game_api.release_api.apps == &apps_object);
+    sdk_logged_on = 1; game_advance(1); assert(version_queries == 1);
+    uint32_t updated = 0;
+    assert(kl_steam_game_version_status(&latest) == 2 && latest == 123456);
+    kl_steam_game_release_details(&updated, NULL, 0);
+    assert(updated == 1780000000);
     puts("Steam delayed initialization, retry bounds, version failure and disconnect checks passed");
 }
