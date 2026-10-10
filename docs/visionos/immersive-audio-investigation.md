@@ -12,11 +12,26 @@ was inaudible in every combination. This includes mixed, progressive, and full
 immersion with the untouched-session, ambient/mixing, playback/default spatial,
 playback/fixed spatial, playback/bypassed spatial, and release-after-entry
 policies. None of these policies is a confirmed workaround. This is a fresh
-user-reported physical result, not a captured system trace. Shared Space volume
-behavior, outgoing microphone continuity, recovery after dismissal, route,
-geometry setting, and fresh-process isolation between policies have not yet
-been supplied. The headset version was verified as 27.0.1 on October 8; the
+user-reported physical result, not a captured system trace. In a follow-up, the
+tester confirmed that the Shared Space volume alone works, neither party can
+hear the other while immersed, and the route is the headset speakers. Leaving
+immersion restores audio most of the time; leaving and rejoining the call
+restores it when dismissal does not. The tester suspects rapid entry/exit in
+the inconsistent cases, but timing has not been measured. Geometry setting
+and fresh-process isolation between policies remain unconfirmed. The headset
+version was verified as 27.0.1 on October 8; the
 tester did not report an OS version change on October 9.
+
+This now isolates the failure to the app's Full Space transition rather than
+opening ordinary spatial content in Shared Space. Loss of voice in both
+directions is inconsistent with a purely local playback-volume explanation.
+Use of built-in speakers excludes Bluetooth routing as a necessary trigger.
+Automatic recovery on most dismissals supports a reversible session/lifecycle
+interruption over a process kill, although only a timed process/termination log
+can exclude a kill in a particular run. Rejoining restoring audio is consistent
+with reacquiring the call's audio session; it does not by itself establish
+whether networking remained active or why recovery sometimes failed. Do not
+turn the tester's rapid-entry/exit hypothesis into an asserted race condition.
 
 The untouched-session probe runs no game, compositor, output/capture unit,
 player, or ARKit provider. Consequently, Klepton's own session exclusivity,
@@ -116,15 +131,15 @@ workaround or show that all candidate workarounds fail.
 | Implicit media session activation | LoadingVideoPlayer is the one native AVPlayer. `isMuted` silences samples but does not disconnect AVPlayer from session activation/recovery. Now disconnected before playback on visionOS 27; excluded from `KL_AUDIO=0` on all supported OS versions. | Relevant only to guests presenting this loading video; cannot explain the prior empty native-app reproduction. |
 | Spatial audio exclusivity | Normal game policy is fixed spatial audio; `KL_AUDIO_SPATIAL=1` leaves system defaults. SDK documentation describes bypassed audio as mixing directly into output, not claiming exclusive hardware. Probe compares default, fixed, and bypassed spatial behavior. | October 9: all tested spatial policies failed to preserve received call audio; no spatial-policy workaround found. |
 | Now Playing replacement | Klepton already opts out of Now Playing candidacy. Candidacy is separate from category mixing. No MediaPlayer remote-command/Now Playing metadata path was found. | Check other audio hints and actual caller lifecycle, rather than assuming candidacy grants background rights. |
-| System attention ducking | Apple's audio guidance says a non-Now-Playing app's audio can duck when attention moves to another app. This is separate from VPIO ducking and may sound like loss of audio. The recovered failing trace explicitly goes inactive and suspended, so attention attenuation alone cannot account for that run. | Record partial volume reduction separately from silence and verify session activation in the same timed test. |
-| Route/sample-rate renegotiation | C measures device rate and resamples. Previously Swift requested 48 kHz, 10 ms, and stereo if no other audio was reported at that instant. A newly backgrounded or silent call can disappear from that hint. Playback-only now never requests those hardware preferences. Capture preserves them when other audio is reported. | Compare speakers and AirPods; inspect route changes, not only sample rate. |
+| System attention ducking | Apple's audio guidance says a non-Now-Playing app's audio can duck when attention moves to another app. This is separate from VPIO ducking and may sound like loss of audio. The recovered failing trace explicitly goes inactive and suspended, so attention attenuation alone cannot account for that run. | October 9: outgoing voice also fails, so a purely local playback-volume explanation cannot explain the full result. |
+| Route/sample-rate renegotiation | C measures device rate and resamples. Previously Swift requested 48 kHz, 10 ms, and stereo if no other audio was reported at that instant. A newly backgrounded or silent call can disappear from that hint. Playback-only now never requests those hardware preferences. Capture preserves them when other audio is reported. | October 9: failure on headset speakers excludes Bluetooth as a necessary trigger. System route changes still require timed logs. |
 | Microphone contention | Mic is opt-in and defaults off, but the toggle is persisted and `KL_MIC` can override it. Playback-only creates no capture unit. `defaultToSpeaker`/Bluetooth HFP options are used only when mic is on. Mixing does not guarantee concurrent capture. | Force `KL_MIC=0` for the baseline and record incoming and outgoing audio separately. |
 | Voice-processing ducking | Native VoiceProcessingIO ducks other audio independently of the session's options, including use as a capture unit. It had default ducking. Now requests minimum ducking with advanced ducking disabled. This API offers no zero-ducking level. | `KL_MIC_RAW=1` chooses plain RemoteIO to isolate voice processing from capture/route contention. Raw capture sacrifices noise suppression and gain. |
 | Reclaiming audio during interruption | Route/style recovery and the C watchdog already defer during interruptions. Ended notifications previously resumed unconditionally, and failed recovery cleared Swift's hold early. Now explicit absence of `shouldResume` retains the hold, and failed permitted recovery retains it. Malformed notifications are ignored. | A real foreground return still deliberately restores the game with mixing. Record actual OS interruption reason/options. |
 | Failed startup activation | Startup previously announced an active/ready session even after activation threw, leaving the native watchdog free to attempt audio I/O. It now reports readiness only after successful setup and holds native recovery after failure. | Covered by a fresh-process failed-startup regression test; this is a separate recovery safeguard, not the cause established by the historical independent repro. |
 | Background/recreated scene | App phase is observed at App scope; closing a window does not by itself background the immersive renderer. Home, renderer pause/invalidation, and Quit stop output/capture before deactivating. `notifyOthersOnDeactivation` applies only to releasing our session. | Compare closing settings, Digital Crown/Home, leaving immersion, and reopening. The known window-close recovery is retained. |
 | Mixed/full/progressive | System guardian normally uses full; custom guardians and passthrough warnings use mixed. Both are Full Space. Progressive still backgrounds other apps and needs custom Metal portal/stencil rendering to work correctly in Klepton. | October 9: all three failed in the RealityKit probe; changing guardian immersion style is unsupported as a cure. |
-| Shared Space and system Environments | A normal or volumetric window avoids app Full Space. Apple's system Environments are another useful control, distinct from opening an app ImmersiveSpace. | Compare a call while only a volume is open, and while turning up a system Environment. A shared-space stereo presentation would be a rendering feature, not a category flag. |
+| Shared Space and system Environments | A normal or volumetric window avoids app Full Space. Apple's system Environments are another useful control, distinct from opening an app ImmersiveSpace. | October 9: Shared Space volume works. System Environment comparison remains unmeasured. A shared-space stereo presentation would be a rendering feature, not a category flag. |
 | Memory pressure/jetsam | Game eye textures, drawables, guest memory, and increased-memory-limit capability can increase overall pressure. Existing `[hb]` logs report our footprint/headroom and pressure notifications. The prior lightweight native repro weakens game allocation as a necessary cause; current historical jetsam reports do not identify Discord as a victim. | A new jetsam victim/reason at the failure timestamp is needed. Our headroom alone cannot measure another process's survival. |
 | CPU/GPU/thermal starvation | Guest and feeder threads use high priorities; graphics can consume substantial GPU resources. No other-process priority or termination manipulation was found. Empty native immersion avoids this Klepton workload. | Test empty versus one sphere versus a game, and lower actual eye/render allocations if failure requires game load. Lowering running quality alone need not shrink allocated drawables. |
 | Network/background scheduling | Steam Link adds network traffic; ordinary games need not. No shared VPN, proxy, route reconfiguration, or native guest audio-focus control was found. Android AudioManager setters/Bluetooth SCO shims are no-ops, not native system calls. | Remote participant connection state distinguishes lost packets/capture from local output mute; empty immersion removes game streaming bandwidth. |
@@ -158,16 +173,17 @@ Use one active call, with another person speaking continuously and checking the
 outgoing microphone. Note the exact time, route, style, and whether the call stays
 connected. Avoid recording/mirroring for the first pass.
 
-1. Untouched session: mixed, progressive, and full are now reported failing.
-   Empty versus sphere and Shared Space volume results remain unconfirmed.
-   If the call stops only in ImmersiveSpace, the OS scene/background transition is
-   isolated without Klepton audio, capture, tracking, guest, or compositor.
+1. Untouched session: mixed, progressive, and full are now reported failing;
+   the Shared Space volume works. The OS scene/background transition is isolated
+   without Klepton audio, capture, tracking, guest, or compositor. Empty versus
+   sphere is still unconfirmed.
 2. Repeat with one sphere. A difference indicates scene/content workload rather
    than the mere open request; it does not yet prove jetsam.
 3. Completed matrix, reported failing: ambient/mixing, playback/default spatial,
    playback/fixed spatial, playback/bypassed spatial, and release-after-entry
-   controls. Recovery after leaving the space or Home remains unconfirmed;
-   repeating the full policy matrix is not the next priority.
+   controls. Dismissal usually restores audio; rejoining the call restores it
+   when dismissal does not. Home behavior and the role of transition timing
+   remain unconfirmed. Repeating the full policy matrix is not the next priority.
 4. Cold-launch the updated game with `KL_AUDIO=0 KL_MIC=0
    KL_AUDIO_DIAGNOSTICS=1`. This now disables Swift session activation/permission,
    C output/capture, and loading video. Compare `KL_IMMERSIVE=0` only for guests
@@ -211,16 +227,28 @@ event file are not available. A new device-container copy attempt on October 9
 failed with CoreDeviceError 4000 / connection reset by peer. This transport
 failure is unrelated evidence and must not be treated as the call's cause.
 
-Do not ask the tester to repeat the same entire matrix. The useful next controls
-are the untouched session with **only a Shared Space volume**, microphone
-continuity and call connection at the remote end, and recovery when leaving
-immersion. If Shared Space succeeds, a timed untouched-session entry/exit with
-system audio and RunningBoard logs is the priority. It separates loss of audio
-activation/background execution from a route-only loss; a contemporaneous
-jetsam or termination record is required to claim a kill. Speakers versus
-AirPods, a system Environment, and another independent immersive app can then
-separate route and app-Full-Space behavior. These controls remain unmeasured;
-they are not reasons to disregard the completed probe matrix.
+Follow-up observations from the same tester:
+
+| Control or behavior | Reported outcome |
+| --- | --- |
+| Shared Space volume, immersion closed | Call audio works |
+| Incoming voice while immersed | Inaudible |
+| Outgoing voice while immersed | Other participants cannot hear the tester |
+| Route | Headset speakers |
+| Leave immersion | Audio returns most of the time |
+| Leave and rejoin the call after failed recovery | Audio returns |
+| Rapid entry/exit causes failed recovery | Tester hypothesis; unmeasured |
+
+Do not ask the tester to repeat the same entire matrix. A timed untouched-session
+entry/exit with system audio and RunningBoard logs is the priority, especially
+one successful and one failed dismissal recovery. Record the remote connection
+state as well as voice continuity; loss of both directions does not alone prove
+packet delivery stopped. A contemporaneous jetsam or termination record is
+required to claim a kill. A deliberately slow entry/exit can test the timing
+hypothesis. A system Environment and another independent immersive app can
+separate system immersion from app-Full-Space behavior; these controls remain
+unmeasured. AirPods are an optional route comparison, not a prerequisite to
+acknowledging the built-in-speaker reproduction.
 
 ### Ready-to-file Apple reproduction
 
@@ -228,8 +256,8 @@ they are not reasons to disregard the completed probe matrix.
 including with no explicit host audio session.
 
 **Environment:** Physical Apple Vision Pro; visionOS 27.0.1 (24M372) verified
-October 8. Historical Discord version was 347.0 (112799); current version and
-audio route should be recorded with the new diagnostic capture.
+October 8. Route: headset speakers. Historical Discord version was 347.0
+(112799); current version should be recorded with the new diagnostic capture.
 
 **Steps:** Start an audible Discord call. Cold-launch the standalone
 `dev.klepton.immersive-audio-probe` app. Leave audio policy at Untouched and
@@ -241,8 +269,11 @@ volume open. The source and build instructions are in
 
 **Expected:** Opening a silent immersive app does not interrupt an existing
 call's audio. **Actual reported:** Received Discord audio is inaudible across
-all three immersion styles and all six probe audio policies. Outgoing voice,
-Shared Space comparison, recovery, and fresh-process test conditions are pending.
+all three immersion styles and all six probe audio policies. The remote
+participants cannot hear the tester either. A Shared Space volume works.
+Dismissal usually restores audio; leaving and rejoining the call restores it
+when dismissal does not. Exact transition timing, remote connection state,
+geometry, and fresh-process test conditions are pending.
 
 **Supporting evidence:** Attach the minimal probe source, timed probe log and
 device sysdiagnose from the new run. The separately dated
@@ -268,6 +299,7 @@ investigation.
   and full each log `open result=opened` with an untouched session and empty scene.
 - Verified hardware install, passive process checks, and historical jetsam
   inspection. Remote launch/log retrieval failed as the connection disconnected.
-- October 9 tester report: incoming Discord call audio inaudible for all probe
-  immersion/audio-policy combinations. No fresh system trace or microphone,
-  Shared Space, or recovery result has yet been supplied.
+- October 9 tester report: all probe immersion/audio-policy combinations fail;
+  both voice directions stop in immersion on headset speakers. Shared Space
+  volume works. Dismissal usually recovers audio; rejoining the call recovers it
+  otherwise. No fresh system trace or timed recovery comparison is available.
