@@ -509,7 +509,42 @@ static klj_val klj_AVPro_FinaliseCryptor(void *env, void *self, const klj_val *a
     return (klj_val){.j = (uint64_t)moved};
 }
 
+// MovieCapture's supplied setContext stores a weak Activity reference. The
+// host already owns that Activity; codec support is negotiated separately.
+static klj_val klj_capture_context(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){0};
+}
+
+// No Android MediaCodec encoder is exposed by this runtime. The supplied
+// capture helper accepts null when codec discovery has no matching encoder.
+static klj_val klj_capture_no_encoder(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = NULL};
+}
+
+static klj_val klj_capture_no_inputs(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.j = 0};
+}
+
 const klj_binding klj_bind_io[] = {
+    {"com/renderheads/AVPro/MovieCapture/Manager", "GetAudioInputDeviceCount", "()I", klj_capture_no_inputs},
+    {"com/renderheads/AVPro/MovieCapture/Manager", "GetEncoderCodecNameFromType", "(Ljava/lang/String;)Ljava/lang/String;", klj_capture_no_encoder},
+    // The supplied capture helper only stores a weak Context reference here.
+    // Its Context is the same activity already owned by the host.
+    {"com/renderheads/AVPro/MovieCapture/Manager", "setContext", "(Landroid/content/Context;)V", klj_capture_context},
+    {"com/renderheads/AVPro/MovieCapture/Manager", "setContext", "(Lcom/unity3d/player/UnityPlayerActivity;)V", klj_capture_context},
+    // MovieCapture ships the same SHA-256, PBKDF2/SHA-256 and AES helpers.
+    {"com/renderheads/AVPro/MovieCapture/Manager", "SHA256", "([B)[B", klj_AVPro_SHA256},
+    {"com/renderheads/AVPro/MovieCapture/Manager", "KeyDerivationPBKDF",
+     "(Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;ILjava/nio/ByteBuffer;)I", klj_AVPro_KeyDerivationPBKDF},
+    {"com/renderheads/AVPro/MovieCapture/Manager", "CreateCryptor", "(I[B[B)Ljavax/crypto/Cipher;",
+     klj_AVPro_CreateCryptor},
+    {"com/renderheads/AVPro/MovieCapture/Manager", "UpdateCryptor",
+     "(Ljavax/crypto/Cipher;Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;)I", klj_AVPro_UpdateCryptor},
+    {"com/renderheads/AVPro/MovieCapture/Manager", "FinaliseCryptor",
+     "(Ljavax/crypto/Cipher;Ljava/nio/ByteBuffer;)I", klj_AVPro_FinaliseCryptor},
     {"com/renderheads/AVPro/Video/Manager", "SHA256", "([B)[B", klj_AVPro_SHA256},
     {"com/renderheads/AVPro/Video/Manager", "KeyDerivationPBKDF",
      "(Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;ILjava/nio/ByteBuffer;)I", klj_AVPro_KeyDerivationPBKDF},

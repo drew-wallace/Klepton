@@ -16,6 +16,7 @@ KL_TARGET_ROW("4xvr-11026-vrp", "4xvr-11026-vrp", "4xvr-11026-vrp.apk", "4xvr-11
 KL_TARGET_ROW("beatsaber", "beatsaber", "beatsaber.apk", "beatsaber/assets", "beatsaber/lib/arm64-v8a", "libmain", "beatsaber", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("bonelab", "bonelab", "bonelab.apk", "bonelab/assets", "bonelab/lib/arm64-v8a", "libmain", "bonelab", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("cs1", "cs1", "cs1.apk", "cs1/assets", "cs1/lib/arm64-v8a", "libxash", "cs1", "obb", KL_GUEST_SDL2)
+KL_TARGET_ROW("eleven", "eleven", "eleven.apk", "eleven/assets", "eleven/lib/arm64-v8a", "libmain", "eleven", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("hl1", "hl1", "hl1.apk", "hl1/assets", "hl1/lib/arm64-v8a", "libxash", "hl1", "obb", KL_GUEST_GLES3JNI)
 KL_TARGET_ROW("hl2", "hl2", "hl2.apk", "hl2/assets", "hl2/lib/arm64-v8a", "liblauncher", "hl2", "obb", KL_GUEST_SDL2)
 KL_TARGET_ROW("intotheradius", "intotheradius", "intotheradius.apk", "intotheradius/assets", "intotheradius/lib/arm64-v8a", "libUE4", "intotheradius", "Android/obb/com.CMGames.IntoTheRadius", KL_GUEST_UE4)

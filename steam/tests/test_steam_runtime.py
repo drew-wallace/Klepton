@@ -57,7 +57,7 @@ class SteamRuntimeTests(unittest.TestCase):
                 'KLEPTON_TARGET': 'walkabout-57013', 'KLEPTON_STEAM_LOCAL': enabled,
                 'KLEPTON_ENTITLEMENTS': '0', 'KLEPTON_TEAM': 'TESTTEAM00',
             }), patch.dict('sys.modules', {
-                'mksteam': types.SimpleNamespace(verify_staged=lambda: None),
+                'mksteam': types.SimpleNamespace(verify_staged=lambda target: None, profile=lambda target: {'files': [{'path': 'libsteam_api.so'}, {'path': 'libc++_shared.so'}]}),
             }):
                 project_spec = importlib.util.spec_from_file_location('fixture_project', generator)
                 project = importlib.util.module_from_spec(project_spec)

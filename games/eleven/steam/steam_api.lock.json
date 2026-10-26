@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "target": "eleven",
+  "app_id": 488310,
+  "app_id_source": "supplied ovrport/eleven/steam_appid.txt",
+  "display": "Eleven Table Tennis",
+  "files": [
+    {
+      "path": "eleven/lib/arm64-v8a/libsteam_api.so",
+      "size": 524392,
+      "sha256": "ee573a79ad0bf0fa4e6530fa35a4e2911e9f473141a7580b83a3d79fd1679646"
+    }
+  ],
+  "interfaces": [
+    "SteamClient023",
+    "SteamUser023",
+    "SteamApps009",
+    "SteamUtils010"
+  ],
+  "callback_abi": {
+    "packing": 4,
+    "session_ticket": {
+      "id": 163,
+      "size": 8
+    },
+    "web_api_ticket": {
+      "id": 168,
+      "size": 2572
+    }
+  }
+}

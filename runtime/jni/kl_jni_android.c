@@ -1139,9 +1139,9 @@ static klj_val klj_Context_getSystemService(void *env, void *self, const klj_val
     static void *cache[sizeof services / sizeof services[0]];
     for (unsigned i = 0; services[i].svc; i++) {
         if (strcmp(services[i].svc, want)) continue;
-        if (!cache[i]) cache[i] = kl_jni_new_object(services[i].cls);
+        klj_val service = klj_singleton(services[i].cls, &cache[i]);
         KLJ_LOG("getSystemService(\"%s\") -> %s", want, services[i].cls);
-        return (klj_val){.l = cache[i]};
+        return service;
     }
     KLJ_LOG("getSystemService(\"%s\") -> null (unknown service)", want);
     return (klj_val){.l = NULL};
@@ -1530,7 +1530,19 @@ static klj_val klj_HashMap_size(void *env, void *self, const klj_val *a, int n) 
     return (klj_val){.j = m ? (int)m->n : 0};
 }
 
+// Java and native property reads describe the same synthetic Android device.
+static klj_val klj_SystemProperties_get(void *env, void *self, const klj_val *a, int n) {
+    extern int klb_sysprop_get(const char *name, char *value);
+    char value[512] = {0};
+    const char *key = n ? klj_str(a[0].l) : "";
+    klb_sysprop_get(key, value);
+    const char *fallback = n > 1 ? klj_str(a[1].l) : "";
+    return (klj_val){.l = kl_jni_new_string(*value ? value : fallback)};
+}
+
 const klj_binding klj_bind_android[] = {
+    {"android/os/SystemProperties", "get", "(Ljava/lang/String;)Ljava/lang/String;", klj_SystemProperties_get},
+    {"android/os/SystemProperties", "get", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", klj_SystemProperties_get},
     {"java/util/HashMap", "<init>", "()V", klj_HashMap_init},
     {"java/util/HashMap", "put",
      "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", klj_HashMap_put},

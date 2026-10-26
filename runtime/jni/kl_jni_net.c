@@ -15,6 +15,8 @@
 #include <strings.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <net/if.h>
+#include <ifaddrs.h>
 #include <sys/stat.h>
 #include "klepton.h"
 #include "kl_jni.h"
@@ -28,6 +30,33 @@
 #include "kl_va.h"
 #include "kl_cacerts.h"
 #include "kl_jni_int.h"
+
+// Host interface names are looked up honestly. Android's wlan0 is normally
+// absent on Darwin; callers get null and can use their existing fallback.
+static klj_val klj_NetworkInterface_getByName(void *env, void *self, const klj_val *a, int n) {
+    const char *name = n ? klj_str(a[0].l) : NULL;
+    if (!name || !if_nametoindex(name)) return (klj_val){.l = NULL};
+    return (klj_val){.l = klj_own(klj_new_object_data("java/net/NetworkInterface", strdup(name)), free)};
+}
+static klj_val klj_NetworkInterface_getName(void *env, void *self, const klj_val *a, int n) {
+    return (klj_val){.l = kl_jni_new_string(klj_as_object(self)->data)};
+}
+static klj_val klj_NetworkInterface_isUp(void *env, void *self, const klj_val *a, int n) {
+    klj_object *object = klj_as_object(self);
+    if (!object || !object->data) return (klj_val){.j = 0};
+    struct ifaddrs *interfaces = NULL;
+    int up = 0;
+    if (getifaddrs(&interfaces) == 0) {
+        for (struct ifaddrs *it = interfaces; it; it = it->ifa_next)
+            if (!strcmp(it->ifa_name, object->data)) { up = !!(it->ifa_flags & IFF_UP); break; }
+        freeifaddrs(interfaces);
+    }
+    return (klj_val){.j = up};
+}
+static klj_val klj_NetworkInterface_getHardwareAddress(void *env, void *self, const klj_val *a, int n) {
+    // A host interface does not expose an Android device MAC address.
+    return (klj_val){.l = NULL};
+}
 
 // ---- javax.net.ssl ----
 // The guest's HTTPS stack (unitytls, under both UnityWebRequest and Mono's
@@ -461,6 +490,11 @@ static klj_val klj_UnityPlayer_hidePreservedContent(void *env, void *self,
 }
 
 const klj_binding klj_bind_net[] = {
+    {"java/net/NetworkInterface", "getByName", "(Ljava/lang/String;)Ljava/net/NetworkInterface;", klj_NetworkInterface_getByName},
+    {"java/net/NetworkInterface", "isUp", "()Z", klj_NetworkInterface_isUp},
+    {"java/net/NetworkInterface", "getName", "()Ljava/lang/String;", klj_NetworkInterface_getName},
+    {"java/net/NetworkInterface", "getHardwareAddress", "()[B", klj_NetworkInterface_getHardwareAddress},
+
     {"com/vrchat/android/plugin/Info", "setContext", "(Landroid/content/Context;)V", klj_void_noop},
     {"com/vrchat/android/plugin/Info", "init", "()V", klj_void_noop},
     {"android/media/AudioManager", "setStreamMute", "(IZ)V", klj_void_noop},

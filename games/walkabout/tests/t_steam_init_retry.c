@@ -45,6 +45,7 @@ static void *find_user_interface(int32_t user, const char *version) {
     assert(user == 1 && !strcmp(version, "STEAMAPPS_INTERFACE_VERSION009"));
     return &apps_object;
 }
+static uint32_t sdk_app_id = 1408230, ownership_app_id = 1408230;
 static int init(char *error) {
     calls++;
     return success_after && calls >= success_after ? 0 : response;
@@ -52,9 +53,9 @@ static int init(char *error) {
 static int object;
 static void *interface(void) { return &object; }
 static int32_t handle(void) { return 1; }
-static uint32_t app_id(void *p) { return 1408230; }
+static uint32_t app_id(void *p) { return sdk_app_id; }
 static _Bool logged_on(void *p) { return sdk_logged_on; }
-static _Bool subscribed(void *p, uint32_t app) { assert(app == 1408230); return owns; }
+static _Bool subscribed(void *p, uint32_t app) { assert(app == ownership_app_id); return owns; }
 static uint32_t session_ticket(void *p, void *bytes, int capacity, uint32_t *size, const void *recipient) {
     assert(capacity == 1024 && recipient); session_requests++; *size = session_handle ? 3 : 0; if (*size) memcpy(bytes, "abc", 3); return session_handle;
 }
@@ -76,6 +77,7 @@ static void reset(void) {
     clock_now = 0; calls = 0; response = 1; success_after = 0;
     sdk_logged_on = 0; session_requests = web_requests = 0;
     shutdowns = cancellations = 0;
+    game_api.app_id = sdk_app_id = ownership_app_id = 1408230;
     game_api.enabled = 1; game_api.init = init;
     game_api.get_user_interface = interface; game_api.get_apps_interface = interface;
     game_api.get_utils_interface = interface; game_api.get_pipe = handle; game_api.get_user = handle;
@@ -186,5 +188,13 @@ int main(void) {
     assert(kl_steam_game_version_status(&latest) == 2 && latest == 123456);
     kl_steam_game_release_details(&updated, NULL, 0);
     assert(updated == 1780000000);
+    // Eleven's startup must query its own license and reject another app's SDK context.
+    reset(); game_api.app_id = sdk_app_id = ownership_app_id = 488310;
+    success_after = sdk_logged_on = 1; session_handle = 11; web_handle = 12;
+    game_advance(1);
+    assert(game_api.initialized && game_api.requested && session_requests == 1);
+    reset(); game_api.app_id = 488310; success_after = sdk_logged_on = 1;
+    game_advance(1);
+    assert(game_api.failed && !session_requests && game_status == 3);
     puts("Steam delayed initialization, retry bounds, version failure and disconnect checks passed");
 }

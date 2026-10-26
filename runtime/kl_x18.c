@@ -1288,7 +1288,11 @@ int kl_x18_emit_img(void *code, size_t size, uint64_t code_va,
 
         if (out + VEN_MAX_INSN > pool_end) { note_refusal(word); st->refused++; continue; }
 
-        if (in.hazard) { note_refusal(word); st->refused++; continue; }
+        // Eleven's Opus uses virtual x18 for dynamic stack allocation. Keep
+        // the old SP in a scratch register so restoring scratches does not
+        // depend on the newly assigned SP. Restrict this to the observed MOV.
+        int mov_sp_x18 = word == 0x9100025fu;
+        if (in.hazard && !mov_sp_x18) { note_refusal(word); st->refused++; continue; }
 
         unsigned a, b;
         pick_scratch(in.gp_used, &a, &b);
@@ -1346,7 +1350,13 @@ int kl_x18_emit_img(void *code, size_t size, uint64_t code_va,
         body[k++] = enc_stp(a, b, -16);
         body[k++] = enc_mrs_tpidrro(a);
 
-        if (in.pcrel == KLX_PC_CBZ || in.pcrel == KLX_PC_TBZ) {
+        if (mov_sp_x18) {
+            body[k++] = enc_ldr(b, a, (unsigned)KLX_TSD_SLOT * 8);
+            body[k++] = 0x910003e0u | a; // mov a, sp
+            body[k++] = 0x9100001fu | (b << 5); // mov sp, b
+            body[k++] = (enc_ldp(a, b, -16) & ~(31u << 5)) | (a << 5);
+            ok &= enc_b(vpc + k * 4, spc + 4, &body[k]); k++;
+        } else if (in.pcrel == KLX_PC_CBZ || in.pcrel == KLX_PC_TBZ) {
             uint64_t target = br_target(word, spc, in.pcrel);
             body[k++] = enc_ldr(b, a, (unsigned)KLX_TSD_SLOT * 8);
             // Inverted (bit 24 flips cbz<->cbnz and tbz<->tbnz) so the taken

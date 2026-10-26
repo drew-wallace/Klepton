@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "kl_jni.h"
+#include "klepton.h"
 #include "kl_obbmap.h"
 #include "../runtime/jni/kl_jni_int.h"
 
@@ -37,6 +38,12 @@ int main(int argc, char **argv) {
     char assets[1024]; long version = 0; const char *version_name = NULL;
     snprintf(assets, sizeof assets, "%s/assets", argv[1]);
     kl_jni_set_assets_dir(assets);
+    char mapped[2048], expected[2048];
+    snprintf(expected, sizeof expected, "%s/Master Bank.strings.bank", assets);
+    assert(!strcmp(kl_guest_path("file:///android_asset/Master Bank.strings.bank", mapped, sizeof mapped), expected));
+    assert(!strcmp(kl_guest_path("/android_asset/Master Bank.strings.bank", mapped, sizeof mapped), expected));
+    assert(!strcmp(kl_guest_path("file:///android_asset/../private", mapped, sizeof mapped), "file:///android_asset/../private"));
+
     kl_jni_guest_version(&version, &version_name);
     assert(version == 111 && !strcmp(version_name, "probe"));
     assert(!strcmp(kl_jni_guest_package(), "test.probe"));
@@ -51,6 +58,9 @@ int main(int argc, char **argv) {
     kl_jni_set_files_dir(argv[2]);
     snprintf(assets, sizeof assets, "%s/assets", argv[2]);
     kl_jni_set_assets_dir(assets);
+    snprintf(expected, sizeof expected, "%s/Master Bank.strings.bank", assets);
+    assert(!strcmp(kl_guest_path("file:///android_asset/Master Bank.strings.bank", mapped, sizeof mapped), expected));
+
     kl_jni_guest_version(&version, &version_name);
     assert(version == 57013 && !strcmp(version_name, "game"));
     assert(!strcmp(kl_jni_guest_package(), "test.game"));

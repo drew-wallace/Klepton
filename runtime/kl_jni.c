@@ -1667,6 +1667,12 @@ static klj_val klj_GameActivity_sdkInt(void) {
 
 
 static const klj_field g_fields[] = {
+    // Android's standard shared-media directory names. Paths are mapped into
+    // the app's writable guest storage by Environment and kl_guest_path.
+    KLJ_FSTR("android/os/Environment", "DIRECTORY_DCIM", "DCIM"),
+    KLJ_FSTR("android/os/Environment", "DIRECTORY_MOVIES", "Movies"),
+    KLJ_FSTR("android/os/Environment", "DIRECTORY_PICTURES", "Pictures"),
+    KLJ_FINT("android/net/wifi/WifiManager", "WIFI_MODE_FULL_LOW_LATENCY", 4),
     // Audio. The PROPERTY_* values are the real Android key strings, so the
     // getProperty implementation can match on them rather than on our own names.
     KLJ_FSTR("android/media/AudioManager", "PROPERTY_OUTPUT_SAMPLE_RATE",

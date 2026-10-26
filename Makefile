@@ -262,6 +262,23 @@ steamcheck: assetcheck build/t_jni_refcache build/t_jump_mask build/t_signal_wai
 	python3 -m unittest discover -s steam/tests -p 'test_steam*.py'
 	python3 -m unittest discover -s games/walkabout/tests -p 'test_walkabout*.py'
 
+# Eleven's Java PCM route and per-game Steam context.
+.PHONY: elevencheck
+build/t_eleven_fmod_device: games/eleven/tests/t_fmod_device.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_int.h runtime/media/kl_audio.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -Iruntime/media -o $@ games/eleven/tests/t_fmod_device.c
+
+build/t_audio_mix: tests/visionos/AudioMixTests.c runtime/media/kl_audio.c runtime/media/kl_audio.h runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -Wl,-dead_strip -Iruntime -framework AudioToolbox -framework CoreAudio -o $@ tests/visionos/AudioMixTests.c runtime/kl_env.c
+
+elevencheck: build/t_eleven_fmod_device build/t_audio_mix build/t_steam_init_retry build/t_ctr
+	./build/t_eleven_fmod_device
+	./build/t_audio_mix
+	./build/t_steam_init_retry
+	./build/t_ctr
+	python3 -m unittest discover -s games/eleven/tests -p 'test_*.py'
+
 # Which guest the host gates run against. `make check TARGET=superhot` points
 # every one of them at another title's tree — the libraries, the assets and the
 # APK together, which is the pairing that matters (a run with one version's

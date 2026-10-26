@@ -27,5 +27,20 @@ int main(void) {
         assert(resolver == first);
         kl_jni_local_frame_pop();
     }
+    // Eleven asks for ActivityManager again after a frame retired its local
+    // refs. The service cache owns the manager independently of those refs.
+    void *service_mid = method(env, cls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    void *first_service = NULL;
+    for (int i = 0; i < 8; i++) {
+        kl_jni_local_frame_push();
+        void *name = kl_jni_new_string("activity");
+        void *args[] = {name};
+        void *manager = call(env, activity, service_mid, args);
+        assert(manager);
+        assert(getclass(env, manager) == kl_jni_class("android/app/ActivityManager"));
+        if (!first_service) first_service = manager;
+        assert(manager == first_service);
+        kl_jni_local_frame_pop();
+    }
     puts("Cached ContentResolver identity and class survive JNI local-frame retirement");
 }

@@ -10,14 +10,13 @@
 // the checkInit() call aborted (vampire), so FMOD::getGlobals / System::create
 // never ran and there was no audio.
 //
-// There is no real Java here, so this answers the class synthetically. The
-// output itself is native — FMOD picks OpenSL (kl_opensl) once it believes its
-// Java env is up — so the only job of these methods is to tell FMOD "your Java
-// side is initialised, here is a sane output format". checkInit() true is the
-// gate; the format getters match what kl_audio resamples to (48 kHz), and AAudio
-// is reported UNsupported so FMOD stays on the OpenSL path Klepton actually
-// serves rather than the AAudio one.
+// The host answers the Java platform queries and sends FMOD output to
+// kl_audio. Older builds use OpenSL; newer builds call AudioDevice.write with
+// signed PCM. AAudio remains unavailable, and both supported routes share the
+// same native output sink.
 #include <stdint.h>
+#include <stdlib.h>
+#include "kl_audio.h"
 #include "kl_jni.h"
 #include "kl_jni_int.h"
 
@@ -49,12 +48,50 @@ static klj_val klf_blockSize(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n; return (klj_val){.j = 512};
 }
 
+// Newer FMOD Android builds send PCM through their Java AudioDevice rather
+// than OpenSL. The supplied helper's args are channels, sample rate, DSP block
+// length and block count; write's count is int16 samples, not bytes.
+static const char klf_output_source;
+static klj_val klf_device_init(void *env, void *self, const klj_val *a, int n) {
+    klj_object *object = klj_as_object(self);
+    if (!object || n != 4 || !a[0].j || !a[1].j) return (klj_val){.j = 0};
+    if (!object->data) {
+        object->data = calloc(1, sizeof(int));
+        if (!object->data) return (klj_val){.j = 0};
+        klj_own(self, free);
+    }
+    int ok = kl_audio_open((unsigned)a[1].j, (unsigned)a[0].j, 16) == 0;
+    *(int *)object->data = ok;
+    if (ok) kl_audio_play();
+    return (klj_val){.j = ok};
+}
+static klj_val klf_device_close(void *env, void *self, const klj_val *a, int n) {
+    klj_object *object = klj_as_object(self);
+    if (object && object->data) *(int *)object->data = 0;
+    // The output sink is shared with Unity/OpenSL. Stop this producer without
+    // shutting down other active producers; its bounded queued audio drains.
+    return (klj_val){0};
+}
+static klj_val klf_device_write(void *env, void *self, const klj_val *a, int n) {
+    klj_object *object = klj_as_object(self);
+    klj_array *samples = n == 2 ? klj_arr(a[0].l) : NULL;
+    int count = n == 2 ? (int)a[1].j : -1;
+    if (object && object->data && *(int *)object->data && samples &&
+        samples->kind == 'S' && count > 0 && count <= samples->len)
+        kl_audio_write_src(&klf_output_source, samples->data, (size_t)count * sizeof(int16_t));
+    return (klj_val){0};
+}
+
 const klj_binding klj_bind_fmod[] = {
+    {"org/fmod/AudioDevice", "init", "(IIII)Z", klf_device_init},
+    {"org/fmod/AudioDevice", "close", "()V", klf_device_close},
+    {"org/fmod/AudioDevice", "write", "([SI)V", klf_device_write},
     // The gate the native side checks before creating the core system.
     {FMODCLS, "checkInit",           "()Z",                    klf_true},
     // init(context)/close() — the Java side would store/clear the context; there
     // is nothing to store here (getContext answers from the activity), so no-ops.
     {FMODCLS, "init",                "(Landroid/content/Context;)V", klf_void},
+    {FMODCLS, "init",                "(Lcom/unity3d/player/UnityPlayerActivity;)V", klf_void},
     {FMODCLS, "init",                "(Ljava/lang/Object;)V",  klf_void},
     {FMODCLS, "close",               "()V",                    klf_void},
     {FMODCLS, "getContext",          "()Landroid/content/Context;", klf_getContext},

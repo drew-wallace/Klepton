@@ -49,7 +49,7 @@ if STEAM_LOCAL:
         raise ValueError('KLEPTON_STEAM_LOCAL requires a target with an audited Steam profile')
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../steam/visionos"))
     import mksteam
-    mksteam.verify_staged()
+    mksteam.verify_staged(KLT["name"])
     import plistlib
     from game_version import installed_version
     # Freeze the APK's version with its translated executable. Documents data
@@ -106,7 +106,7 @@ ANGLE_DIR = "Frameworks"
 # Both sets are embedded-not-linked, so the pbxproj treatment is identical and
 # the generator stays data-driven — the two lists differ only in what a missing
 # one means, which is why main() reports them separately.
-STEAM_FRAMEWORKS = ['libsteamclient_backend', 'libsteamclient', 'libsteam_api', 'libc++_shared'] if STEAM_LOCAL else []
+STEAM_FRAMEWORKS = ['libsteamclient_backend', 'libsteamclient'] + [pathlib.Path(record['path']).stem for record in mksteam.profile(KLT['name'])['files']] if STEAM_LOCAL else []
 EMBED = GUEST + ANGLE + MVK + STEAM_FRAMEWORKS
 
 

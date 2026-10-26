@@ -472,7 +472,7 @@ struct BootView: View {
 #endif
     // Show microphone opt-in for targets with a voice capture path.
     private var showMic: Bool {
-        ["steamlink-vr", "hl1", "cs1", "walkabout-57013"].contains(klTargetName())
+        ["steamlink-vr", "hl1", "cs1", "walkabout-57013", "eleven"].contains(klTargetName())
     }
 
     var body: some View {
@@ -794,7 +794,7 @@ struct BootView: View {
     private func boot() {
 #if KL_STEAM_GAME_HOST
         guard steamReady || steamOfflineDiagnostics else {
-            status = "Sign in to Steam before starting Walkabout."; return
+            status = "Sign in to Steam before starting the game."; return
         }
 #endif
         // Guarded on this side too, not only in kl_app.c. The guest boots

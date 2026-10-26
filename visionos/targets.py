@@ -646,7 +646,7 @@ TARGETS = {
 # Local game profiles are maintained with their game-specific tooling.
 import runpy as _runpy
 from pathlib import Path as _Path
-for _game in ('4xvr', 'roborecall', 'walkabout'):
+for _game in ('4xvr', 'roborecall', 'walkabout', 'eleven'):
     TARGETS.update(_runpy.run_path(str(_Path(__file__).resolve().parents[1] / 'games' / _game / 'targets.py'))['TARGETS'])
 
 for _profile in TARGETS.values():

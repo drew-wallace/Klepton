@@ -1,4 +1,4 @@
-// Independent probe through Walkabout's genuine packaged Steamworks SDK.
+// Independent probe through the selected game's genuine packaged Steamworks SDK.
 #ifndef KL_STEAM_PROBE_GAME_API_H
 #define KL_STEAM_PROBE_GAME_API_H
 #include "../../../steam/tools/steam_probe_ticket_gate.h"
@@ -33,6 +33,7 @@ static struct {
     int enabled, initialized, authenticated_attempt, requested, reported, failed;
     int init_result;
     double init_retry_at, init_retry_deadline;
+    uint32_t app_id;
     int32_t pipe, user;
     void *steam_user, *apps, *utils;
     int (*init)(char *);
@@ -63,10 +64,10 @@ static int game_initialize(void) {
     game_api.init_result = result;
     kl_image *client_image = kl_find_image("libsteamclient.so");
     if (client_image && game_api.backend_image)
-        printf("[steam-probe] Walkabout client instance distinct=%d\n",
+        printf("[steam-probe] Game client instance distinct=%d\n",
                kl_base(client_image) != kl_base(game_api.backend_image));
     // Error strings may name account/system details. Emit classifications only.
-    printf("[steam-probe] Walkabout SteamAPI_InitFlat result=%d reason_no_client=%d reason_no_user=%d reason_user_interface=%d reason_connect_global=%d reason_app_context=%d\n",
+    printf("[steam-probe] Game SteamAPI_InitFlat result=%d reason_no_client=%d reason_no_user=%d reason_user_interface=%d reason_connect_global=%d reason_app_context=%d\n",
            result, strstr(error, "running instance") != NULL, strstr(error, "Steam user") != NULL, strstr(error, "SteamUser023") != NULL,
            strstr(error, "ConnectToGlobalUser failed") != NULL, strstr(error, "Can't determine AppID") != NULL);
     session_clear(error, sizeof error);
@@ -79,8 +80,11 @@ static int game_initialize(void) {
         game_publish(3, 0); game_api.failed = 1; return 0;
     }
     uint32_t app_id = game_api.get_app_id(game_api.utils);
-    printf("[steam-probe] Walkabout SDK interfaces present; app_id=%u pipe=%d user=%d\n", app_id, game_api.pipe, game_api.user);
-    if (app_id != 1408230) { game_publish(3, 0); game_api.failed = 1; return 0; }
+    printf("[steam-probe] Game SDK interfaces present; app_id=%u pipe=%d user=%d\n", app_id, game_api.pipe, game_api.user);
+    if (app_id != game_api.app_id) {
+        game_publish(3, 0); game_api.failed = 1;
+        game_api.shutdown(); game_api.initialized = 0; return 0;
+    }
     game_api.release_api = version_release_api(game_api.find_user_interface, game_api.user);
     game_api.tickets.user = game_api.user;
     game_api.manual_init();
@@ -93,14 +97,28 @@ static void game_prepare(kl_image *backend_image) {
     if (!game_api.enabled) return;
     // Steam's documented environment app context; ownership is still queried
     // from the genuine client. This is not an entitlement override.
-    setenv("SteamAppId", "1408230", 1); setenv("SteamGameId", "1408230", 1);
+    const char *configured = getenv("KL_STEAM_APP_ID");
+    if (!configured) configured = "1408230"; // historical standalone Walkabout probe
+    char *end = NULL;
+    unsigned long app_id = strtoul(configured, &end, 10);
+    if (!*configured || *end || !app_id || app_id > UINT32_MAX) {
+        game_api.failed = 1; game_publish(3, 0); return;
+    }
+    game_api.app_id = (uint32_t)app_id;
+    setenv("SteamAppId", configured, 1); setenv("SteamGameId", configured, 1);
     game_api.image = kl_load_recursive("libsteam_api.so");
     if (!game_api.image || kl_get_stats(game_api.image)->imports_missing) {
-        printf("[steam-probe] Walkabout SDK load failed\n"); game_publish(3, 0); game_api.failed = 1; return;
+        printf("[steam-probe] Game SDK load failed\n"); game_publish(3, 0); game_api.failed = 1; return;
     }
-#define GAME_SYM(field, symbol) do { game_api.field = (void *)kl_sym(game_api.image, symbol); if (!game_api.field) { game_publish(3, 0); game_api.failed = 1; return; } } while (0)
+#define GAME_SYM(field, symbol) do { game_api.field = (void *)kl_sym(game_api.image, symbol); if (!game_api.field) { printf("[steam-probe] SDK symbol missing: %s\n", symbol); game_publish(3, 0); game_api.failed = 1; return; } } while (0)
     GAME_SYM(init, "SteamAPI_InitFlat"); GAME_SYM(shutdown, "SteamAPI_Shutdown");
-    GAME_SYM(get_user_interface, "SteamAPI_SteamUser_v023"); GAME_SYM(get_apps_interface, "SteamAPI_SteamApps_v008");
+    GAME_SYM(get_user_interface, "SteamAPI_SteamUser_v023");
+    const char *apps_version = getenv("KL_STEAM_APPS_INTERFACE");
+    if (apps_version && !strcmp(apps_version, "SteamApps009")) {
+        GAME_SYM(get_apps_interface, "SteamAPI_SteamApps_v009");
+    } else {
+        GAME_SYM(get_apps_interface, "SteamAPI_SteamApps_v008");
+    }
     GAME_SYM(get_utils_interface, "SteamAPI_SteamUtils_v010"); GAME_SYM(get_pipe, "SteamAPI_GetHSteamPipe");
     GAME_SYM(get_user, "SteamAPI_GetHSteamUser"); GAME_SYM(logged_on, "SteamAPI_ISteamUser_BLoggedOn");
     GAME_SYM(get_app_id, "SteamAPI_ISteamUtils_GetAppID"); GAME_SYM(subscribed, "SteamAPI_ISteamApps_BIsSubscribedApp");
@@ -116,7 +134,7 @@ static void game_prepare(kl_image *backend_image) {
     game_api.num_betas = (void *)kl_sym(game_api.image, "SteamAPI_ISteamApps_GetNumBetas");
     game_api.beta_info = (void *)kl_sym(game_api.image, "SteamAPI_ISteamApps_GetBetaInfo");
     game_api.find_user_interface = (void *)kl_sym(game_api.image, "SteamInternal_FindOrCreateUserInterface");
-    printf("[steam-probe] Walkabout genuine SDK loaded; requesting real initialization\n");
+    printf("[steam-probe] Game genuine SDK loaded; requesting real initialization\n");
     game_publish(1, 0); game_initialize();
 }
 static void game_cancel_tickets(void) {
@@ -125,11 +143,11 @@ static void game_cancel_tickets(void) {
     if (game_api.tickets.web_handle && game_api.tickets.web_handle != game_api.tickets.session_handle)
         game_api.cancel_ticket(game_api.steam_user, game_api.tickets.web_handle);
     game_api.requested = 0; session_clear(&game_api.tickets, sizeof game_api.tickets);
-    printf("[steam-probe] Walkabout diagnostic tickets cancelled\n");
+    printf("[steam-probe] Game diagnostic tickets cancelled\n");
 }
 static void game_inspect_dlc(void) {
     int count = game_api.dlc_count(game_api.apps);
-    printf("[steam-probe] Walkabout DLC enumeration count=%d bounded=%d\n", count, count >= 0 && count <= 64);
+    printf("[steam-probe] Game DLC enumeration count=%d bounded=%d\n", count, count >= 0 && count <= 64);
     if (count < 0 || count > 64) return;
     for (int i = 0; i < count; i++) {
         uint32_t app = 0; _Bool available = 0;
@@ -140,9 +158,9 @@ static void game_inspect_dlc(void) {
         for (int j = 0; j < 16; j++) if (guarded.before[j] != 0xa5 || guarded.after[j] != 0xa5) valid = 0;
         if (result && (!app || !memchr(guarded.name, 0, sizeof guarded.name))) valid = 0;
         session_clear(&guarded, sizeof guarded);
-        printf("[steam-probe] Walkabout DLC entry index=%d valid=%d returned=%d app_id=%u\n", i, valid, result, app);
+        printf("[steam-probe] Game DLC entry index=%d valid=%d returned=%d app_id=%u\n", i, valid, result, app);
         if (!valid) return;
-        if (result) printf("[steam-probe] Walkabout DLC app_id=%u store_available=%d subscribed=%d installed=%d\n",
+        if (result) printf("[steam-probe] Game DLC app_id=%u store_available=%d subscribed=%d installed=%d\n",
             app, available, game_api.subscribed(game_api.apps, app), game_api.dlc_installed(game_api.apps, app));
     }
     // Steam's enumerator may omit unowned DLC. This is an observed list, not
@@ -159,7 +177,7 @@ static void game_retry_tickets(void) {
     if (session_now() + 5 < game_api.ticket_request_deadline) {
         game_api.reported = 0; game_api.ticket_request_retry_at = session_now() + 5;
         game_publish(6, 0);
-        printf("[steam-probe] Walkabout ticket retry scheduled delay_seconds=5\n");
+        printf("[steam-probe] Game ticket retry scheduled delay_seconds=5\n");
     } else { game_allow_retry(1); game_publish(8, 0); }
 }
 static void game_advance(int native_logged_on) {
@@ -187,6 +205,7 @@ static void game_advance(int native_logged_on) {
         game_api.init_retry_at = session_now() + 5;
         game_initialize();
     }
+    if (game_api.failed) return;
     if (!game_api.initialized) {
         if (native_logged_on && game_api.authenticated_attempt && game_api.init_result == 1 &&
             session_now() >= game_api.init_retry_deadline) { game_allow_retry(1); game_publish(8, game_api.init_result); }
@@ -206,8 +225,8 @@ static void game_advance(int native_logged_on) {
     if (native_logged_on && game_api.logged_on(game_api.steam_user) && !game_api.reported &&
         session_now() >= game_api.ticket_request_retry_at) {
         game_api.reported = 1;
-        int owns = game_api.subscribed(game_api.apps, 1408230);
-        printf("[steam-probe] Walkabout ownership subscribed=%d\n", owns);
+        int owns = game_api.subscribed(game_api.apps, game_api.app_id);
+        printf("[steam-probe] Game ownership subscribed=%d\n", owns);
         if (!game_api.ticket_request_deadline) game_api.ticket_request_deadline = game_api.init_retry_deadline;
         if (!owns) {
             if (session_now() + 5 < game_api.ticket_request_deadline) {
@@ -216,8 +235,8 @@ static void game_advance(int native_logged_on) {
             return;
         }
         if (!game_api.ticket_deadline) game_inspect_dlc();
-        // Match the supplied game's observed request arguments. This remains
-        // an independent diagnostic, not execution of its PlayFab consumer.
+        // Walkabout's observed recipient and buffer size. For other titles
+        // these test SDK callbacks only, not their game-server consumer.
         struct { int32_t type, size; uint8_t data[128]; } recipient = {0};
         _Static_assert(sizeof recipient == 136, "SteamNetworkingIdentity ABI");
         if (!game_api.set_recipient(&recipient, "PlayFab")) {
@@ -237,14 +256,14 @@ static void game_advance(int native_logged_on) {
         }
         session_clear(&guarded, sizeof guarded);
         game_api.requested = 1;
-        printf("[steam-probe] Walkabout session ticket requested handle_present=%d bytes=%u bounds_valid=%d recipient_set=1\n",
+        printf("[steam-probe] Game session ticket requested handle_present=%d bytes=%u bounds_valid=%d recipient_set=1\n",
                game_api.tickets.session_handle != 0, size, guard_ok && size <= sizeof guarded.bytes);
         if (!guard_ok || size > sizeof guarded.bytes) {
             game_api.failed = 1; game_publish(8, 0); game_cancel_tickets(); return;
         }
         if (!game_api.tickets.session_handle) { game_api.tickets.session_done = 1; game_api.tickets.session_result = 0; }
         game_api.tickets.web_handle = game_api.web_ticket(game_api.steam_user, "AzurePlayFab");
-        printf("[steam-probe] Walkabout Web API ticket requested handle_present=%d service_specific=1\n", game_api.tickets.web_handle != 0);
+        printf("[steam-probe] Game Web API ticket requested handle_present=%d service_specific=1\n", game_api.tickets.web_handle != 0);
         if (!game_api.tickets.web_handle) { game_api.tickets.web_done = 1; game_api.tickets.web_result = 0; }
         if (!game_api.tickets.session_handle && !game_api.tickets.web_handle) {
             game_retry_tickets(); return;
@@ -262,9 +281,9 @@ static void game_advance(int native_logged_on) {
         int malformed = callback.size < 0 || (callback.size && !callback.payload);
         int accepted = malformed ? -1 : probe_ticket_callback(&game_api.tickets, callback.user, callback.id, callback.payload, callback.size);
         if (malformed || callback.id == 163 || callback.id == 168)
-            printf("[steam-probe] Walkabout callback metadata id=%d size=%d user_matches=%d accepted=%d\n",
+            printf("[steam-probe] Game callback metadata id=%d size=%d user_matches=%d accepted=%d\n",
                    callback.id, callback.size, callback.user == game_api.tickets.user, accepted);
-        if (accepted > 0) printf("[steam-probe] Walkabout ticket callback id=%d result=%d delivered=%d\n", callback.id,
+        if (accepted > 0) printf("[steam-probe] Game ticket callback id=%d result=%d delivered=%d\n", callback.id,
             callback.id == 163 ? game_api.tickets.session_result : game_api.tickets.web_result, probe_tickets_delivered(&game_api.tickets));
         game_api.manual_free(game_api.pipe);
         if (accepted < 0) { game_api.failed = 1; game_publish(8, 0); game_cancel_tickets(); break; }
@@ -273,7 +292,7 @@ static void game_advance(int native_logged_on) {
     else if (probe_tickets_delivered(&game_api.tickets)) game_publish(7, 1);
     else if (game_api.requested && (session_now() > game_api.ticket_deadline || !native_logged_on ||
              (game_api.tickets.session_done && game_api.tickets.web_done && !probe_tickets_delivered(&game_api.tickets)))) {
-        printf("[steam-probe] Walkabout ticket gate failed timeout=%d logged_on=%d session_done=%d session_result=%d web_done=%d web_result=%d\n",
+        printf("[steam-probe] Game ticket gate failed timeout=%d logged_on=%d session_done=%d session_result=%d web_done=%d web_result=%d\n",
                session_now() > game_api.ticket_deadline, native_logged_on, game_api.tickets.session_done,
                game_api.tickets.session_result, game_api.tickets.web_done, game_api.tickets.web_result);
         int transient =
@@ -286,7 +305,7 @@ static void game_advance(int native_logged_on) {
 static void game_shutdown(void) {
     if (!game_api.enabled) return;
     game_cancel_tickets();
-    if (game_api.initialized) { game_api.shutdown(); game_api.initialized = 0; printf("[steam-probe] Walkabout SteamAPI_Shutdown returned\n"); }
+    if (game_api.initialized) { game_api.shutdown(); game_api.initialized = 0; printf("[steam-probe] Game SteamAPI_Shutdown returned\n"); }
 }
 #ifdef KL_STEAM_GAME_HOST
 static int game_release_for_host(void) {

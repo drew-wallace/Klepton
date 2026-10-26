@@ -160,7 +160,9 @@ static int klf_loadBankMemory(void *self, const char *buf, int len, int mode,
     return r;
 }
 static int klf_loadBankFile(void *self, const char *fn, uint32_t flags, void **bank) {
-    int r = g_fmod_loadBankFile ? g_fmod_loadBankFile(self, fn, flags, bank) : -1;
+    char mapped[2048];
+    const char *resolved = kl_guest_path(fn, mapped, sizeof mapped);
+    int r = g_fmod_loadBankFile ? g_fmod_loadBankFile(self, resolved, flags, bank) : -1;
     static int said; if (klf_trace() && said < 32) { said++;
         fprintf(stderr, "  [fmod] loadBankFile(\"%s\") -> result %d, bank %p\n",
                 fn ? fn : "(null)", r, bank ? *bank : NULL); }
@@ -238,6 +240,22 @@ static int kl_fmod_trace_default(void) {
     if (t) for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++)
         if (strcmp(t, on[i]) == 0) return 1;
     return 0;
+}
+
+// Unity resolves FMOD's flat C API through dlsym, bypassing relocation-time
+// C++ hooks. Resolve Android asset paths before forwarding to the original SDK.
+static int (*g_fmod_c_bank_file)(void *, const char *, uint32_t, void **);
+static int klf_c_bank_file(void *sys, const char *path, uint32_t flags, void **bank) {
+    char mapped[2048];
+    const char *resolved = kl_guest_path(path, mapped, sizeof mapped);
+    return g_fmod_c_bank_file(sys, resolved, flags, bank);
+}
+static void *kl_fmod_c_interpose(const char *name, void *real) {
+    if (real && !strcmp(name, "FMOD_Studio_System_LoadBankFile")) {
+        *(void **)&g_fmod_c_bank_file = real;
+        return (void *)klf_c_bank_file;
+    }
+    return NULL;
 }
 
 static void *kl_fmod_interpose(const char *name, void *real) {
@@ -1008,6 +1026,8 @@ static void kl_dl_trace_shims(void) {
 }
 
 static void *kl_dl_interpose(const char *name, void *real) {
+    void *fmod = kl_fmod_c_interpose(name, real);
+    if (fmod) return fmod;
     if (strcmp(name, "iplHRTFCreate") == 0) {
         g_real_iplHRTFCreate = (int32_t (*)(void *, kl_ipl_audio_settings *,
                                             void *, void *))real;

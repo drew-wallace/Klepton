@@ -18,7 +18,7 @@ from targets import TARGETS
 
 import runpy
 SOURCES = {}
-for game in ('4xvr', 'roborecall', 'walkabout'):
+for game in ('4xvr', 'roborecall', 'walkabout', 'eleven'):
     SOURCES.update(runpy.run_path(str(ROOT / 'games' / game / 'targets.py'))['SOURCES'])
 
 

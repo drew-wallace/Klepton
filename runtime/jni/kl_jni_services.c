@@ -1201,6 +1201,62 @@ static klj_val klj_File_getPath(void *env, void *self, const klj_val *a, int n) 
     klj_object *o = klj_as_object(self);
     return (klj_val){.l = kl_jni_new_string(o && o->data ? o->data : "")};
 }
+// JNI constructors return the newly allocated object in this runtime.
+// File construction stores a path; it does not create the file or directory.
+static klj_val klj_File_init_parent(void *env, void *clazz, const klj_val *a, int n) {
+    (void)env; (void)clazz;
+    if (n != 2 || !a[1].l) return (klj_val){0};
+    klj_object *parent = klj_as_object(a[0].l);
+    const char *base = parent && parent->data ? parent->data : "";
+    const char *child = klj_str(a[1].l);
+    if (!child) return (klj_val){0};
+    size_t length = strlen(base) + strlen(child) + 2;
+    char *path = malloc(length);
+    if (!path) return (klj_val){0};
+    snprintf(path, length, "%s%s%s", base, *base && *child && *child != '/' ? "/" : "", child);
+    void *object = klj_new_object_data("java/io/File", path);
+    klj_own(object, free);
+    return (klj_val){.l = object};
+}
+
+static klj_val klj_File_mkdirs(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_object *object = klj_as_object(self);
+    if (!object || !object->data) return (klj_val){.j = 0};
+    char mapped[2048];
+    const char *path = kl_guest_path(object->data, mapped, sizeof mapped);
+    struct stat status;
+    if (stat(path, &status) == 0) return (klj_val){.j = 0};
+    klj_mkdir_p(path);
+    return (klj_val){.j = stat(path, &status) == 0 && S_ISDIR(status.st_mode)};
+}
+
+static klj_val klj_File_exists(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_object *object = klj_as_object(self);
+    if (!object || !object->data) return (klj_val){.j = 0};
+    char mapped[2048];
+    const char *path = kl_guest_path(object->data, mapped, sizeof mapped);
+    return (klj_val){.j = access(path, F_OK) == 0 || kl_obbmap_stat(path, NULL)};
+}
+
+static klj_val klj_File_canRead(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_object *object = klj_as_object(self);
+    if (!object || !object->data) return (klj_val){.j = 0};
+    char mapped[2048];
+    const char *path = kl_guest_path(object->data, mapped, sizeof mapped);
+    return (klj_val){.j = access(path, R_OK) == 0 || kl_obbmap_stat(path, NULL)};
+}
+static klj_val klj_File_canWrite(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_object *object = klj_as_object(self);
+    if (!object || !object->data) return (klj_val){.j = 0};
+    char mapped[2048];
+    const char *path = kl_guest_path(object->data, mapped, sizeof mapped);
+    return (klj_val){.j = access(path, W_OK) == 0};
+}
+
 // java.io.File.getParent() returns null, not "", when there is no parent.
 static klj_val klj_File_getParent(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)a; (void)n;
@@ -1342,6 +1398,16 @@ static klj_val klj_Environment_getExternalStorageState(void *env, void *self, co
 static klj_val klj_Environment_getExternalStorageDirectory(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     return (klj_val){.l = klj_new_file("/sdcard")};   // short form; see getExternalFilesDir
+}
+
+static klj_val klj_Environment_getExternalStoragePublicDirectory(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    const char *type = n == 1 && a[0].l ? klj_str(a[0].l) : NULL;
+    if (!type || strchr(type, '/') || strstr(type, "..")) return (klj_val){0};
+    char path[1024];
+    int length = snprintf(path, sizeof path, "/sdcard/%s", type);
+    if (length < 0 || (size_t)length >= sizeof path) return (klj_val){0};
+    return (klj_val){.l = klj_new_file(path)};
 }
 
 // MANAGE_EXTERNAL_STORAGE — "does this app hold unrestricted access to shared
@@ -1777,6 +1843,11 @@ static klj_val klj_Scanner_next(void *env, void *self, const klj_val *a, int n) 
 }
 
 const klj_binding klj_bind_services[] = {
+    {"java/io/File", "<init>", "(Ljava/io/File;Ljava/lang/String;)V", klj_File_init_parent},
+    {"java/io/File", "mkdirs", "()Z", klj_File_mkdirs},
+    {"java/io/File", "exists", "()Z", klj_File_exists},
+    {"java/io/File", "canRead", "()Z", klj_File_canRead},
+    {"java/io/File", "canWrite", "()Z", klj_File_canWrite},
     {"org/fmod/FmodAndroidAudioManager", "getInstance",
      "()Lorg/fmod/FmodAndroidAudioManager;",        klj_fmod_audio_manager},
     {"org/fmod/FmodAndroidAudioManager", "getBluetoothInputDeviceId", "()I",
@@ -1902,6 +1973,8 @@ const klj_binding klj_bind_services[] = {
      klj_Context_getExternalCacheDir},
     {"android/app/ActivityThread", "currentActivityThread", "()Landroid/app/ActivityThread;",
      klj_ActivityThread_current},
+    {"android/app/ActivityThread", "currentApplication", "()Landroid/app/Application;",
+     klj_ActivityThread_getApplication},
     {"android/app/ActivityThread", "getApplication", "()Landroid/app/Application;",
      klj_ActivityThread_getApplication},
     {"android/app/ActivityThread", "getTopResumedActivity", "()Landroid/app/Activity;",
@@ -1931,8 +2004,10 @@ const klj_binding klj_bind_services[] = {
      "()Ljava/lang/String;", klj_UE4_GetFontDirectory},
     {"android/os/Environment", "getExternalStorageState", "()Ljava/lang/String;", klj_Environment_getExternalStorageState},
     {"android/os/Environment", "getExternalStorageDirectory", "()Ljava/io/File;", klj_Environment_getExternalStorageDirectory},
+    {"android/os/Environment", "getExternalStoragePublicDirectory", "(Ljava/lang/String;)Ljava/io/File;", klj_Environment_getExternalStoragePublicDirectory},
     {"android/os/Environment", "isExternalStorageManager", "()Z", klj_Environment_isExternalStorageManager},
     {"java/io/File", "getAbsolutePath", "()Ljava/lang/String;", klj_File_getPath},
+    {"java/io/File", "toString", "()Ljava/lang/String;", klj_File_getPath},
     {"java/io/File", "getPath",         "()Ljava/lang/String;", klj_File_getPath},
     {"java/io/File", "getCanonicalPath","()Ljava/lang/String;", klj_File_getPath},
     {"java/io/File", "getParent",       "()Ljava/lang/String;", klj_File_getParent},

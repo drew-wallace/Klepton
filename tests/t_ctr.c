@@ -350,6 +350,29 @@ int main(void) {
         ck(returns, "callee LR is the original guest return site under ASLR");
         pthread_setspecific(KLX_TSD_SLOT, NULL);
         arena_free(&call);
+        // Opus saves a computed stack address in x18, then assigns SP to it.
+        // Both scratch registers and the caller's SP must survive the veneer.
+        arena a3 = arena_new();
+        // Fold scratch preservation into the returned value: 64 only if both
+        // registers retain their sentinels. x9 holds the caller's original SP.
+        uint32_t checked[] = {
+            0x910003e9u, // mov x9, sp
+            0xd10103f2u, // sub x18, sp, #64
+            MOVZ(16, 0x1234), MOVZ(17, 0x5678),
+            0x9100025fu, // mov sp, x18
+            0x910003e0u, // mov x0, sp
+            0xcb000120u, // sub x0, x9, x0
+            0x9100013fu, // mov sp, x9
+            MOVZ(10, 0x1234), 0xca0a020bu, // eor x11,x16,x10
+            0xaa0b0000u, // orr x0,x0,x11
+            MOVZ(10, 0x5678), 0xca0a022bu, // eor x11,x17,x10
+            0xaa0b0000u, RET,
+        };
+        uint64_t (*sp_fn)(uint64_t) = build(&a3, checked, sizeof checked/4, &st);
+        ck(st.patched == 2 && st.refused == 0 && sp_fn(0) == 64,
+           "`mov sp, x18` restores scratches using the old stack address");
+        arena_free(&a3);
+
     }
 
     // ---- 6. the shape the guest actually has ----

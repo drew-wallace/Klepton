@@ -103,7 +103,9 @@ tools/__pycache__/
 __pycache__/
 *.py[cod]
 
-# Generated game/toolchain trees can be symlinks in an isolated worktree.
+# Generated game/toolchain trees and local directory symlinks.
 /vendor
 /vendor-moltenvk
 /roborecall-47091-patched
+/walkabout-57013
+/eleven/

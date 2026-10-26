@@ -331,6 +331,8 @@ const klj_binding klj_bind_display[] = {
     {"android/view/Display", "getRotation",    "()I", klj_Display_getRotation},
     {"android/view/Display", "getMetrics",     "(Landroid/util/DisplayMetrics;)V", klj_Display_getMetrics},
     {"android/view/Display", "getRealMetrics", "(Landroid/util/DisplayMetrics;)V", klj_Display_getMetrics},
+    // Configuration describes the same SDR render surface as Display.
+    {"android/content/res/Configuration", "isScreenWideColorGamut", "()Z", klj_Display_isWideColorGamut},
     {"android/view/Display", "isWideColorGamut",              "()Z", klj_Display_isWideColorGamut},
     {"android/view/Display", "isHdr",                         "()Z", klj_Display_isHdr},
     {"android/view/Display", "getSupportedModes",

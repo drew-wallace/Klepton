@@ -1464,6 +1464,18 @@ static void kl_casefix(char *path, size_t prefix) {
 
 static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) {
     if (!path) return path;
+    // Unity StreamingAssets URLs handed to native plugins (FMOD). The assets
+    // are real extracted APK files; preserve their exact relative spelling.
+    const char *asset = NULL;
+    if (!strncmp(path, "file:///android_asset/", 22)) asset = path + 22;
+    else if (!strncmp(path, "/android_asset/", 15)) asset = path + 15;
+    if (asset && *asset && !strstr(asset, "../")) {
+        const char *root = kl_jni_assets_dir();
+        if (root && *root) {
+            int length = snprintf(buf, cap, "%s/%s", root, asset);
+            if (length >= 0 && (size_t)length < cap) return buf;
+        }
+    }
     const char *steam = kl_steam_guest_path(path, buf, cap);
     if (steam != path) return steam;
     // Windows-heritage guests (reVC / GTA Vice City) build paths with '\'
