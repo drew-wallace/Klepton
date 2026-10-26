@@ -3,8 +3,10 @@
 Steam Link 2.0.24 uses the Qt configuration shell to discover and pair with a
 PC, then hands the authorized session to its OpenXR streaming activity.
 The shell opens in a window; the immersive space opens when pairing hands off.
-The pairing/report window closes after that handoff; `KL_BOOT_WINDOW=1` keeps
-it open for diagnostics. Reopening the app's window provides its settings.
+Use **Klepton settings** below the shell to adjust guardian, controller alignment,
+matting, or microphone settings; **Back to Steam Link** returns to pairing without
+restarting it. The settings/report window stays open after the VR handoff.
+`KL_BOOT_WINDOW=0` closes it when VR opens.
 
 Supply the APK locally (the APK and extracted files are ignored by Git):
 

@@ -2447,9 +2447,9 @@ except its own control vars (next section).
   (`[app] scene phase -> …`). Retention lasts while visionOS keeps the process
   alive; force-quitting or memory-pressure termination still needs a fresh boot.
 - `KL_BOOT_WINDOW=1` — keep the startup/report window beside the immersive
-  guest on cold boot and re-entry. **Default on for standalone guests:** settings
-  and Quit stay available. Steam Link closes its pairing/report window when VR
-  opens; `=1` keeps it available for diagnostics. `=0` closes it for other guests.
+  guest on cold boot and re-entry. **Default on for all guests, including Steam
+  Link:** settings and Quit stay available after pairing hands off to VR.
+  `=0` closes it when the immersive space opens.
 - `KL_SIM_HEAD_HEIGHT` — simulator-only standing camera lift in metres.
   **Default `1.6`:** a Home launch has the same standing view as a scripted
   launch. `0` disables the lift; physical-headset tracking is unaffected.

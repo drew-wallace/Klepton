@@ -440,6 +440,7 @@ struct BootView: View {
     // out of one into SwiftUI would be a main-actor hop from a thread that is
     // mid-frame. A timer at 5 Hz costs nothing and cannot deadlock.
     @State private var showShell = false
+    @State private var showSettings = false
     private var handedOff: Bool {
         get { session.handedOff }
         nonmutating set { session.handedOff = newValue }
@@ -482,7 +483,7 @@ struct BootView: View {
                     VStack {
                         Text("Offline Steam diagnostics")
                             .foregroundStyle(.orange)
-                        if showShell { ShellWindow() } else { bootReport }
+                        guestContent
                     }
                 } else {
                     HStack {
@@ -491,7 +492,7 @@ struct BootView: View {
                             boot()
                         }
                         Group {
-                            if showShell { ShellWindow() } else { bootReport }
+                            guestContent
                         }
                     }
                 }
@@ -500,17 +501,24 @@ struct BootView: View {
                 VStack {
                     Text("Offline Steam diagnostics")
                         .foregroundStyle(.orange)
-                    if showShell { ShellWindow() } else { bootReport }
+                    guestContent
                 }
 #else
                 Group {
-                    if showShell { ShellWindow() } else { bootReport }
+                    guestContent
                 }
 #endif
 #endif
             }
             Divider()
             HStack {
+                if showShell {
+                    Button(showSettings ? "Back to Steam Link" : "Klepton settings") {
+                        kbFocused = false
+                        showSettings.toggle()
+                    }
+                    .accessibilityIdentifier("toggleKleptonSettings")
+                }
                 Spacer()
                 Button("Quit Klepton", role: .destructive) { quit() }
                     .accessibilityIdentifier("quitKlepton")
@@ -554,6 +562,16 @@ struct BootView: View {
                 session.canRestoreAutomatically = true
                 session.restorationBlocked = false
             }
+        }
+    }
+
+    @ViewBuilder private var guestContent: some View {
+        // The guest keeps running while its surface is hidden. Keep navigation
+        // outside that surface so its pointer gesture cannot cover settings.
+        if showShell && !showSettings {
+            ShellWindow()
+        } else {
+            bootReport
         }
     }
 
@@ -645,10 +663,9 @@ struct BootView: View {
         case .opened:
             session.openedSpace = true
             session.restorationBlocked = false
-            // Steam Link's pairing window has finished its job once VR opens.
-            // Other guests keep settings and Quit available beside the game.
-            let keepWindow = kl_app_target_is_steamlink() == 0
-            if !klEnvOn("KL_BOOT_WINDOW", default: keepWindow) { dismissWindow(id: "main") }
+            // Keep live settings and Quit available after the pairing handoff
+            // too. KL_BOOT_WINDOW=0 still opts into dismissing this window.
+            if !klEnvOn("KL_BOOT_WINDOW", default: true) { dismissWindow(id: "main") }
         case .userCancelled:
             session.restorationBlocked = true
         case .error:
