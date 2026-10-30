@@ -38,7 +38,7 @@ index 0e6d9b3..19b15a1 100644
      // clang-format on
  
 diff --git a/src/libANGLE/renderer/metal/DisplayMtl.mm b/src/libANGLE/renderer/metal/DisplayMtl.mm
-index 71f0c61..dbc9481 100644
+index 71f0c61..e2eb3e6 100644
 --- a/src/libANGLE/renderer/metal/DisplayMtl.mm
 +++ b/src/libANGLE/renderer/metal/DisplayMtl.mm
 @@ -959,6 +959,13 @@ bool IsMetalDisplayAvailable()
@@ -55,6 +55,21 @@ index 71f0c61..dbc9481 100644
  
      // EXT_debug_marker is not implemented yet, but the entry points must be exposed for the
      // Metal backend to be used in Chrome (http://anglebug.com/42263519)
+@@ -1236,8 +1243,13 @@ bool IsMetalDisplayAvailable()
+     // Stencil blit shader is not compiled on Intel & NVIDIA, need investigation.
+     ANGLE_FEATURE_CONDITION((&mFeatures), hasShaderStencilOutput, !isIntel() && !isNVIDIA());
+ 
++    // Klepton: Apple Silicon's simulator supports native swizzled views.
++    // Disabling them while exposing ES3 makes alpha-only font atlases sample
++    // alpha=1 and turns every glyph into a solid rectangle. The simulator
++    // path is verified by sampling R8 with alpha=red on the GPU.
+     ANGLE_FEATURE_CONDITION((&mFeatures), hasTextureSwizzle,
+-                            supportsEitherGPUFamily(3, 2) && !isSimulator);
++                            (supportsEitherGPUFamily(3, 2) && !isSimulator) ||
++                                (isSimulator && isARM));
+ 
+     ANGLE_FEATURE_CONDITION((&mFeatures), avoidStencilTextureSwizzle, isIntel());
+ 
 diff --git a/src/libANGLE/renderer/metal/FrameBufferMtl.mm b/src/libANGLE/renderer/metal/FrameBufferMtl.mm
 index 2825a7c..49f308d 100644
 --- a/src/libANGLE/renderer/metal/FrameBufferMtl.mm

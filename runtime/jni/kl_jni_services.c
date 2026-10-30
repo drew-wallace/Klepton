@@ -1542,15 +1542,22 @@ KLJ_OCULUS_FLAG(klj_OculusUnity_lateLatchingDebug,"com.unity.xr.oculus.LateLatch
 // to the plugin's internal surface-notify, which is the one effect the whole
 // UnitySurfaceView dance exists to produce. Resolved by symbol rather than bound
 // in jni land, because no guest ever registered it and the JVM's Java_ name
-// resolution is exactly the mechanism Android would use.
+// resolution is exactly the mechanism Android would use. Older Oculus XR
+// packages (including Bigscreen's Unity 2020.3.33f1) call this initComplete
+// instead: their Java initOculus body ends with initComplete(holder.getSurface()).
+// Both exports take (JNIEnv*, jobject, Surface); choose the one this plugin
+// actually exports. Skipping the older completion leaves its graphics thread
+// waiting forever for InitOculusContextComplete.
 static void *klj_oculus_surface_created_native(void) {
     static void *fn;
     if (!fn) {
         kl_image *img = kl_find_image("libOculusXRPlugin.so");
         if (img)
             fn = kl_sym(img, "Java_com_unity_oculus_OculusUnity_surfaceCreated");
+        if (!fn && img)
+            fn = kl_sym(img, "Java_com_unity_oculus_OculusUnity_initComplete");
         if (!fn)
-            fprintf(stderr, "  [jni] no Java_com_unity_oculus_OculusUnity_surfaceCreated "
+            fprintf(stderr, "  [jni] no OculusUnity surfaceCreated/initComplete "
                             "export in libOculusXRPlugin.so — surface setup skipped\n");
     }
     return fn;
@@ -1842,7 +1849,23 @@ static klj_val klj_Scanner_next(void *env, void *self, const klj_val *a, int n) 
     return (klj_val){.l = s};
 }
 
+// Unity's Java wrapper encodes UTF-8 before calling its registered native
+// entry point. Native plugins (including Vuplex) also call this wrapper.
+static klj_val klj_UnityPlayer_UnitySendMessage(void *env,void *self,const klj_val *a,int n) {
+    void (*send)(void *,void *,void *,void *,void *)=kl_jni_native("com/unity3d/player/UnityPlayer","nativeUnitySendMessage","(Ljava/lang/String;Ljava/lang/String;[B)V");
+    const char *message=klj_str(a[2].l);
+    if(send&&message) {
+        size_t length=strlen(message);
+        void *bytes=klj_new_array('B',NULL,(int)length);
+        memcpy(klj_arr(bytes)->data,message,length);
+        KLJ_LOG("UnitySendMessage %s.%s (%zu bytes)",klj_str(a[0].l),klj_str(a[1].l),length);
+        send(env,kl_jni_class("com/unity3d/player/UnityPlayer"),a[0].l,a[1].l,bytes);
+    }
+    return (klj_val){0};
+}
+
 const klj_binding klj_bind_services[] = {
+    {"com/unity3d/player/UnityPlayer", "UnitySendMessage", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", klj_UnityPlayer_UnitySendMessage},
     {"java/io/File", "<init>", "(Ljava/io/File;Ljava/lang/String;)V", klj_File_init_parent},
     {"java/io/File", "mkdirs", "()Z", klj_File_mkdirs},
     {"java/io/File", "exists", "()Z", klj_File_exists},

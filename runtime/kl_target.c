@@ -16,14 +16,19 @@ static const kl_target TARGETS[] = {
 };
 #undef KL_TARGET_ROW
 
+static const kl_target *build_target;
+void kl_target_register_build(const kl_target *target) { build_target = target; }
+
 const kl_target *kl_target_lookup(const char *name) {
     if (!name || !*name) return NULL;
+    if (build_target && !strcmp(build_target->name, name)) return build_target;
     for (unsigned i = 0; i < sizeof TARGETS / sizeof *TARGETS; i++)
         if (!strcmp(TARGETS[i].name, name)) return &TARGETS[i];
     return NULL;
 }
 
 const kl_target *kl_target_default(void) {
+    if (build_target) return build_target;
     const kl_target *t = kl_target_lookup(KL_TARGET_DEFAULT_NAME);
     return t ? t : &TARGETS[0];
 }

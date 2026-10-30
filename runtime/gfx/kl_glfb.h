@@ -15,6 +15,9 @@ int  kl_glfb_copy_selftest(FILE *out);
 // Upload a decoded BGRA frame into an allocated guest 2D texture on its GL
 // thread. Restores texture/PBO bindings and all pixel-unpack parameters.
 int kl_glfb_upload_video_bgra(uint32_t texture, int w, int h, const void *pixels);
+// Browser textures start as external texture names without storage. Allocate
+// their first frame (and resized frames) before updating subsequent pixels.
+int kl_glfb_upload_webview_bgra(uint32_t texture,int w,int h,const void *pixels,int allocate);
 void kl_glfb_set_size(int w, int h);
 
 // The flat door's zero-readback storage. Requested BEFORE ANGLE comes up
@@ -35,6 +38,10 @@ void *kl_glfb_sym(const char *name);
 // Bind the context to the calling thread. Call from eglMakeCurrent: a GL context
 // is per-thread, and the guest's render thread is not the one that created it.
 void kl_glfb_make_current(void);
+// Query the real ANGLE context on this thread without taking or moving it.
+int kl_glfb_context_current(void);
+// Optional frame preparation on the actual GL thread, including deferred swaps.
+int kl_glfb_add_render_service(void (*service)(void));
 
 // The release half: call from eglMakeCurrent when the guest makes no context
 // current. Migration mode frees the root context for the next thread.
@@ -109,7 +116,7 @@ void kl_glfb_draw_census(FILE *f);
 // this with the GL texture name Unity handed down; the capture finds "the
 // framebuffer with the picture" by looking for the FBO whose color attachment
 // is one of these (fb0 is black by construction — the VR frame goes to eye
-// textures, not the backbuffer).
+// textures, not the backbuffer). This report performs no GPU operations.
 // hl2 diagnostic: sample the real ANGLE draw/read framebuffer + color attachment at
 // the moment the eye-copy runs (called from the guest-log shim at "began eye submission").
 void kl_glfb_probe_current_rt(const char *why);
@@ -464,6 +471,8 @@ void  kl_glfb_image_destroy(void *image);
 // which is where the guest's glBindTexture(GL_TEXTURE_EXTERNAL_OES, ...) landed
 // after klfb_detarget. This is what glEGLImageTargetTexture2DOES becomes.
 int   kl_glfb_image_bind(void *image);
+// Bind video storage to a specific texture, preserving the caller's binding.
+int   kl_glfb_image_bind_texture(void *image, uint32_t texture);
 
 // Is this handle one of ours? Asked of pointers the guest chose, so it is a
 // registry lookup and not a magic-word peek through a foreign pointer.

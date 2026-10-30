@@ -326,9 +326,9 @@ static klj_val klj_UnityPlayer_getClipboardText(void *env, void *self,
     char copy[KLJ_SOFT_TEXT_MAX];
     memcpy(copy, g_clipboard, sizeof copy);
     pthread_mutex_unlock(&g_soft.mu);
-    // Android's own answer for an empty clipboard is null (getPrimaryClip
-    // returns null), and the guest's code tests for it.
-    return (klj_val){.l = copy[0] ? kl_jni_new_string(copy) : NULL};
+    // UnityPlayer.getClipboardText converts a missing PrimaryClip to "".
+    // Its native caller unconditionally takes strlen(GetStringUTFChars(...)).
+    return (klj_val){.l = kl_jni_new_string(copy)};
 }
 
 int kl_jni_soft_input_active(void) {
@@ -571,10 +571,9 @@ int kl_jni_soft_input_selftest(FILE *out) {
     SOFT_CHECK(g_soft_seen.n == 0,
                "%d report(s) escaped from a frontend with no field open", g_soft_seen.n);
 
-    // The clipboard: empty is NULL, which is what Android answers and what the
-    // guest's own code tests for.
+    // Unity's wrapper returns a non-null empty string for no PrimaryClip.
     klj_val got = klj_UnityPlayer_getClipboardText(kl_jni_env(), player, NULL, 0);
-    SOFT_CHECK(got.l == NULL, "an empty clipboard answered something");
+    SOFT_CHECK(got.l && klj_str(got.l) && !klj_str(got.l)[0], "an empty clipboard must answer an empty Java string");
     klj_val cb = {.l = kl_jni_new_string("pasted")};
     klj_UnityPlayer_setClipboardText(kl_jni_env(), player, &cb, 1);
     got = klj_UnityPlayer_getClipboardText(kl_jni_env(), player, NULL, 0);

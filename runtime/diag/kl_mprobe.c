@@ -393,7 +393,47 @@ static void mprobe_resolve_offsets(void) {
     }
 }
 
+// Explicit diagnostic: invoke a zero-argument method on a live Unity component.
+// Useful for checking an application's existing recovery UI when its platform
+// startup never routes there. This supplies no identity, token or server result.
+static void mprobe_invoke_component(void) {
+    const char *spec = kl_env_str("KL_PROBE_INVOKE", NULL);
+    if (!spec || strlen(spec) >= 256) return;
+    char name[256]; snprintf(name, sizeof name, "%s", spec);
+    char *separator = strstr(name, "::");
+    if (!separator || !separator[2]) return;
+    *separator = 0;
+    char *method = separator + 2;
+    char *type = strrchr(name, '.');
+    const char *ns = "";
+    if (type) { *type++ = 0; ns = name; } else type = name;
+    Il2CppClass *k = find_class(ns, type);
+    if (!k) { fprintf(stderr, "  [mprobe] invoke: component class unavailable\n"); return; }
+    const MethodInfo *m = il.class_get_method_from_name(k, method, 0);
+    const MethodInfo *find = find_method("UnityEngine", "Object", "FindObjectsOfType", 1);
+    if (!m || !find) { fprintf(stderr, "  [mprobe] invoke: method unavailable\n"); return; }
+    Il2CppObject *reflection_type = il.type_get_object(il.class_get_type(k));
+    void *args[] = { reflection_type };
+    Il2CppObject *instances = invoke(find, args, "FindObjectsOfType for explicit invocation");
+    uint32_t count = instances ? il.array_length(instances) : 0;
+    if (count != 1) {
+        fprintf(stderr, "  [mprobe] invoke: expected one active %s, found %u; skipped\n", type, count);
+        return;
+    }
+    Il2CppObject *object = *(Il2CppObject **)((uint8_t *)instances + ARR_DATA);
+    Il2CppObject *exception = NULL;
+    il.runtime_invoke(m, object, NULL, &exception);
+    fprintf(stderr, "  [mprobe] invoke %s::%s: %s\n", type, method,
+            exception ? "managed exception" : "returned without exception");
+}
+
 void kl_mprobe_tick(unsigned frame) {
+    static int invoke_done;
+    if (!invoke_done && kl_env_str("KL_PROBE_INVOKE", NULL) &&
+        frame >= kl_env_uint("KL_PROBE_INVOKE_FROM", 1800u) && mprobe_init()) {
+        invoke_done = 1;
+        mprobe_invoke_component();
+    }
     // Independent of KL_PROBE_INPUT and of KL_PROBE_FROM: this one has to land
     // BEFORE the throw it exists to describe, and the throw here is on the
     // first frame. It runs once, on the first tick that finds IL2CPP up.

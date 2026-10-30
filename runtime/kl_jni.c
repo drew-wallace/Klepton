@@ -587,6 +587,7 @@ static kl_jint klj_IsSameObject(void *env, void *a, void *b) { (void)env; return
 // is — UnityPlayerActivity is what the manifest declares. Answering by exact
 // name match would say "no" and send the engine down its no-Activity path.
 static const struct { const char *cls, *super; } g_supers[] = {
+    {"com/vuplex/webview/WebView3D", "com/vuplex/webview/WebView"},
     {"com/unity3d/player/UnityPlayerActivity", "android/app/Activity"},
     // Steam Link's own activity really does extend SDLActivity, and
     // SDL3 hands `SDLActivity.getContext()` — i.e. that subclass — to code that
@@ -2076,6 +2077,10 @@ const klj_binding *const klj_binding_tables[] = {
     klj_bind_net,
     klj_bind_softinput,
     klj_bind_services,
+    klj_bind_vuplex,
+    klj_bind_bigscreen,
+    klj_bind_avpro,
+    klj_bind_surface,
     klj_bind_photon,
     klj_bind_io,
     klj_bind_prefs,

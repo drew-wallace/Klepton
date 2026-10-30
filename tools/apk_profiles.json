@@ -1,0 +1,56 @@
+{
+  "4xvr-11026-vrp": {
+    "package": "cn.vr4p.oculus4xvrplayerov",
+    "version_code": "11026",
+    "entry_sha256": "4ff8abe9679c241b482cf6bb17d6e50a05a0b349932845427bf3a90f644f2466",
+    "apk_sha256": "f9193c57ade960e340842b5600af54096640c92385236196a6c0b9302654d9bf"
+  },
+  "4xvr-11026": {
+    "package": "cn.vr4p.oculus4xvrplayerov",
+    "version_code": "11026",
+    "entry_sha256": "4ff8abe9679c241b482cf6bb17d6e50a05a0b349932845427bf3a90f644f2466",
+    "apk_sha256": "017c9d3037b643694408ba3fb6888e0a2afe8d79a6e36be003f03f2f5c517f80"
+  },
+  "roborecall-41778": {
+    "package": "com.YourCompany.RoboRecall",
+    "version_code": "41778",
+    "entry_sha256": "2c431c781825c529b837c18f5599f611be31ea6a0aed601912f9bcbeb99e1844",
+    "apk_sha256": "cea54619e60ee47b6d872b1b3588f3ff4c0ea9ae93b3da84faf7d5e0ea57267e"
+  },
+  "roborecall-41904": {
+    "package": "com.YourCompany.RoboRecall",
+    "version_code": "41904",
+    "entry_sha256": "63ccf5d854ed2e04c71f8cb170185387e7a7e072feee342060c4a13ffce998ae",
+    "apk_sha256": "cf1a368a7361f8c9e419187f78d25e6d8896ec04fabafa36613fa0311ee68a1b"
+  },
+  "roborecall-47091": {
+    "package": "com.YourCompany.RoboRecall",
+    "version_code": "47091",
+    "entry_sha256": "a823b1ea4ce1bc499192a4b04624033d1761105710765451bb8064f141159acd",
+    "apk_sha256": "5e040deb7a2096ae49b9706374c929e5eaf1e64735b76c9818fa270f840c29d6"
+  },
+  "roborecall-47091-patched": {
+    "package": "com.YourCompany.RoboRecall",
+    "version_code": "47091",
+    "entry_sha256": "a823b1ea4ce1bc499192a4b04624033d1761105710765451bb8064f141159acd",
+    "apk_sha256": "131c2c64fac934d328637e7e21130b1e4298e619b093ff604c1225a011d7f292"
+  },
+  "roborecall-47091-v76": {
+    "package": "com.YourCompany.RoboRecall",
+    "version_code": "47091",
+    "entry_sha256": "a823b1ea4ce1bc499192a4b04624033d1761105710765451bb8064f141159acd",
+    "apk_sha256": "f5903f7dbd9ddc00e466e745184f007eb3f7c37d678d49e570fe6910518bf08f"
+  },
+  "walkabout-57013": {
+    "package": "com.MightyCoconut.WalkaboutMiniGolf",
+    "version_code": "57013",
+    "entry_sha256": "ea04624f7afb2a4e426ddb8215651100c5c1d04456c2b9ca533cba943d2666e8",
+    "apk_sha256": "34978a9f4ef965d14103402676ce429714a22532be47a78198b267893278a4ca"
+  },
+  "eleven": {
+    "package": "quest.eleven.forfunlabs",
+    "version_code": "210648353",
+    "entry_sha256": "f07178b9e88988a8432af7c376452e293c031ec111e7ad4c75ac72e668a867e0",
+    "apk_sha256": "70d5172d487361644bf05405aa6761857f5599a88f2335bbde5ed31258cbf404"
+  }
+}

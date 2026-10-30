@@ -91,6 +91,9 @@ typedef struct {
 // NULL if the name is not in the table. `kl_target_names()` is for the error
 // message that follows.
 const kl_target *kl_target_lookup(const char *name);
+// Register before boot. The record and its strings must have static lifetime.
+// NULL restores the built-in table; no imported target changes that table.
+void kl_target_register_build(const kl_target *target);
 const kl_target *kl_target_default(void);
 const char      *kl_target_names(void);
 

@@ -38,6 +38,8 @@ void kl_ndk_set_assets_dir(const char *dir);
 void *kl_ndk_window_new(int32_t w, int32_t h, int32_t format, void *owner);
 void  kl_ndk_window_free(void *win);
 void *kl_ndk_window_owner(const void *win);   // NULL for the activity's window
+// Keep a producer alive while native code holds an acquired window reference.
+void kl_ndk_window_set_lifetime(void *win, void (*retain)(void *), void (*release)(void *));
 
 // A producer surface's size is the PRODUCER's, and it is not known until the
 // first frame arrives — AImageReader is created 1x1 and corrected here.

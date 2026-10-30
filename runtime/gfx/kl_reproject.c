@@ -366,6 +366,19 @@ static const char kl_msl_reproject[] =
 "    return kl_chroma_apply(c, in.chromaOn, in.chromaKey, in.chromaRange);\n"
 "}\n"
 "\n"
+// OVR underlays require the guest's authored eye alpha. Keep the ordinary eye
+// fragment opaque: many guests leave alpha zero without submitting underlays.
+"fragment float4 kl_reproject_alpha_f(VOut in [[stage_in]],\n"
+"                               texture2d_array<float> tex [[texture(0)]],\n"
+"                               texture2d_array<float> tex1 [[texture(1)]],\n"
+"                               sampler samp [[sampler(0)]])\n"
+"{\n"
+"    float4 c = kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n"
+"    c.a = in.src == 0u ? tex.sample(samp, in.uv, in.slice).a\n"
+"                         : tex1.sample(samp, in.uv, in.slice).a;\n"
+"    return kl_chroma_apply(c, in.chromaOn, in.chromaKey, in.chromaRange);\n"
+"}\n"
+"\n"
 // The probe ladder (KL_CP_PROBE). Same library, same vertex function, so each
 // rung differs from the real pass in exactly one respect and nothing else moves.
 // A picture that is black tells you nothing about WHICH link is dark; these do.
@@ -932,6 +945,8 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
                                      (float)r[1] / (float)ov->tex_h,
                                      (float)r[2] / (float)ov->tex_w,
                                      (float)r[3] / (float)ov->tex_h);
+    if (ov->mirror_x) {u.uv_rect.x+=u.uv_rect.z;u.uv_rect.z=-u.uv_rect.z;}
+    if (ov->mirror_y) {u.uv_rect.y+=u.uv_rect.w;u.uv_rect.w=-u.uv_rect.w;}
 
     // KL_OVERLAY_FLIP_X: mirror the sampled U. AC Nexus's menu panels read
     // horizontally mirrored ("backwards" text) - the guest fills them for a quad

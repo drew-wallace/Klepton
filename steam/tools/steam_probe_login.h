@@ -1,6 +1,6 @@
-// Private ABI experiment for the exact Steam Frame 0.3.0 client. The builder
-// enables this only after verifying the pinned input hash. Runtime address
-// checks reject mismatched engine, proxy and legacy export layouts as well.
+// Private ABI experiment selected by the builder's exact client hash. Offsets
+// below describe the recovery client; game hosts provide a generated mapping
+// for supported updates. Runtime checks reject changed method/export layouts.
 #ifndef KL_STEAM_PROBE_LOGIN_H
 #define KL_STEAM_PROBE_LOGIN_H
 #include <fcntl.h>
@@ -10,11 +10,14 @@
 #include <unistd.h>
 
 #ifdef KL_STEAM_LOGIN_ABI_PINNED
+#ifndef KL_STEAM_LOGIN_OFFSET
+#define KL_STEAM_LOGIN_OFFSET(offset) (offset)
+#endif
 static int login_probe_address(kl_image *image, void *method, size_t expected) {
     size_t actual = 0;
     const char *owner = kl_addr_image(method, &actual);
     const char *reference = kl_addr_image(kl_sym(image, "CreateInterface"), NULL);
-    return owner && reference && !strcmp(owner, reference) && actual == expected;
+    return owner && reference && !strcmp(owner, reference) && actual == KL_STEAM_LOGIN_OFFSET(expected);
 }
 
 static int login_probe_loopback(uint32_t port) {
@@ -94,8 +97,10 @@ static void login_probe_transport(kl_image *image, void *engine, void *client, i
         return;
     }
     unsigned char *base = kl_base(image);
-    void (*construct)(void *, void *) = (void *)(base + 0x2044d64);
-    void (*destroy)(void *) = (void *)(base + 0x2044d9c);
+    size_t constructor = KL_STEAM_LOGIN_OFFSET(0x2044d64), destructor = KL_STEAM_LOGIN_OFFSET(0x2044d9c);
+    if (constructor == SIZE_MAX || destructor == SIZE_MAX) return;
+    void (*construct)(void *, void *) = (void *)(base + constructor);
+    void (*destroy)(void *) = (void *)(base + destructor);
     if (!login_probe_address(image, (void *)construct, 0x2044d64) ||
         !login_probe_address(image, (void *)destroy, 0x2044d9c)) return;
     _Alignas(8) unsigned char message[40] = {0};

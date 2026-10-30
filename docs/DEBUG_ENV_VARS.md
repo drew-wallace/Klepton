@@ -56,6 +56,13 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
 All of these require `KL_GLFB=1` to mean anything; without it the null driver
 answers GL and kl_glfb never initializes.
 
+- `KL_GLFB_INSPECT_PROGRAMS=14,30` — read selected GLES programs' actual
+  uniforms and sampler texture dimensions, formats and swizzles on their
+  hundredth draw. `*` selects all programs below 256. Read-only, once per
+  selected program; restores the active texture unit. Off by default.
+- `KL_GLFB_COPY_SELFTEST=1` — run real GPU readback checks during renderer
+  initialization: R8 alpha texture swizzling and ASTC mip copies, including
+  partial, tiny, cube and sRGB cases. Continues normal startup afterward.
 - `KL_GLFB=1` — enable the one-eye reference renderer on ANGLE/Metal.
   Host-only; it exists to produce the known-good frame a real backend gets
   diffed against.
@@ -697,7 +704,53 @@ handler).
   method-name resolver and print the resolution of each given libil2cpp
   offset; the standalone probe for the sampler's resolver.
 
+## Bigscreen email sign-in compatibility (`runtime/guest/kl_bigscreen.c`)
+
+- `KL_BIGSCREEN_EMAIL_LOGIN=0` — disable the default fallback for package
+  `com.bigscreenvr.bigscreen`, version code `4688857`. After its Oculus SDK
+  consumes a failed logged-in-user request, the fallback opens the app's own
+  email/password Login page on Unity's guest thread. It waits for one active
+  tablet, dismisses the platform popup through the app's navigation API, and
+  leaves an already-connected Bigscreen session alone. Other packages/versions
+  are unaffected. No identity, token or successful authentication is supplied.
+  This normal runtime behavior does not require `KL_PROBE_INVOKE`.
+
+- `KL_BIGSCREEN_RESUME_SESSION=0` — skip the saved-session check before the
+  email form. By default, the validated Bigscreen build's own
+  `Accounts.GetRefreshToken` and `CheckAccessTokenStatus` check the saved
+  refresh token with its server after Meta account service failure. The task
+  is held by a GC handle and polled on Unity's attached thread. Only a successful
+  server result starts the app loader's normal `OnLogInSuccess` continuation;
+  missing, rejected, faulted or canceled sessions return to email sign-in.
+  An existing connected session is left alone. No password store is added and
+  no token text is logged or copied out of the managed app. If the login page
+  remains open after restoration, its normal GoHome navigation runs once the
+  websocket is connected; other pages are preserved.
+
+- `KL_BIGSOUP_ERRNO=0` — disable the default writable errno bridge for
+  `libBigSoup.so` (including its signed framework and dylib names). Bigscreen's
+  bundled SCTP writes socket-creation results into Linux errno and reads them
+  back; the legacy accessor discarded these writes, causing a null socket on
+  room join despite successful allocation. The bridge commits guest writes at
+  native function import boundaries and translates native errors on access.
+  Other libraries retain their existing errno bindings. Disabling this is a
+  diagnostic rollback and can reproduce the room-join crash.
+
 ## Managed-side probe (`runtime/diag/kl_mprobe.c`)
+
+- `KL_PROBE_INVOKE=Namespace.Component::Method` — explicit diagnostic that
+  invokes one zero-argument instance method on exactly one active Unity
+  component. Runs once at `KL_PROBE_INVOKE_FROM` (default frame 1800). Missing
+  methods, no component, multiple instances or managed exceptions are reported
+  instead of guessing an object. Off by default. This changes guest state;
+  it was added to test Bigscreen's existing email-login UI without fabricating
+  an Oculus account or modifying server authentication.
+
+`KL_TRACE_LOG_MATCH=<substring>` is a complementary native-side diagnostic in
+`kl_va_handlers.c`: formats a bounded copy of Android log messages and prints
+up to eight matching native stacks (guest image offsets or host symbols).
+It does not alter the message or guest callback. Off by default. It identified
+Bigscreen's generic request error as an Oculus SDK callback failure.
 
 Calls Unity's **own C#** from the host, through the IL2CPP embedding API that
 libil2cpp exports (domain → assembly → image → class → `MethodInfo` →
@@ -2464,6 +2517,9 @@ except its own control vars (next section).
 - `KL_SIM_HEAD_HEIGHT` — simulator-only standing camera lift in metres.
   **Default `1.6`:** a Home launch has the same standing view as a scripted
   launch. `0` disables the lift; physical-headset tracking is unaffected.
+  Simulator selection-ray controller positions use the same lift, and their
+  already-aimed orientation is converted to the stored grip frame before the
+  normal Touch correction is applied.
 - `KL_STEAM_OFFLINE` — explicit offline-diagnostic bootstrap override. For
   targets with an audited Steam profile, a build generated with
   `KLEPTON_STEAM_LOCAL=0` defaults this to `1`, including launches from Home.
@@ -2769,3 +2825,38 @@ Not knobs — the shim reads these to answer the guest with host truth.
 - `LANG` — `kl_jni.c` derives `Locale.getDefault()`'s language and country
   from it (`en_US.UTF-8` becomes en/US). Empty, unset, or `C*` falls back to
   en/US.
+
+
+### GLES compatibility descriptions
+
+`KL_GLES_VERSION=3.0` or `3.1` selects matching GLES version strings and numeric
+queries. Unset values preserve the target default. The original Bigscreen
+startup workaround used 3.0; current builds recommend 3.1 so its avatar shader
+can bind read-only storage buffers. Invalid values leave the target default.
+For imports, the Mac installer's **Advanced → GLES compatibility** records the
+same choice in the build manifest and generated app. The environment form is
+for diagnosis (and can also be placed in `Documents/klepton-env.txt`).
+
+For Bigscreen package/version 4688857, Unity receives its supported
+`-disable-gpu-skinning` launch argument. This keeps skin deformation on the CPU
+while allowing read-only graphics buffers. `KL_BIGSCREEN_CPU_SKINNING=0` disables
+that compatibility argument. `KL_GLFB_VIRTUAL_UNIFORMS` overrides the scoped
+uniform-location mapping: baked sampler locations and name-based queries use
+one location space, including contiguous arrays and getter round trips.
+`KL_AVATAR_TRACE=1` records buffer reflection and three avatar draws' binding
+metadata; it does not record buffer contents or profile values.
+
+### Meta account-service diagnostics
+
+Klepton currently has no authenticated Meta account provider. Missing user,
+organization ID, proof and online access-token requests complete with typed
+service-unavailable errors. The `[plat] account service unavailable:` marker
+means no Meta HTTP request was made; it is not a password rejection or an
+internet connectivity diagnosis. Bigscreen's automatic login needs genuine
+platform identity and a fresh proof nonce.
+
+`KL_NET_OFFLINE=1` retains the pre-existing synthetic access-token completion
+for explicitly offline diagnostics; the socket layer prevents exchange with a
+server. `KL_PLAT_USER=1` is the existing synthetic local-profile diagnostic for
+titles that otherwise quit or wait. It is not Meta sign-in and cannot supply
+Bigscreen's real organization identity or verified online session.

@@ -26,8 +26,9 @@ cd "$(dirname "$0")"
 ROOT=".."
 eval "$(python3 targets.py "${KLEPTON_TARGET:-}")"
 BUNDLE_ID="${KLEPTON_BUNDLE_ID:-$KLT_BUNDLE}"
-APK="$ROOT/$KLT_APK"
-ASSETS="$ROOT/$KLT_ASSETS"
+APK="${KLT_HOST_APK:-$ROOT/$KLT_APK}"
+ASSETS="${KLT_HOST_ASSETS:-$ROOT/$KLT_ASSETS}"
+HOST_TREE="${KLT_HOST_TREE:-$ROOT/$KLT_TREE}"
 TREE="$KLT_TREE"
 # Present-or-absent, like the obb and files below. A NativeActivity port
 # (vicecity/libmiamivr) can ship no assets/ inside the APK at all — its data is
@@ -154,7 +155,7 @@ fi
 # Present-or-absent, like the OBB: a tree unpacked some other way still stages.
 META=()
 for m in apktool.yml AndroidManifest.xml; do
-  [ -f "$ROOT/$TREE/$m" ] && META+=("$ROOT/$TREE/$m")
+  [ -f "$HOST_TREE/$m" ] && META+=("$HOST_TREE/$m")
 done
 
 # ...and they are stageable ON THEIR OWN, which is not a convenience.
@@ -226,7 +227,7 @@ for runtime, devices in json.load(sys.stdin)["devices"].items():
   if [ -n "$KLT_QTPLUGINS" ]; then
     rm -rf "$DEST/$TREE/qtplugins"
     mkdir -p "$DEST/$TREE/qtplugins"
-    cp "$ROOT/$KLT_QTPLUGINS"/libplugins_*.so "$DEST/$TREE/qtplugins/"
+    cp "${KLT_HOST_QTPLUGINS:-$ROOT/$KLT_QTPLUGINS}"/libplugins_*.so "$DEST/$TREE/qtplugins/"
   fi
   echo "[stage] done: $(du -sh "$DEST" | cut -f1)"
   exit 0
@@ -329,7 +330,7 @@ fi
 if [ -n "$KLT_QTPLUGINS" ]; then
   STAGE=$(mktemp -d)/qtplugins
   mkdir -p "$STAGE"
-  cp "$ROOT/$KLT_QTPLUGINS"/libplugins_*.so "$STAGE/"
+  cp "${KLT_HOST_QTPLUGINS:-$ROOT/$KLT_QTPLUGINS}"/libplugins_*.so "$STAGE/"
   copy "$STAGE" "Documents/$TREE/qtplugins"
   rm -rf "$(dirname "$STAGE")"
 fi

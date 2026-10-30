@@ -1988,6 +1988,12 @@ X(klb___assert2) X(klb___FD_CLR_chk) X(klb___fgets_chk)
 X(klb___pthread_cleanup_push) X(klb___pthread_cleanup_pop)
 #undef X
 extern char **environ;
+// Bionic accepts a bare name as an unset request. Keep putenv's borrowed
+// storage semantics for NAME=value; setenv would copy and break later edits.
+static int klb_putenv(char *value) {
+    if (!strchr(value, '=')) return unsetenv(value);
+    return putenv(value);
+}
 // A VARIABLE, not a function, so it cannot ride the X() macro above.
 extern const unsigned char *klb_ctype_ptr;   // kl_libc_slink.c
 
@@ -2077,6 +2083,7 @@ static const kl_entry g_shim[] = {
 
     // divergent layouts / Android-only
     E("__errno", klb_errno), E("environ", &environ), E("gettid", klb_gettid),
+    E("putenv", klb_putenv),
     // Xash3D (cs1/hl1) imports: a data global and the POSIX timer trio (stubbed).
     E("in6addr_any", &in6addr_any),
     E("timer_create", klb_timer_create), E("timer_settime", klb_timer_settime),

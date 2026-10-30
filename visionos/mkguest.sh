@@ -26,8 +26,8 @@ cd "$(dirname "$0")"
 ROOT=".."
 LD="$ROOT/build/klepton-ld"
 eval "$(python3 targets.py "${KLEPTON_TARGET:-}")"
-SRC="$ROOT/$KLT_SRCDIR"
-OUT="Frameworks/$KLT_NAME"
+SRC="${KLT_HOST_SRCDIR:-$ROOT/$KLT_SRCDIR}"
+OUT="Frameworks/${KLT_FRAMEWORK_KEY:-$KLT_NAME}"
 LIBS="$KLT_LIBS"
 
 # Which slices — see the header. The names are the make variable's (xros,

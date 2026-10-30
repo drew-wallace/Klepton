@@ -1248,6 +1248,15 @@ static void check_overlay_math(void) {
        "eyeVisibility RIGHT draws in the right eye only");
     ov.eye_visibility = 0;
 
+    ov.mirror_x=1;ov.mirror_y=1;
+    kl_overlay_uniforms reflected=kl_overlay_build(&ov,0,matrix_identity_float4x4,
+                                                  matrix_identity_float4x4,P);
+    ok(reflected.visible && reflected.half_size.x==1 && reflected.half_size.y==1 &&
+       reflected.uv_rect.x==1 && reflected.uv_rect.y==1 &&
+       reflected.uv_rect.z==-1 && reflected.uv_rect.w==-1,
+       "reflected overlay axes mirror UVs without rejecting or changing quad geometry");
+    ov.mirror_x=0;ov.mirror_y=0;
+
     // A shape this pass cannot draw is REFUSED rather than drawn as a flat
     // rectangle — see kl_overlay_build. Cylinder is the one a guest is most
     // likely to submit next.
@@ -1364,6 +1373,68 @@ static void check_overlay_pixels(void) {
            pass ? "the overlay reads a top-left-origin (Vulkan) layer the right way up"
                 : "the overlay reads a GL layer the right way up");
     }
+
+    // A real browser underlay followed by an eye containing a laser, an alpha
+    // hole and an antialiased edge. The eye must retain authored alpha and use
+    // premultiplied blending; the ordinary opaque-eye path must stay opaque.
+    MTLTextureDescriptor *ed = [MTLTextureDescriptor new];
+    ed.textureType = MTLTextureType2DArray;
+    ed.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    ed.width = 2; ed.height = 2; ed.arrayLength = 1;
+    ed.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> eye = [dev newTextureWithDescriptor:ed];
+    uint8_t ep[16] = {0,0,0,0, 64,0,0,128, 255,255,0,255, 0,0,0,0};
+    [eye replaceRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0 slice:0
+             withBytes:ep bytesPerRow:8 bytesPerImage:16];
+    id<MTLLibrary> elib = [dev newLibraryWithSource:
+        [NSString stringWithUTF8String:kl_reproject_msl()] options:nil error:&err];
+    MTLRenderPipelineDescriptor *epd = [MTLRenderPipelineDescriptor new];
+    epd.vertexFunction = [elib newFunctionWithName:@"kl_reproject_v"];
+    epd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    kl_ovrp_render_pose r = {0}; r.serial = 1; r.qw = 1;
+    for (int e=0;e<2;e++) for(int i=0;i<4;i++) r.tangents[e][i]=1;
+    kl_reproject_uniforms eu = kl_reproject_build(&r,0,matrix_identity_float4x4,
+        matrix_identity_float4x4,P,0,0,0);
+    kl_overlay_uniforms ou = kl_overlay_build(&ov,0,matrix_identity_float4x4,
+        matrix_identity_float4x4,P);
+    for (int alpha=0;alpha<2;alpha++) {
+        epd.fragmentFunction = [elib newFunctionWithName:alpha
+            ? @"kl_reproject_alpha_f" : @"kl_reproject_f"];
+        epd.colorAttachments[0].blendingEnabled = alpha;
+        epd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        epd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+        epd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        epd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        id<MTLRenderPipelineState> eps = [dev newRenderPipelineStateWithDescriptor:epd error:&err];
+        if (!eps) { ok(0,"alpha-eye pipeline links"); return; }
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> cmd = [q commandBuffer];
+        id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:ps];
+        [enc setFragmentTexture:src atIndex:0];
+        [enc setFragmentSamplerState:samp atIndex:0];
+        [enc setVertexBytes:&ou length:sizeof ou atIndex:0];
+        [enc setFragmentBytes:&ou length:sizeof ou atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        [enc setRenderPipelineState:eps];
+        [enc setFragmentTexture:eye atIndex:0];
+        [enc setFragmentTexture:eye atIndex:1];
+        [enc setVertexBytes:&eu length:sizeof eu atIndex:0];
+        klr_draw(enc);
+        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+        uint8_t out[16] = {0};
+        [dst getBytes:out bytesPerRow:8 fromRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0];
+        uint8_t composed[16] = {255,255,0,255, 255,255,255,255,
+                                255,0,0,255, 64,127,0,255};
+        uint8_t opaque[16] = {255,255,0,255, 0,0,0,255, 0,0,0,255, 64,0,0,255};
+        ok(memcmp(out,alpha?composed:opaque,16)==0, alpha
+            ? "laser stays above browser; alpha holes and premultiplied edges expose underlay"
+            : "ordinary eye remains opaque even when its source alpha is zero");
+    }
+
 }
 
 int main(void) {

@@ -5,6 +5,7 @@
 // dispatch, id interning) is kl_jni.c; this file owns implementations and the
 // binding table that names them. See runtime/jni/kl_jni_int.h for the seam.
 #include <ctype.h>
+#include "kl_bigscreen.h"
 #include <errno.h>
 #include <stdarg.h>
 #include <pthread.h>
@@ -28,6 +29,7 @@
 #include "kl_va.h"
 #include <zlib.h>
 #include "kl_jni_int.h"
+#include "kl_jni_vuplex.h"
 
 // ---- assets ----
 // The path the import census predicted: with no AAssetManager_* import,
@@ -354,8 +356,10 @@ static klj_val klj_Intent_getExtras(void *env, void *self, const klj_val *a, int
     static int   built;
     if (!built) {
         built = 1;
-        static klj_kv kv[5];
+        static klj_kv kv[6];
         int k = 0;
+        const char *unity=kl_bigscreen_unity_arguments();
+        if(*unity){kv[k].key="unity";kv[k].val=unity;k++;}
         const struct { const char *env, *key; } want[] = {
             {"KL_SLINK_SARGS",         "sArgs"},
             {"KL_SLINK_START_INFO",    "sStartInfo"},
@@ -583,7 +587,12 @@ static klj_val klj_Intent_getBooleanExtra(void *env, void *self, const klj_val *
     return (klj_val){.j = n > 1 ? (a[1].j & 1) : 0};
 }
 static klj_val klj_Intent_getStringExtra(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
+    (void)env; (void)self;
+    const char *key=n?klj_str(a[0].l):NULL;
+    if(key&&!strcmp(key,"unity")){
+        const char *arguments=kl_bigscreen_unity_arguments();
+        if(*arguments){KLJ_LOG_ONCE("Bigscreen requests Unity CPU skinning for the host graphics backend");return (klj_val){.l=kl_jni_new_string(arguments)};}
+    }
     return (klj_val){.l = NULL};
 }
 
@@ -683,7 +692,7 @@ static int g_webview_draws;
  klj_webdoc *klj_webdoc_of(void *self) {
     klj_object *o = klj_as_object(self);
     if (!o || !o->cls || strcmp(o->cls, "android/webkit/WebView") != 0) return NULL;
-    return o->data;
+    return klj_vuplex_is_view(self) ? NULL : o->data;
 }
 
 static klj_val klj_WebView_init(void *env, void *self, const klj_val *a, int n) {

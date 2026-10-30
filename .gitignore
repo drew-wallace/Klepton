@@ -102,6 +102,7 @@ tools/__pycache__/
 # Python bytecode is generated locally.
 __pycache__/
 *.py[cod]
+/steam/tools/library/node_modules/
 
 # Generated game/toolchain trees and local directory symlinks.
 /vendor

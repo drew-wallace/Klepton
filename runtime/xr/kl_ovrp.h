@@ -133,6 +133,13 @@ int kl_ovrp_head_predict_delta(double time_s, float *quat4, float *pos3);
 void kl_ovrp_set_hand_pose(int hand, float px, float py, float pz,
                            float qx, float qy, float qz, float qw);
 
+// Already-aimed Touch pose, such as a simulator selection ray. Inverts the
+// configured grip-to-Touch correction before storing in the shared grip space,
+// so an OVRPlugin guest reads this exact position/orientation after conversion.
+// Motion is zero; physical controllers continue publishing measured grip motion.
+void kl_ovrp_set_touch_pose(int hand, float px, float py, float pz,
+                            float qx, float qy, float qz, float qw);
+
 // ...and the same pose WITH its motion. ovrpPoseStatef carries velocity and
 // angular velocity beside the pose (kl_ovrp.c documents the layout), libunity
 // copies both into the XR node state, and Unity hands them to managed code as
@@ -356,6 +363,12 @@ typedef struct {
     // here, not into the swapchain image we handed out via GetLayerTexture2 — so
     // the compositor resolves THIS to an MTLTexture, or every panel is empty.
     unsigned long long tex;
+    // EnqueueSubmitLayer2 supplies a signed transform scale. Keep physical
+    // dimensions positive and carry its reflected axes into texture sampling.
+    int mirror_x, mirror_y;
+    // Owned composition order, decoded only for legacy EnqueueSubmitLayer2.
+    // Other producers' raw flag bits have different meanings.
+    int underlay;
 } kl_ovrp_overlay;
 
 // How many non-eye layers the guest submitted with its most recent frame, and

@@ -56,8 +56,9 @@ if STEAM_LOCAL:
     # can be replaced independently and must not determine the installed version.
     _info = plistlib.loads(pathlib.Path(HERE, "Info.plist").read_bytes())
     _root = pathlib.Path(HERE).parent
-    _info.update(installed_version(_root / KLT['tree'],
-                                  _root / KLT['apk'] if KLT.get('apk') else None))
+    _game_apk = KLT.get('host_apk') or (_root / KLT['apk'] if KLT.get('apk') else None)
+    _info.update(installed_version(pathlib.Path(KLT.get('host_tree') or _root / KLT['tree']),
+                                  pathlib.Path(_game_apk) if _game_apk else None))
     GAME_INFO_PLIST = f"build/GameInfo-{KLT['name']}.plist"
     _info_path = pathlib.Path(HERE, GAME_INFO_PLIST)
     _info_path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,7 +102,7 @@ MVK = ["MoltenVK"] if os.path.isdir(
 # two apps do not overwrite each other's translations in place; ANGLE's is not,
 # because it is the same renderer for every guest. Inside the built .app both
 # land flat in Frameworks/, which is why kl_app.c needs to know nothing about it.
-GUEST_DIR = f"Frameworks/{KLT['name']}"
+GUEST_DIR = f"Frameworks/{KLT.get('framework_key', KLT['name'])}"
 ANGLE_DIR = "Frameworks"
 # Both sets are embedded-not-linked, so the pbxproj treatment is identical and
 # the generator stays data-driven — the two lists differ only in what a missing
@@ -208,6 +209,10 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonLauncher.swift", "KleptonHL1.swift"]
 if STEAM_LOCAL:
     SWIFT += ['../../steam/visionos/Sources/kl_steam_host.c', '../build/SteamLocal/SteamHostLogin.swift']
+if os.environ.get('KLEPTON_BUILD_MANIFEST'):
+    generated = pathlib.Path(os.environ['KLEPTON_BUILD_MANIFEST']).resolve().with_name('BuildTarget.c')
+    generated.write_text(targets_mod.build_target_source(KLT))
+    SWIFT += [str(generated)]
 swift = [{"name": s, "ref": oid(f"FS{i}"), "bld": oid(f"BS{i}")} for i, s in enumerate(SWIFT)]
 
 swift_buildfiles = "\n".join(
@@ -261,7 +266,7 @@ _display = (_launcher_display.get(KLT['name'], KLT['display']) if _launcher_on
 _conditions = (['KL_CUSTOM_LAUNCHER'] if _launcher_on else [])
 if STEAM_LOCAL:
     _conditions += ['KL_STEAM_GAME_HOST']
-elif KLT.get('steam_local', False):
+elif KLT.get('steam_local', False) or KLT.get('steam_diagnostics', False):
     # A game with no bundled backend is a diagnostic build. Make its offline
     # bootstrap survive Home launches, which do not inherit run.sh/test env.
     _conditions += ['KL_STEAM_DIAGNOSTICS']
@@ -269,6 +274,11 @@ LAUNCHER_COND = ('\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "'+ ' '.join(_co
                  if _conditions else "")
 STEAM_C_COND = ('\t\t\t\tARCHS = arm64;\n' if STEAM_LOCAL else '')
 STEAM_C_DEFINE = ('\t\t\t\t\t"KL_STEAM_GAME_HOST=1",\n' if STEAM_LOCAL else '')
+if os.environ.get('KLEPTON_BUILD_MANIFEST'):
+    STEAM_C_DEFINE += '\t\t\t\t\t"KL_BUILD_MANIFEST=1",\n'
+    # Android labels are data, not pbxproj syntax.
+    import json
+    _display = json.dumps(_display)[1:-1]
 F_STEAM_ASSETS, B_STEAM_ASSETS = oid('FSTEAMASSETS'), oid('BSTEAMASSETS')
 STEAM_ASSETS_REF = (f'\t\t{F_STEAM_ASSETS} = {{isa = PBXFileReference; lastKnownFileType = folder; path = build/SteamLocal/SteamAuthAssets; sourceTree = SOURCE_ROOT; }};\n' if STEAM_LOCAL else '')
 STEAM_ASSETS_BUILD = (f'\t\t{B_STEAM_ASSETS} = {{isa = PBXBuildFile; fileRef = {F_STEAM_ASSETS}; }};\n' if STEAM_LOCAL else '')
@@ -346,7 +356,7 @@ COMMON = f"""
 				// second target needed one. The failure is a link error naming
 				// VTDecompressionSession*, which reads as a missing SDK rather
 				// than as a build setting that was never updated.
-				OTHER_LDFLAGS = "-lz -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface";
+				OTHER_LDFLAGS = "-lz -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface -framework WebKit -framework CoreGraphics";
 				PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE_ID};
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = xros;

@@ -288,6 +288,17 @@ static int g_es_major = 3, g_es_minor = 2;
 void kl_egl_set_gles_version(int major, int minor) {
     g_es_major = major; g_es_minor = minor;
 }
+static pthread_once_t g_version_once = PTHREAD_ONCE_INIT;
+static void configure_gles_version(void) {
+    const char *version = kl_env_str("KL_GLES_VERSION", NULL);
+    if (!version || !*version) return;
+    if (!strcmp(version, "3.0")||!strcmp(version,"3.1")) {
+        g_es_major = 3; g_es_minor = version[2]-'0';
+        fprintf(stderr, "  [egl] GLES %s compatibility description selected (KL_GLES_VERSION)\n",version);
+    } else {
+        fprintf(stderr, "  [egl] invalid KL_GLES_VERSION '%s'; use 3.0, 3.1 or leave unset for the target default\n", version);
+    }
+}
 
 // The extensions advertised here. Naming one is a promise and a broken promise
 // fails far from its cause — but an EMPTY list is its own broken promise to a
@@ -369,6 +380,7 @@ static int klgl_want_multiview(void) {
 // argument above is an ES 3.2 argument and does not carry over, so that target
 // stays exactly as it was rather than being changed by a fix it did not need.
 static int klgl_ext_count(void) {
+    pthread_once(&g_version_once, configure_gles_version);
     if (g_es_major < 3) return 0;
     int n = (int)(sizeof g_gl_extensions / sizeof g_gl_extensions[0]);
     // Hide the two trailing OVR_multiview entries from targets that don't use it.
@@ -377,6 +389,7 @@ static int klgl_ext_count(void) {
 }
 
 static const char *klgl_GetString(uint32_t name) {
+    pthread_once(&g_version_once, configure_gles_version);
     static char ver[64], glsl[64], exts[256];
     switch (name) {
     case GL_VENDOR:     return "Klepton";
@@ -505,6 +518,7 @@ static const struct { uint32_t pname; int32_t value; } g_gl_int[] = {
 // print, no zero. Under the reference renderer the miss goes to ANGLE, which
 // owns the dynamic state (READ_BUFFER & co.) this table never described.
 int kl_gl_cap_integerv(uint32_t pname, int32_t *params) {
+    pthread_once(&g_version_once, configure_gles_version);
     if (!params) return 1;
     if (pname == GL_MAJOR_VERSION) { params[0] = g_es_major; return 1; }
     if (pname == GL_MINOR_VERSION) { params[0] = g_es_minor; return 1; }
@@ -1973,6 +1987,7 @@ static const struct { const char *name; void *fn; } g_egl[] = {
 };
 
 void *kl_egl_lookup(const char *name) {
+    pthread_once(&g_version_once, configure_gles_version);
     for (size_t i = 0; i < sizeof g_egl / sizeof g_egl[0]; i++)
         if (strcmp(g_egl[i].name, name) == 0) return g_egl[i].fn;
     return NULL;

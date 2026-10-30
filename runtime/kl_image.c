@@ -28,6 +28,7 @@
 #include "kl_guestpatch.h"
 #include "../steam/runtime/kl_steam.h"
 #include "kl_env.h"
+#include "libc/kl_errno_bridge.h"
 
 
 // ---------- ELF64 subset ----------
@@ -466,6 +467,8 @@ static uint64_t sym_value(kl_image *img, uint32_t idx, const char **name_out) {
             return (uint64_t)(uintptr_t)g_interpose[i].fn;
     if (s->st_shndx != 0) return (uint64_t)(uintptr_t)(img->base + s->st_value);
     void *ext = kl_shim_lookup(nm);
+    if(ext && (s->st_info & 0xf)==2 /* STT_FUNC */)
+        ext=kl_errno_bridge_import(img->path,nm,ext);
     // Not a shim: try other already-loaded guest images. Android's linker binds
     // an .so's imports against its DT_NEEDED chain; our chain is the image
     // registry, filled dependencies-first by kl_load_recursive. This is what

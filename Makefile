@@ -18,7 +18,7 @@ CFLAGS  := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(R
 # RUNTIME_SHIP — everything that links the runtime needs them.
 LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio \
            -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
-           -framework CoreFoundation -framework AVFoundation -framework Foundation
+           -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework AppKit
 # The host/ship split is a source-list boundary, not a runtime getenv.
 #
 # RUNTIME_SHIP is everything that goes into the visionOS app bundle. It is the
@@ -43,20 +43,20 @@ RUNTIME_JNI := runtime/kl_jni.c \
            runtime/jni/kl_jni_services.c runtime/jni/kl_jni_photon.c runtime/jni/kl_jni_io.c \
            runtime/jni/kl_jni_prefs.c runtime/jni/kl_jni_sdl.c \
            runtime/jni/kl_jni_ue4.c runtime/jni/kl_jni_electra.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_jkxr.c \
-           runtime/jni/kl_jni_bhaptics.c
+           runtime/jni/kl_jni_bhaptics.c runtime/jni/kl_jni_vuplex.c runtime/jni/kl_jni_bigscreen.c runtime/jni/kl_jni_avpro.c runtime/jni/kl_jni_surface.c
 
-RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_jump.c runtime/kl_jump_entries.S runtime/kl_tlsdesc.S runtime/kl_stub_cells.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
+RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_jump.c runtime/kl_jump_entries.S runtime/kl_tlsdesc.S runtime/kl_stub_cells.S runtime/libc/kl_errno_bridge.c runtime/libc/kl_errno_bridge_entry.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
            runtime/libc/kl_va_handlers.c runtime/libc/kl_va_thunks.S \
            runtime/libc/kl_libc.c steam/steamlink/runtime/libc/kl_libc_slink.c runtime/libc/kl_eventfd.c runtime/libc/kl_pthread.c runtime/kl_dl.c steam/runtime/kl_steam.c \
            runtime/guest/kl_ndk.c runtime/kl_x18.c runtime/kl_target.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c \
            runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
-           runtime/xr/kl_ovrplat.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m \
+           runtime/xr/kl_ovrplat.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m runtime/media/kl_webview.m runtime/media/kl_stream.m \
            runtime/gfx/kl_vulkan.c \
            runtime/guest/kl_nativeactivity.c steam/steamlink/runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_sdl2.c \
-           runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c \
+           runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c runtime/guest/kl_bigscreen.c \
            runtime/media/kl_aaudio.c runtime/media/kl_mediaplayer.c \
            runtime/gfx/kl_glfb.c runtime/gfx/kl_cvmtl.m runtime/gfx/kl_fove.m runtime/gfx/kl_gl_trace.S runtime/gfx/kl_gl_lock.S \
            runtime/guest/kl_mono.c \
@@ -81,7 +81,7 @@ RUNTIME := $(RUNTIME_SHIP) $(RUNTIME_DIAG)
 # that measured a build nobody has.
 # kl_phonon_hrtf.S .incbins the SOFA blob, so the data file is a prerequisite
 # of everything too — same missed-FAILURE argument as the generated tables.
-RUNTIME_ALL_HDRS := $(wildcard steam/runtime/*.h) $(wildcard steam/steamlink/runtime/*/*.h) $(wildcard games/*/runtime/*.h) $(wildcard runtime/*.h) $(wildcard runtime/*/*.h)
+RUNTIME_ALL_HDRS := $(wildcard steam/runtime/*.h) $(wildcard steam/steamlink/runtime/*/*.h) $(wildcard games/*/runtime/*.h) $(wildcard runtime/*.h) $(wildcard runtime/*/*.h) $(wildcard runtime/gfx/*.inc)
 RUNTIME_HDRS := $(RUNTIME_ALL_HDRS) $(wildcard tests/*.h) \
                 runtime/data/phonon_hrtf_cipic_124.sofa \
                 runtime/data/kl_menu_font.ttf
@@ -194,6 +194,78 @@ build/t_fadvise: tests/t_fadvise.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_fadvise.c $(RUNTIME) $(LDLIBS)
 
+build/t_putenv: tests/t_putenv.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_putenv.c $(RUNTIME) $(LDLIBS)
+
+build/t_errno_bridge: tests/t_errno_bridge.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_errno_bridge.c $(RUNTIME) $(LDLIBS)
+
+build/t_bigscreen_sctp: tests/t_bigscreen_sctp.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bigscreen_sctp.c $(RUNTIME) $(LDLIBS)
+
+build/t_surface_decode: tests/t_surface_decode.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_surface_decode.c $(RUNTIME) $(LDLIBS)
+
+build/t_oculus_init: tests/t_oculus_init.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_oculus_init.c $(filter-out runtime/jni/kl_jni_services.c,$(RUNTIME)) $(LDLIBS)
+
+build/t_bigscreen_jni: tests/t_bigscreen_jni.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bigscreen_jni.c $(filter-out runtime/jni/kl_jni_vuplex.c runtime/jni/kl_jni_bigscreen.c,$(RUNTIME)) $(LDLIBS)
+
+build/t_platform_user_error: tests/t_platform_user_error.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_platform_user_error.c $(RUNTIME) $(LDLIBS)
+
+build/t_touch_pose: tests/t_touch_pose.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_touch_pose.c $(RUNTIME) $(LDLIBS)
+
+build/t_webview_texture: tests/t_webview_texture.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_webview_texture.c $(RUNTIME) $(LDLIBS)
+
+build/t_overlay_image_thread: tests/t_overlay_image_thread.c tests/t_mtl_provider.m tests/t_mtl_provider.h $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_overlay_image_thread.c tests/t_mtl_provider.m $(RUNTIME) $(LDLIBS) -framework Metal
+
+build/t_webview: tests/t_webview.m runtime/media/kl_webview.m runtime/media/kl_webview.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_webview.m runtime/media/kl_webview.m -framework WebKit -framework CoreGraphics -framework AppKit
+
+build/t_webview_video: tests/t_webview_video.m runtime/media/kl_webview.m runtime/media/kl_webview.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_webview_video.m runtime/media/kl_webview.m -framework WebKit -framework CoreGraphics -framework AppKit -framework AVFoundation -framework CoreVideo -framework CoreMedia
+
+build/t_bigscreen_web_input: tests/t_bigscreen_web_input.m $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_bigscreen_web_input.m $(RUNTIME) $(LDLIBS)
+
+build/t_bigscreen_stream: tests/t_bigscreen_stream.m $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_bigscreen_stream.m $(RUNTIME) $(LDLIBS) -framework UniformTypeIdentifiers
+
+build/t_avpro: tests/t_avpro.m tests/t_bigscreen_stream.m $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_avpro.m $(RUNTIME) $(LDLIBS) -framework UniformTypeIdentifiers
+
+build/t_avatar_buffers: tests/t_avatar_buffers.c runtime/gfx/kl_glfb_ssbo.inc $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_avatar_buffers.c $(RUNTIME) $(LDLIBS)
+
+build/t_uniform_locations: tests/t_uniform_locations.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_uniform_locations.c $(RUNTIME) $(LDLIBS)
+
+build/t_gles_version: tests/t_gles_version.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_gles_version.c $(RUNTIME) $(LDLIBS)
+
 build/t_tls_classifier: tests/t_tls_classifier.c runtime/kl_x18.c runtime/kl_x18.h runtime/kl_env.c
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_tls_classifier.c runtime/kl_x18.c runtime/kl_env.c
@@ -222,6 +294,10 @@ build/t_steam_init_retry: games/walkabout/tests/t_steam_init_retry.c games/walka
 build/t_mprobe_gate: tests/t_mprobe_gate.c runtime/diag/kl_mprobe.c runtime/kl_env.c
 	@mkdir -p build
 	$(CC) $(CFLAGS) -Iruntime/diag -Isteam/runtime -Isteam/steamlink/runtime/guest -Isteam/steamlink/runtime/libc -o $@ tests/t_mprobe_gate.c runtime/diag/kl_mprobe.c runtime/kl_env.c
+
+build/t_bigscreen_login: tests/t_bigscreen_login.c runtime/guest/kl_bigscreen.c runtime/guest/kl_bigscreen.h runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bigscreen_login.c runtime/guest/kl_bigscreen.c runtime/kl_env.c
 
 build/t_signal_wait: tests/t_signal_wait.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
@@ -726,7 +802,15 @@ build/t_tlsdesc: tests/t_tlsdesc.c tests/t_tlsdesc_probe.S runtime/kl_tlsdesc.S
 tlsdesc: build/t_tlsdesc
 	./build/t_tlsdesc
 
-check: steamcheck build/t_opensl build/t_photon_audio build/t_jni_array_args build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_xrinput build/t_softinput build/t_ctr build/t_tlsdesc build/t_bcast build/t_fault build/t_glcaps build/t_fove build/t_x18race build/klepton-ld
+check: steamcheck build/t_surface_decode build/t_errno_bridge build/t_touch_pose build/t_bigscreen_login build/t_platform_user_error build/t_putenv build/t_oculus_init build/t_bigscreen_jni build/t_gles_version build/t_opensl build/t_photon_audio build/t_jni_array_args build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_xrinput build/t_softinput build/t_ctr build/t_tlsdesc build/t_bcast build/t_fault build/t_glcaps build/t_fove build/t_x18race build/klepton-ld
+	@./build/t_touch_pose
+	@./build/t_errno_bridge
+	@./build/t_bigscreen_login
+	@./build/t_platform_user_error
+	@./build/t_putenv
+	@./build/t_oculus_init
+	@./build/t_bigscreen_jni
+	@./build/t_gles_version
 	@./build/t_opensl
 	@./build/t_photon_audio
 	@./build/t_jni_array_args
@@ -737,6 +821,8 @@ check: steamcheck build/t_opensl build/t_photon_audio build/t_jni_array_args bui
 	@echo "=== klepton-ld SPLIT placement (synthetic 300 MB library) ===" && tail -1 build/ldsplit.log
 	@echo "=== crash reporter ===" && ./build/t_fault
 	@echo "=== GL limits vs ANGLE ===" && ./build/t_glcaps vendor/out/Debug
+	@KL_GLFB=1 KL_ANGLE_DIR=vendor/out/Debug ./build/t_surface_decode > build/surface-decode.log 2>&1 || { cat build/surface-decode.log; exit 1; }
+	@tail -1 build/surface-decode.log
 	@./build/t_hevc > build/hevc.log 2>&1 || { cat build/hevc.log; exit 1; }
 	@grep -E '=== HEVC|30 access units' build/hevc.log && tail -1 build/hevc.log
 	@./build/t_xrspace > build/xrspace.log 2>&1 || { cat build/xrspace.log; exit 1; }
@@ -1001,14 +1087,14 @@ build/xros/libklepton.dylib: build/xros/libklepton.a
 	@$(CC) -target arm64-apple-xros1.0 -isysroot $(XROS_SDK) -arch arm64 \
 	   -dynamiclib -o $@ -Wl,-all_load $< -lz -framework AudioToolbox \
 	   -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
-	   -framework CoreFoundation -framework AVFoundation -framework Foundation \
+	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework UIKit \
 	   -install_name @rpath/libklepton.dylib
 
 build/xrsim/libklepton.dylib: build/xrsim/libklepton.a
 	@$(CC) -target arm64-apple-xros1.0-simulator -isysroot $(XRSIM_SDK) -arch arm64 \
 	   -dynamiclib -o $@ -Wl,-all_load $< -lz -framework AudioToolbox \
 	   -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
-	   -framework CoreFoundation -framework AVFoundation -framework Foundation \
+	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework UIKit \
 	   -install_name @rpath/libklepton.dylib
 
 xros-device: build/xros/libklepton.dylib
@@ -1442,3 +1528,19 @@ build/t_trace: tests/t_trace.c $(RUNTIME) $(RUNTIME_HDRS)
 .PHONY: trace
 trace: build/t_trace
 	@./build/t_trace
+
+# Native frontend for prepared-checkout APK conversion and installation.
+.PHONY: installer installer-open installer-check installer-steam-deps
+installer-steam-deps:
+	npm ci --ignore-scripts --no-audit --no-fund --prefix steam/tools/library
+installer:
+	bash macos/build.sh
+installer-open:
+	bash macos/build.sh --open
+installer-check:
+	python3 -m unittest discover -s tests -p 'test_installer*.py'
+	python3 -m unittest discover -s steam/tests -p 'test_steam_updates.py'
+	node --test steam/tools/library/test_*.cjs
+	mkdir -p build/installer-tests
+	xcrun swiftc -parse-as-library -D KLEPTON_MODEL_TESTS macos/Sources/KleptonInstaller.swift macos/Tests/SteamLibraryModelTests.swift -o build/installer-tests/steam-library-model
+	build/installer-tests/steam-library-model

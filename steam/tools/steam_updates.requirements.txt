@@ -1,0 +1,5 @@
+dissect.btrfs==1.10
+dissect.squashfs==1.12
+dissect.cstruct==4.7
+dissect.util==3.24
+backports.zstd==1.7.0

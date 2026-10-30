@@ -9,6 +9,7 @@
 
 #include "klepton.h"
 #include "kl_driver.h"
+#include "kl_bigscreen.h"
 #include "kl_obbmap.h"
 #include "kl_egl.h"
 #include "kl_env.h"
@@ -18,6 +19,8 @@
 #include "kl_sdl2.h"
 #include "kl_gles3jni.h"
 #include "kl_jni.h"
+#include "kl_jni_vuplex.h"
+#include "kl_jni_bigscreen.h"
 #include "kl_mediandk.h"
 #include "kl_opensl.h"
 #include "kl_openxr.h"
@@ -248,7 +251,7 @@ static int boot_unity(FILE *out) {
     kl_jni_local_frame_push();
     if (initJni3)
         ((void (*)(void *, void *, void *, int, void *))initJni)(
-            kl_jni_env(), thiz, kl_jni_activity(), 0, kl_jni_new_string(""));
+            kl_jni_env(), thiz, kl_jni_activity(), 0, kl_jni_new_string(kl_bigscreen_unity_arguments()));
     else if (initJni2)
         ((void (*)(void *, void *, void *, int))initJni)(
             kl_jni_env(), thiz, kl_jni_activity(), 0);
@@ -648,6 +651,10 @@ int kl_driver_frame(void) {
     int r = ((int8_t (*)(void *, void *))g_render)(kl_jni_env(), g_thiz);
     kl_jni_local_frame_pop();
     kl_jni_drain_ui_tasks();
+    klj_vuplex_drain_events();
+    klj_bigscreen_render();
+    klj_bigscreen_drain_events();
+    kl_bigscreen_tick(g_frames);
     // Android's low-memory notification: one task_info call, and the guest drops
     // its caches when the footprint crosses the reported budget.
     kl_mem_pressure_poll();

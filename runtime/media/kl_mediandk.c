@@ -80,7 +80,7 @@ typedef struct { void *context; klm_image_cb onImageAvailable; } klm_listener;
 // guest asked for, which is how a wrong assumption gets noticed.
 #define KLM_FMT_MAX 32
 typedef struct {
-    struct { char *key; char *sval; int32_t ival; int is_str; } kv[KLM_FMT_MAX];
+    struct { char *key; char *sval; int32_t ival; float fval; int is_str; } kv[KLM_FMT_MAX];
     int n;
 } klm_format;
 
@@ -122,10 +122,18 @@ static void klm_AMediaFormat_setString(void *fmt, const char *key, const char *v
     f->kv[i].is_str = 1;
 }
 
+static void klm_AMediaFormat_setFloat(void *fmt, const char *key, float v) {
+    klm_format *f = fmt;
+    if (!f || !key) return;
+    int i = klm_fmt_slot(f, key);
+    if (i < 0) return;
+    f->kv[i].fval = v; f->kv[i].is_str = 2;
+}
+
 static const char *klm_fmt_string(klm_format *f, const char *key) {
     if (!f) return NULL;
     for (int i = 0; i < f->n; i++)
-        if (!strcmp(f->kv[i].key, key) && f->kv[i].is_str) return f->kv[i].sval;
+        if (!strcmp(f->kv[i].key, key) && f->kv[i].is_str == 1) return f->kv[i].sval;
     return NULL;
 }
 
@@ -153,6 +161,10 @@ static bool klm_AMediaFormat_getInt64(void *fmt, const char *key, int64_t *out) 
     return true;
 }
 static bool klm_AMediaFormat_getFloat(void *fmt, const char *key, float *out) {
+    klm_format *f = fmt;
+    if (!f || !key || !out) return false;
+    for (int i = 0; i < f->n; i++)
+        if (!strcmp(f->kv[i].key, key) && f->kv[i].is_str == 2) { *out = f->kv[i].fval; return true; }
     int32_t v;
     if (!out || !klm_AMediaFormat_getInt32(fmt, key, &v)) return false;
     *out = (float)v;
@@ -534,6 +546,7 @@ static int klm_AImage_getHardwareBuffer(void *image, void **out) {
 typedef struct {
     uint32_t magic;
     int32_t  width, height, format;
+    unsigned refs;
     uint64_t usage;
     int32_t  max_images;
 
@@ -562,6 +575,11 @@ static klm_reader *g_reader;        // for the report; this guest makes one
 // to report. These outlive that: an empty media report otherwise reads as "the
 // decoder was never fed" when it only means "teardown got there first".
 static unsigned g_life_in, g_life_out, g_life_rendered, g_life_published, g_life_acquired;
+static void klm_AImageReader_delete(void *reader);
+static void klm_reader_retain(void *reader) {
+    klm_reader *r = reader;
+    __atomic_fetch_add(&r->refs, 1, __ATOMIC_RELAXED);
+}
 // ...and the one bit that says the report is worth printing at all: a codec or a
 // reader existed at some point. Counters can legitimately all be zero, and that
 // is the single most interesting thing a report can say.
@@ -605,6 +623,7 @@ static int klm_AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format,
     klm_reader *r = calloc(1, sizeof *r);
     if (!r) return AMEDIA_ERROR_UNKNOWN;
     r->magic = KLM_READER_MAGIC;
+    r->refs = 1;
     r->width = w; r->height = h; r->format = format;
     r->usage = usage;
     r->max_images = max_images < KLM_READER_MAX ? max_images : KLM_READER_MAX;
@@ -616,12 +635,16 @@ static int klm_AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format,
     // asks for 1x1 here deliberately (see the header), so believing it would
     // publish a 1x1 surface.
     r->window = kl_ndk_window_new(w, h, format, r);
+    if (!r->window) { pthread_mutex_destroy(&r->lock); pthread_cond_destroy(&r->cv); free(r); return AMEDIA_ERROR_UNKNOWN; }
+    kl_ndk_window_set_lifetime(r->window, klm_reader_retain, klm_AImageReader_delete);
 
     r->running = 1;
     if (pthread_create(&r->dispatch, NULL, reader_dispatch, r) != 0) {
         r->running = 0;
         fprintf(stderr, "  [media] AImageReader: could not start the dispatch "
-                        "thread; onImageAvailable will never fire\n");
+                        "thread\n");
+        kl_ndk_window_free(r->window); pthread_mutex_destroy(&r->lock);
+        pthread_cond_destroy(&r->cv); free(r); return AMEDIA_ERROR_UNKNOWN;
     }
     *out = r;
     g_reader = r;
@@ -687,6 +710,7 @@ static int klm_AImageReader_acquireLatestImage(void *reader, void **out) {
 static void klm_AImageReader_delete(void *reader) {
     klm_reader *r = reader;
     if (!r || r->magic != KLM_READER_MAGIC) return;
+    if (__atomic_fetch_sub(&r->refs, 1, __ATOMIC_ACQ_REL) != 1) return;
     pthread_mutex_lock(&r->lock);
     r->running = 0;
     pthread_cond_broadcast(&r->cv);
@@ -806,6 +830,10 @@ static int klm_AMediaCodec_configure(void *codec, const void *format,
     // guest passes, and the owner pointer the window carries is what connects
     // the two objects back up.
     klm_reader *r = kl_ndk_window_owner(window);
+    if (r && r->magic != KLM_READER_MAGIC) r = NULL;
+    if (window && !r) return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (r) klm_reader_retain(r);
+    if (c->surface) klm_AImageReader_delete(c->surface);
     c->surface = r;
     fprintf(stderr, "  [media] AMediaCodec_configure: mime=%s surface=%p flags=0x%x\n",
             mime ? mime : "(unset)", window, flags);
@@ -857,6 +885,7 @@ static int klm_AMediaCodec_delete(void *codec) {
     for (int i = 0; i < KLM_IN_BUFFERS; i++) free(c->in[i].data);
     pthread_mutex_unlock(&c->lock);
     kl_vtdec_destroy(c->dec);
+    if (c->surface) klm_AImageReader_delete(c->surface);
     pthread_mutex_destroy(&c->lock);
     g_life_in += c->n_in; g_life_out += c->n_out; g_life_rendered += c->n_rendered;
     if (g_codec == c) g_codec = NULL;
@@ -1089,6 +1118,7 @@ static const struct { const char *name; void *fn; } g_media[] = {
     M("AMediaFormat_new",       klm_AMediaFormat_new),
     M("AMediaFormat_delete",    klm_AMediaFormat_delete),
     M("AMediaFormat_setInt32",  klm_AMediaFormat_setInt32),
+    M("AMediaFormat_setFloat",  klm_AMediaFormat_setFloat),
     M("AMediaFormat_setString", klm_AMediaFormat_setString),
     M("AMediaFormat_getInt32",  klm_AMediaFormat_getInt32),
     M("AMediaFormat_getInt64",  klm_AMediaFormat_getInt64),

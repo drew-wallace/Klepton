@@ -170,6 +170,12 @@ static void kl_env_file_apply(const char *container) {
 
 int kl_app_configure(const char *resources, const char *container) {
     if (!resources || !container) return missing("path", "(null)");
+#ifdef KL_BUILD_MANIFEST
+    // This definition is compiled and signed with the app, never read as code
+    // from its writable Documents directory.
+    extern void kl_install_build_target(void);
+    kl_install_build_target();
+#endif
     kl_env_file_apply(container);
 
     const char *want = kl_env_str("KL_TARGET", KL_TARGET_DEFAULT);

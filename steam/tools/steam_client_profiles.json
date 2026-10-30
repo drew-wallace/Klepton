@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "4b1318ea53168ecbf74318ef5b330eb0a41a3e2d335c14f3827504bebba4b40d": {
+      "id": "recovery-0.3.0",
+      "offsets": null
+    },
+    "299135eca46c74987ee19ec145d27d8c6ebfc72af3c4d51eb347a332453cb76c": {
+      "id": "frame-hotfix-20261022",
+      "scope": "Interactive game-host session. Full function instruction layouts match the recovery ABI after PC-relative relocation; live vtable/export address checks remain required. Credential-free WebUI transport diagnostics are unsupported for this profile.",
+      "offsets": {
+        "0x1286858": "0x127b9c0",
+        "0xe54304": "0xe47d6c",
+        "0xe54398": "0xe47e00",
+        "0xe544c8": "0xe47f30",
+        "0x10ceb50": "0x10c4da0",
+        "0x10ceb58": "0x10c4da8",
+        "0x10cef30": "0x10c5180",
+        "0x10cf0d4": "0x10c5324",
+        "0x10cf2a4": "0x10c54f4",
+        "0x10cf474": "0x10c56c4",
+        "0x10cf9e4": "0x10c5c34",
+        "0x10d5368": "0x10cb5b8",
+        "0x10d5704": "0x10cb954"
+      }
+    }
+  }
+}

@@ -728,6 +728,9 @@ def bundle_for(name):
 
 
 def resolve(name):
+    import os
+    if os.environ.get('KLEPTON_BUILD_MANIFEST'):
+        return resolve_manifest(os.environ['KLEPTON_BUILD_MANIFEST'], name)
     if name not in TARGETS:
         print(f"!! unknown target {name!r} — one of: {', '.join(sorted(TARGETS))}",
               file=sys.stderr)
@@ -738,6 +741,69 @@ def resolve(name):
     if t["libs"] is None:
         t["libs"] = libs_for(t["srcdir"])
     return t
+
+
+def resolve_manifest(path, name=None):
+    """Optional utility build input. Host paths never become container paths."""
+    import json, re
+    from pathlib import Path
+    m = json.loads(Path(path).read_text())
+    if m.get('schema_version') != 1:
+        raise ValueError('Unsupported build manifest version')
+    profile = m.get('profile')
+    if profile and profile not in TARGETS:
+        raise ValueError('Unknown build profile')
+    key = profile or m['target']
+    if name and name != key:
+        raise ValueError('Build manifest target does not match KLEPTON_TARGET')
+    if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,79}', key):
+        raise ValueError('Invalid target key')
+    t = dict(TARGETS[profile]) if profile else {
+        'libs': None, 'qtplugins': '', 'guest_prepare': '',
+        'obb': 'obb', 'entry': m['entry'], 'kind': m['kind'],
+    }
+    if m['kind'] not in ('unity', 'ue4', 'native', 'steamlink', 'jkxr', 'sdl2', 'gles3jni'):
+        raise ValueError('Unsupported boot type')
+    if not re.fullmatch(r'lib[A-Za-z0-9_+.-]+', m['entry']):
+        raise ValueError('Invalid entry library')
+    for field in ('product', 'framework_key'):
+        if not re.fullmatch(r'[A-Za-z0-9-]+', m[field]):
+            raise ValueError('Invalid generated product name')
+    if not re.fullmatch(r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+', m['bundle']):
+        raise ValueError('Invalid bundle identifier')
+    host_tree = Path(m['host_tree']).resolve()
+    host_apk = Path(m['host_apk']).resolve()
+    if not host_tree.is_dir() or not host_apk.is_file():
+        raise ValueError('Imported APK or decoded tree is missing; inspect it again')
+    t.update(name=key, bundle=m['bundle'], product=m['product'],
+             framework_key=m['framework_key'], display=m['display'],
+             tree=key, apk=key+'.apk', assets=key+'/assets',
+             srcdir=key+'/lib/arm64-v8a', kind=m['kind'], entry=m['entry'],
+             host_tree=str(host_tree), host_apk=str(host_apk),
+             host_assets=str(host_tree/'assets'), host_srcdir=str(host_tree/'lib/arm64-v8a'),
+             steam_diagnostics=m['steam_mode'] == 'offline',
+             guest_prepare=t.get('guest_prepare', '') if m.get('adapters', False) else '')
+    t['obb'] = m.get('obb_path', t['obb'])
+    t['gles_version'] = m.get('gles_version', '')
+    if t['gles_version'] not in ('', '3.0', '3.1'):
+        raise ValueError('Unsupported GLES compatibility description')
+    if t['gles_version'] and m['kind'] != 'unity':
+        raise ValueError('GLES compatibility requires a Unity import')
+    t['host_qtplugins'] = t['host_srcdir'] if t.get('qtplugins') else ''
+    t['libs'] = libs_for(t['host_srcdir'])
+    return t
+
+
+def build_target_source(t):
+    """An app-authored static record; no host filesystem paths in the binary."""
+    import json
+    fields = [t[k] for k in ('name', 'tree', 'apk', 'assets', 'srcdir', 'entry')]
+    fields += [t.get('userdata', t['name']), t['obb']]
+    compatibility = f" kl_egl_set_gles_version(3, {t['gles_version'][-1]});" if t.get('gles_version') else ''
+    return ('#include "kl_target.h"\n' + ('#include "kl_egl.h"\n' if compatibility else '') +
+            'static const kl_target target = {\n' +
+            ',\n'.join(json.dumps(v) for v in fields) + ',\nKL_GUEST_' + t['kind'].upper() + '\n};\n' +
+            'void kl_install_build_target(void) { kl_target_register_build(&target);' + compatibility + ' }\n')
 
 
 # The runtime's copy of the table, as an X-macro list. Only the fields C needs

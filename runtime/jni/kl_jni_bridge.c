@@ -207,17 +207,18 @@ static klj_val klj_ReflectionHelper_newProxyInstance(void *env, void *clazz,
                                                      const klj_val *a, int n) {
     (void)env; (void)clazz;
     klj_proxy *p = calloc(1, sizeof *p);
-    p->native_ptr = n > 1 ? (int64_t)a[1].j : 0;
+    int offset = n == 2 ? 0 : 1;
+    p->native_ptr = n > offset ? (int64_t)a[offset].j : 0;
     p->reflection_helper = 1;
     // Wrapped in a one-element array so the two doors' proxies are identical
     // down to the field, rather than alike: klj_proxy_invoke and the report
     // both read `classes` as an object array.
     void *ifaces = klj_new_array('L', "java/lang/Class", 1);
-    if (n > 2) ((void **)klj_arr(ifaces)->data)[0] = a[2].l;
+    if (n > offset+1) ((void **)klj_arr(ifaces)->data)[0] = a[offset+1].l;
     klj_as_object(ifaces)->pinned = 1;
     p->classes = ifaces;
     KLJ_LOG("ReflectionHelper.newProxyInstance: implements %s (native 0x%llx)",
-            n > 2 ? klj_class_name(a[2].l) : "(none)",
+            n > offset+1 ? klj_class_name(a[offset+1].l) : "(none)",
             (unsigned long long)p->native_ptr);
 
     void *obj = kl_jni_new_object(KLJ_CLASS_PROXY);
@@ -504,6 +505,7 @@ const klj_binding klj_bind_bridge[] = {
     {"com/unity3d/player/ReflectionHelper", "getFieldID", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/reflect/Field;", klj_ReflectionHelper_getFieldID},
     {"com/unity3d/player/ReflectionHelper", "getMethodID", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/reflect/Method;", klj_ReflectionHelper_getMethodID},
     {"com/unity3d/player/ReflectionHelper", "getConstructorID", "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/reflect/Constructor;", klj_ReflectionHelper_getConstructorID},
+    {"com/unity3d/player/ReflectionHelper", "newProxyInstance", "(JLjava/lang/Class;)Ljava/lang/Object;", klj_ReflectionHelper_newProxyInstance},
     {"com/unity3d/player/ReflectionHelper", "newProxyInstance", "(Lcom/unity3d/player/UnityPlayer;JLjava/lang/Class;)Ljava/lang/Object;", klj_ReflectionHelper_newProxyInstance},
     {"com/unity3d/player/ReflectionHelper", "getFieldSignature", "(Ljava/lang/reflect/Field;)Ljava/lang/String;", klj_ReflectionHelper_getFieldSignature},
     {"java/lang/reflect/Field", "getDeclaringClass", "()Ljava/lang/Class;", klj_Field_getDeclaringClass},

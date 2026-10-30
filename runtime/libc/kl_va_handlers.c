@@ -9,6 +9,9 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <execinfo.h>
+#include <stdatomic.h>
+#include <dlfcn.h>
 #include <sys/ioctl.h>
 #include "kl_va.h"
 #include "kl_file.h"
@@ -153,8 +156,27 @@ int klh_android_log_print(int prio, const char *tag, const char *fmt, kl_va *va)
     KL_MARSHAL(fmt, va, KL_VA_PRINTF);
     static const char lv[] = "??VDIWEF";
     fprintf(stderr, "%c/%s: ", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "");
+    const char *trace_match = getenv("KL_TRACE_LOG_MATCH");
+    char trace_text[4096];
+    if (trace_match && *trace_match) {
+        va_list copy; va_copy(copy, _ap);
+        vsnprintf(trace_text, sizeof trace_text, fmt, copy);
+        va_end(copy);
+    }
     int n = vfprintf(stderr, fmt, _ap);
     fputc('\n', stderr);
+    static atomic_uint trace_count;
+    if (trace_match && *trace_match && strstr(trace_text, trace_match) &&
+        atomic_fetch_add(&trace_count, 1) < 8) {
+        void *frames[64]; int count=backtrace(frames,64);
+        fprintf(stderr,"[logtrace] matching Android log stack (%d frames):\n",count);
+        for(int i=0;i<count;i++) {
+            size_t offset=0;const char *image=kl_addr_image(frames[i],&offset);
+            Dl_info host={0};
+            if(image)fprintf(stderr,"[logtrace] %s+0x%zx\n",image,offset);
+            else if(dladdr(frames[i],&host)&&host.dli_sname)fprintf(stderr,"[logtrace] %s\n",host.dli_sname);
+        }
+    }
     // hl2 eye-copy RT probe: the guest logs "began eye submission" on the eye-submission
     // thread right before it reads its render target and (currently) reports it
     // unavailable. Sample the real ANGLE FBO state here — a reliable trigger, since the

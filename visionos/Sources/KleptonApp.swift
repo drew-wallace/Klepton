@@ -2,6 +2,16 @@ import SwiftUI
 import Foundation
 import CompositorServices
 import UIKit
+
+private func klBootLogTail(_ path: String) -> String? {
+    guard let file = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
+    defer { try? file.close() }
+    let limit: UInt64 = 256 * 1024
+    guard let size = try? file.seekToEnd() else { return nil }
+    do { try file.seek(toOffset: size > limit ? size - limit : 0) } catch { return nil }
+    guard let data = try? file.read(upToCount: Int(limit)) else { return nil }
+    return String(decoding: data, as: UTF8.self)
+}
 #if KL_STEAM_GAME_HOST
 @_silgen_name("kl_steam_host_capture_context")
 func captureSteamHostContext()
@@ -441,6 +451,7 @@ struct BootView: View {
     // mid-frame. A timer at 5 Hz costs nothing and cannot deadlock.
     @State private var showShell = false
     @State private var showSettings = false
+    @State private var runtimeWarning: String?
     private var handedOff: Bool {
         get { session.handedOff }
         nonmutating set { session.handedOff = newValue }
@@ -461,6 +472,11 @@ struct BootView: View {
     // the fallback is inert (no such bookmark) for the runtime-debugging targets.
     @ObservedObject private var files = klActiveFiles() ?? LauncherFiles(bookmarkKey: "none", expected: "")
     private var isLauncher: Bool { klIsLauncher() }
+    private var bootLogURL: URL? {
+        let path = String(cString: kl_app_log_path())
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }
 #if KL_STEAM_GAME_HOST
     private var steamReady: Bool {
         get { session.steamReady }
@@ -703,10 +719,15 @@ struct BootView: View {
                 }
                 Spacer()
                 if finished {
-                    Label(succeeded ? "initJni completed" : status,
-                          systemImage: succeeded ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                        .foregroundStyle(succeeded ? .green : .red)
+                    Label(runtimeWarning != nil ? "Runtime support needed" : (succeeded ? "initJni completed" : status),
+                          systemImage: runtimeWarning != nil ? "exclamationmark.triangle.fill" : (succeeded ? "checkmark.circle.fill" : "xmark.octagon.fill"))
+                        .foregroundStyle(runtimeWarning != nil ? .orange : (succeeded ? .green : .red))
                 }
+            }
+
+            if let runtimeWarning {
+                Label(runtimeWarning, systemImage: "exclamationmark.triangle")
+                    .font(.callout).foregroundStyle(.orange).textSelection(.enabled)
             }
 
             ScrollView {
@@ -763,7 +784,11 @@ struct BootView: View {
                 }
                 if running { ProgressView() }
                 if finished, !log.isEmpty {
-                    ShareLink(item: log) { Label("Export log", systemImage: "square.and.arrow.up") }
+                    if let bootLogURL {
+                        ShareLink(item: bootLogURL) { Label("Export log", systemImage: "square.and.arrow.up") }
+                    } else {
+                        ShareLink(item: log) { Label("Export log", systemImage: "square.and.arrow.up") }
+                    }
                 }
                 Spacer()
                 // The game builds don't surface the runtime's internal staging errors
@@ -788,6 +813,32 @@ struct BootView: View {
             if !isLauncher, klEnvOn("KL_AUTOBOOT", default: true) {
                 boot()
             }
+            // Rendering continues after native initialization returns. Keep
+            // late feature failures visible instead of leaving a green init
+            // badge above a report frozen before the first game frame.
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { break }
+                guard finished, succeeded else { continue }
+                let path = String(cString: kl_app_log_path())
+                if let text = await Task.detached(priority: .utility, operation: { klBootLogTail(path) }).value {
+                    recordBootLog(text)
+                }
+            }
+        }
+    }
+
+    private func recordBootLog(_ text: String) {
+        log = text
+        if text.contains("HTTP error: Input error. Call GetErrorList()") {
+            runtimeWarning = "The app reports a login input-validation error. Check that the form accepted your text and read any details in the app. If it persists, export logs for development; exclude passwords and access tokens. This error alone does not establish that the password is wrong."
+        } else if text.contains("[plat] account service unavailable:") || text.contains("Meta account services are unavailable on this host.") {
+            runtimeWarning = "This app requested Meta/Oculus account services. Klepton has no authenticated Meta account provider, so automatic Oculus login is unavailable. Try the app's own email login if offered. Export logs for development; exclude passwords and access tokens."
+        } else if text.contains("[jni] Vuplex browser unavailable:") || text.contains("WebViewUnavailableException") {
+            runtimeWarning = "The embedded browser could not initialize. Use Export log or Collect Headset Logs in the Mac installer for a development report."
+        } else if text.contains("[webview] navigation failed") || text.contains("[webview] WebKit content process terminated") {
+            runtimeWarning = "A browser page could not load. Check connectivity and retry. If it persists, use Export log or Collect Headset Logs in the Mac installer."
+        } else if text.contains("[webview] no host window") || text.contains("[webview] snapshot failed:") {
+            runtimeWarning = "The browser could not render its page texture. Use Export log or Collect Headset Logs in the Mac installer for a development report."
         }
     }
 
@@ -804,7 +855,7 @@ struct BootView: View {
         // while running is not enough: the run *finishes*, and the obvious
         // next thing to do with a finished run is press Boot again.
         guard !session.quitting, !running, !finished else { return }
-        running = true; log = ""
+        running = true; log = ""; runtimeWarning = nil
 #if KL_STEAM_GAME_HOST
         if steamOfflineDiagnostics { captureSteamHostContext() }
 #endif
@@ -859,7 +910,7 @@ struct BootView: View {
             // If this run dies, the next launch still shows how far it got.
             let poll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
                 if let t = try? String(contentsOfFile: logPath, encoding: .utf8) {
-                    DispatchQueue.main.async { log = t }
+                    DispatchQueue.main.async { recordBootLog(t) }
                 }
             }
             RunLoop.current.add(poll, forMode: .common)
@@ -934,7 +985,7 @@ struct BootView: View {
 
             let text = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
             DispatchQueue.main.async {
-                log = text
+                recordBootLog(text)
                 status = String(cString: kl_app_status())
                 succeeded = (result == 0)
                 running = false; finished = true

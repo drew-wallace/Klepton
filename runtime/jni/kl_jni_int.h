@@ -192,6 +192,10 @@ extern const klj_binding klj_bind_fmod[];
 extern const klj_binding klj_bind_jkxr[];
 extern const klj_binding klj_bind_bhaptics[];
 extern const klj_binding klj_bind_services[];
+extern const klj_binding klj_bind_vuplex[];
+extern const klj_binding klj_bind_bigscreen[];
+extern const klj_binding klj_bind_avpro[];
+extern const klj_binding klj_bind_surface[];
 extern const klj_binding klj_bind_photon[];
 extern const klj_binding *const klj_binding_tables[];
 

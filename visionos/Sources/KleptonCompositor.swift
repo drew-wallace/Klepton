@@ -275,6 +275,7 @@ final class KleptonCompositor {
     /// The overlay pass — a guest's non-eye layers. nil when it failed to
     /// build, which is named at construction rather than per frame.
     private var overlayPipeline: MTLRenderPipelineState?
+    private var underlayEyePipeline: MTLRenderPipelineState?
     /// The equirect (360 panorama) overlay pipeline and its depth state.
     /// Drawn as a skybox behind the eye content: depth-tests .greaterEqual at
     /// the far plane and writes no depth, so real eye pixels stay in front and
@@ -561,8 +562,20 @@ final class KleptonCompositor {
         // moment they mattered, and there is no version of that arithmetic
         // that beats the recogniser the OS ships.
         let controllers = self.controllers
-        layerRenderer.onSpatialEvent = { events in
-            if !KLGuardianRuntime.shared.handle(events) { controllers.handleSpatialEvents(events) }
+        let renderer = layerRenderer!
+        let rendererID = ObjectIdentifier(renderer)
+        // Register and clear this main-actor API on the main thread, even
+        // though the renderer's lifetime is managed by the compositor thread.
+        DispatchQueue.main.async {
+            var loggedFirstEvent = false
+            renderer.onSpatialEvent = { events in
+                if !loggedFirstEvent, !events.isEmpty {
+                    loggedFirstEvent = true
+                    NSLog("[cp] spatial input received for renderer \(rendererID)")
+                }
+                if !KLGuardianRuntime.shared.handle(events) { controllers.handleSpatialEvents(events) }
+            }
+            NSLog("[cp] spatial input connected on main thread for renderer \(rendererID)")
         }
     }
 
@@ -925,6 +938,16 @@ final class KleptonCompositor {
             amplification = device.supportsVertexAmplificationCount(2) ? 2 : 1
             desc.maxVertexAmplificationCount = amplification
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
+
+            // Only an authored underlay opts an eye into alpha composition.
+            // Ordinary eye buffers often contain zero alpha and stay opaque.
+            desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_alpha_f")
+            desc.colorAttachments[0].isBlendingEnabled = true
+            desc.colorAttachments[0].sourceRGBBlendFactor = .one
+            desc.colorAttachments[0].sourceAlphaBlendFactor = .one
+            desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            underlayEyePipeline = try device.makeRenderPipelineState(descriptor: desc)
 
             // Depth WRITES, which this pass never did. visionOS reprojects the
             // submitted frame using its depth buffer, so a pass that writes no
@@ -1440,7 +1463,8 @@ final class KleptonCompositor {
                 KleptonAudio.suspend()
                 kl_app_guest_suspend()
                 self.rendererCondition.lock()
-                self.layerRenderer.onSpatialEvent = { _ in }
+                let stoppedRenderer = self.layerRenderer!
+                DispatchQueue.main.async { stoppedRenderer.onSpatialEvent = { _ in } }
                 self.layerRenderer = nil
                 self.rendererCondition.unlock()
                 DispatchQueue.main.async {
@@ -2523,6 +2547,11 @@ final class KleptonCompositor {
         // files no list, which is every guest but Steam Link and every run
         // under KL_XR_LAYERS=0, and those take the eye pass unchanged.
         let nproj = projLayerCount
+        // OVR underlays sit behind the eye's alpha holes. Drawing these after
+        // the eye hides in-game pointers and dialogs over browser/video panels.
+        let underlays = nproj == 0 ? encodeOverlays(enc, viewIndices: viewIndices,
+            drawable: drawable, originFromHead: originFromHead,
+            writeDepth: visible == 0, underlays: true) : 0
         if nproj > 0 {
             visible = encodeProjLayers(enc, viewIndices: viewIndices,
                                        drawable: drawable,
@@ -2640,7 +2669,8 @@ final class KleptonCompositor {
                     uniforms[n].grid_eye = 1
                 }
             }
-            enc.setRenderPipelineState(probePipeline ?? pipeline)
+            enc.setRenderPipelineState(probePipeline
+                ?? (underlays > 0 ? underlayEyePipeline : nil) ?? pipeline)
             if let depthState { enc.setDepthStencilState(depthState) }
             enc.setFragmentTexture(bind0, index: 0)
             enc.setFragmentTexture(bind1, index: 1)
@@ -2659,14 +2689,15 @@ final class KleptonCompositor {
         }
         let panels = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                     originFromHead: originFromHead,
-                                    writeDepth: visible == 0)
+                                    writeDepth: visible == 0,
+                                    underlays: nproj == 0 ? false : nil)
         enc.endEncoding()
         // "How many eyes got a picture", which is what the caller counts black
         // frames with — and a panel IS a picture. Without this a guest that
         // composites only quad layers reports every frame black while showing
         // its menu correctly, which is an instrument contradicting the display.
         if visible > 0 { return visible }
-        return panels > 0 ? viewIndices.count : 0
+        return panels + underlays > 0 ? viewIndices.count : 0
     }
 
     /// The guest's PROJECTION layers, each as its own quad with its own frustum,
@@ -2857,12 +2888,15 @@ final class KleptonCompositor {
                                 viewIndices: [Int],
                                 drawable: LayerRenderer.Drawable,
                                 originFromHead: simd_float4x4,
-                                writeDepth: Bool) -> Int {
+                                writeDepth: Bool, underlays: Bool? = nil) -> Int {
         guard overlaysEnabled, let pipe = overlayPipeline else { return 0 }
         // .greater against that same clear, and the shader's own projected
         // position carries the quad's real distance, so what lands in the
         // buffer is where the panel actually is.
         if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+        if underlays == true, !writeDepth, let depthPassState {
+            enc.setDepthStencilState(depthPassState)
+        }
         let n = Int(kl_ovrp_overlay_count())
         if n == 0 { return 0 }
         var drawn = 0
@@ -2870,6 +2904,12 @@ final class KleptonCompositor {
         for i in 0..<n {
             var ov = kl_ovrp_overlay()
             guard kl_ovrp_overlay_get(Int32(i), &ov) != 0 else { continue }
+            if let underlays {
+                // Panoramas retain their dedicated far-plane path below.
+                if ov.shape == 5 {
+                    if underlays { continue }
+                } else if (ov.underlay != 0) != underlays { continue }
+            }
             // Equirect layers are the loading/menu backdrop, which the host
             // draws itself from the real mp4 (drawLoadingSkybox). The guest's
             // own equirect layers here are 2x2 placeholders or the wild video

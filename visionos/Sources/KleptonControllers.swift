@@ -1699,13 +1699,49 @@ final class KleptonControllers {
     /// `LayerRenderer.onSpatialEvent`. Called on the system's own queue, hence
     /// the lock.
     ///
-    /// Only `.indirectPinch` is taken. `.directPinch` is a finger touching a
+    /// On device, only `.indirectPinch` is taken. `.directPinch` is a finger touching a
     /// real surface and `.pointer`/`.touch` are other devices entirely; the
     /// guest's index trigger means "the user is selecting", which is what an
     /// indirect pinch is.
+#if targetEnvironment(simulator)
+    // The simulator has selection rays but no tracked hand anchors. Preserve
+    // that real pointer ray and use it as the right controller's aim pose.
+    private var simulatorPointerPose: (SIMD3<Float>, simd_quatf)?
+    private var simulatorPressUntil: TimeInterval = 0
+    private static let simulatorHeadHeight = klEnvFloat("KL_SIM_HEAD_HEIGHT", 1.6)
+#endif
+    private func simulatorInput(hand: Int) -> (SIMD3<Float>, simd_quatf, Bool)? {
+#if targetEnvironment(simulator)
+        guard hand == 1 else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        guard let pose = simulatorPointerPose else { return nil }
+        return (pose.0, pose.1, systemPinch[1] || CACurrentMediaTime() < simulatorPressUntil)
+#else
+        return nil
+#endif
+    }
+
     func handleSpatialEvents(_ events: SpatialEventCollection) {
         for e in events {
+#if targetEnvironment(simulator)
+            guard e.kind == .indirectPinch || e.kind == .pointer else { continue }
+            if let ray = e.selectionRay {
+                let p = SIMD3<Float>(Float(ray.origin.x), Float(ray.origin.y), Float(ray.origin.z))
+                let d = SIMD3<Float>(Float(ray.direction.x), Float(ray.direction.y), Float(ray.direction.z))
+                if simd_length_squared(d) > 0.0001 {
+                    lock.lock()
+                    // Match KleptonCompositor.headFrom's simulator-only lift.
+                    let origin = p + SIMD3<Float>(0, Self.simulatorHeadHeight, 0)
+                    let orientation = simd_quatf(from: SIMD3<Float>(0,0,-1), to: simd_normalize(d))
+                    simulatorPointerPose = (origin, orientation)
+                    if e.phase == .active { simulatorPressUntil = CACurrentMediaTime() + 0.12 }
+                    if e.phase == .cancelled { simulatorPressUntil = 0 }
+                    lock.unlock()
+                }
+            }
+#else
             guard e.kind == .indirectPinch else { continue }
+#endif
             // No chirality means the system could not attribute the pinch to a
             // hand. Attributing it to the right is the same choice the accessory
             // path already makes, and for the same reason: one-handed use is
@@ -1806,6 +1842,7 @@ final class KleptonControllers {
         pollButtons()
 
         for hand in 0...1 {
+            var fromSimulatorPointer = false
             lock.lock()
             var st = state[hand]
             lock.unlock()
@@ -1814,6 +1851,15 @@ final class KleptonControllers {
             if let accPose {
                 st.position = accPose.0; st.orientation = accPose.1
                 st.linearVelocity = accPose.2; st.angularVelocity = accPose.3
+            } else if let pointer = simulatorInput(hand: hand) {
+                fromSimulatorPointer = true
+                st.position = pointer.0; st.orientation = pointer.1
+                st.linearVelocity = .zero; st.angularVelocity = .zero
+                st.indexTrigger = pointer.2 ? 1 : 0
+                if pointer.2 {
+                    st.buttons |= OVRPRawButton.rIndexTrigger
+                    st.touches |= OVRPRawButton.rIndexTrigger
+                }
             } else if let anchor = (hand == 0 ? leftHand : rightHand) {
                 let (p, q) = gripPose(anchor, hand: hand)
                 st.position = p; st.orientation = q
@@ -1882,12 +1928,17 @@ final class KleptonControllers {
             }
 
             if let p = st.position, let q = st.orientation {
-                kl_ovrp_set_hand_motion(Int32(hand), p.x, p.y, p.z,
+                if fromSimulatorPointer {
+                    kl_ovrp_set_touch_pose(Int32(hand), p.x, p.y, p.z,
+                                           q.imag.x, q.imag.y, q.imag.z, q.real)
+                } else {
+                    kl_ovrp_set_hand_motion(Int32(hand), p.x, p.y, p.z,
                                         q.imag.x, q.imag.y, q.imag.z, q.real,
                                         st.linearVelocity.x, st.linearVelocity.y,
                                         st.linearVelocity.z,
                                         st.angularVelocity.x, st.angularVelocity.y,
                                         st.angularVelocity.z)
+                }
             }
             kl_ovrp_set_controller_input(Int32(hand), st.buttons, st.touches,
                                          st.indexTrigger, st.handTrigger,

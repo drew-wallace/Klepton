@@ -53,6 +53,14 @@ Quick run scripts:
 
 Where `[target]` is the name of the target, defaulting to `beatsaber`.
 
+## APK Installer
+
+Run `make installer-open` for the native Mac utility: choose a Steam library game
+(run `make installer-steam-deps` once) or drop a local APK, review its
+compatibility and Steam settings, attach game data, and build/install on a paired
+Vision Pro. It uses a prepared checkout and stops before launching the game.
+See [`docs/INSTALLER.md`](docs/INSTALLER.md) for setup, backups, and recovery.
+
 ## Status
 
 Currently working well on both macOS and visionOS with minor-to-no graphical issues:

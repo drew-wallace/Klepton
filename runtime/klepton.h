@@ -117,8 +117,9 @@ FILE *kl_host_file(void *guest);
 void *kl_named_stub(const char *name, void *handler);
 // The forwarding variant: a stub that branches to `tramp` with `desc` in x16 and
 // nothing else disturbed, so the trampoline can log and then let the original call
-// run with its arguments intact. `desc` must be a stable { const char *name;
-// void *real; } pair. See runtime/gfx/kl_gl_trace.S for the register contract.
+// run with its arguments intact. `desc` is an opaque, stable payload in x16;
+// the GL tracer uses a { const char *name; void *real; } pair, while the errno
+// bridge uses the original function pointer. See runtime/gfx/kl_gl_trace.S.
 void *kl_trace_stub(const char *name, void *desc, void *tramp);
 
 // ---- image registry (backs guest dlopen/dlsym/dladdr) ----

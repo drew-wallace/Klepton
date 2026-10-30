@@ -9,6 +9,7 @@
 #include "klepton.h"
 #include "kl_jni.h"
 #include "../guest/kl_driver.h"   // target name, for the per-target KL_PLAT_USER default
+#include "../guest/kl_bigscreen.h"
 #include "kl_env.h"
 #include "kl_ovrplat.h"
 
@@ -239,6 +240,7 @@ static uint64_t klplat_called(const char *name) {
 #define KLPLAT_MSG_ACCESS_TOKEN     0x06A85ABEu  // .User_GetAccessToken (Message<string>)
 #define KLPLAT_MSG_ACHIEVEMENT_DEFS 0x03D3458Du  // .Achievements_GetAllDefinitions (empty array)
 #define KLPLAT_MSG_LOGGED_IN_USER  0x436F345Du  // .User_GetLoggedInUser (Message<User>)
+#define KLPLAT_MSG_ORG_SCOPED_ID   0x18F0B01Bu  // .User_GetOrgScopedID (Message<OrgScopedID>)
 #define KLPLAT_MSG_USER_PROOF      0x22810483u  // .User_GetUserProof (Message<UserProof>);
                                                 //   confirmed as a movz/movk pair in
                                                 //   Ancient Dungeon's libil2cpp
@@ -293,6 +295,17 @@ static uint64_t klplat_request_str(const char *what, uint32_t type,
 // ...and the int-payload spelling, which is all but one caller.
 static uint64_t klplat_request(const char *what, uint32_t type, int32_t payload) {
     return klplat_request_str(what, type, payload, NULL);
+}
+
+// Account requests need a completion even when no provider is available. The
+// Unity SDK registers callbacks for request 0 too, leaving the app waiting
+// forever if we return only 0. This is a local service failure, not an HTTP
+// failure or a rejection of the player's Bigscreen/Meta password.
+static uint64_t klplat_account_unavailable(const char *what, uint32_t type) {
+    fprintf(stderr, "  [plat] account service unavailable: %s; no authenticated "
+                    "Meta account provider is connected (no HTTP request made)\n", what);
+    return klplat_request_message(what, type, 0,
+            "Meta account services are unavailable on this host.", 1);
 }
 
 // The message pump. NULL still means "no messages queued", which is the
@@ -365,6 +378,8 @@ static const char *klplat_Message_GetString(const klplat_msg *m) {
 }
 static uint64_t klplat_FreeMessage(klplat_msg *m) {
     plat_hit("ovr_FreeMessage");
+    if(m && m->error && m->type==KLPLAT_MSG_LOGGED_IN_USER)
+        kl_bigscreen_account_unavailable();
     free(m);
     return 0;
 }
@@ -471,11 +486,13 @@ static uint64_t klplat_AssetFile_GetList(void) {
 // could not be made" — is what we did before, and AC Nexus does not treat it as a
 // soft failure: its platform-init chain logs "Request failed" and the loading->menu
 // transition aborts back to the loading loop. So we COMPLETE the request instead,
-// with an opaque offline token. With KL_NET_OFFLINE the token is never exchanged
-// against a server; the only point is that the request the game gates its own menu
-// on RESOLVES. Read back through ovr_Message_GetString, like CloudStorage2's path.
+// with an opaque offline token ONLY in explicit KL_NET_OFFLINE mode, where it
+// cannot be exchanged against a server. An online run needs a genuine platform
+// credential; complete with an error until an authenticated provider exists.
 static uint64_t klplat_User_GetAccessToken(void) {
     plat_hit("ovr_User_GetAccessToken");
+    if (!kl_env_on("KL_NET_OFFLINE", 0))
+        return klplat_account_unavailable("ovr_User_GetAccessToken", KLPLAT_MSG_ACCESS_TOKEN);
     static const char tok[] = "OCACkleptonOfflineAccessToken000000000000";
     return klplat_request_str("ovr_User_GetAccessToken",
                               KLPLAT_MSG_ACCESS_TOKEN, 0, tok);
@@ -498,9 +515,10 @@ static uint64_t klplat_Achievements_GetAllDefinitions(void) {
 }
 
 // Who is signed in — the ASYNC request form (the synchronous ovr_GetLoggedInUserID
-// is separate, below). Its completion is Message<User>. By DEFAULT we still answer
-// 0, "the request could not be made", which is the offline path Beat Saber wants
-// (see g_plat_request). But a title can run its online-init as a chain that ABORTS
+// is separate, below). Its completion is Message<User>. Without a platform
+// account, deliver an explicit service-unavailable error completion. A zero
+// request id leaves some SDK versions awaiting forever. A title can run its
+// online-init as a chain that ABORTS
 // on a failed request: AC Nexus's log shows the Oculus entitlement check PASS and
 // then this call fail with "Request failed", stranding it on the loading screen.
 // KL_PLAT_USER opts such a title into a synthetic OFFLINE user so the chain
@@ -538,11 +556,10 @@ static int klplat_user_default(void) {
 static uint64_t klplat_User_GetLoggedInUser(void) {
     plat_hit("ovr_User_GetLoggedInUser");
     if (!kl_env_on("KL_PLAT_USER", klplat_user_default())) {
-        static int said;
-        if (!said) { said = 1;
-            fprintf(stderr, "  [plat] ovr_User_GetLoggedInUser -> 0 (no platform "
-                    "user; set KL_PLAT_USER=1 for a synthetic offline user)\n"); }
-        return 0;
+        // A request id of zero does not complete Request<User> in older
+        // Oculus Unity SDKs: its awaiter remains registered forever. Deliver
+        // a real error completion so the app can run its own failure path.
+        return klplat_account_unavailable("ovr_User_GetLoggedInUser", KLPLAT_MSG_LOGGED_IN_USER);
     }
     return klplat_request("ovr_User_GetLoggedInUser", KLPLAT_MSG_LOGGED_IN_USER, 0);
 }
@@ -574,21 +591,25 @@ static const char *klplat_User_GetDisplayName(const void *h) {
 // receives it verifies it against Meta, which will not know this one, so the
 // online sign-in fails exactly as it would with no network. Gated like the
 // user it proves: without KL_PLAT_USER there is no user to prove, and the
-// answer is 0, "the request could not be made". With it the request completes
+// request completes with a service-unavailable error. With it the request completes
 // (Message<UserProof>, read through ovr_Message_GetUserProof ->
 // ovr_UserProof_GetNonce) so that a title which WAITS on the completion —
 // Ancient Dungeon's "Waiting for Oculus Nonce generation..." — moves on.
 static uint64_t klplat_User_GetUserProof(void) {
     plat_hit("ovr_User_GetUserProof");
     if (!kl_env_on("KL_PLAT_USER", klplat_user_default())) {
-        static int said;
-        if (!said) { said = 1;
-            fprintf(stderr, "  [plat] ovr_User_GetUserProof -> 0 (no platform user "
-                    "to prove; set KL_PLAT_USER=1 for a synthetic offline user)\n"); }
-        return 0;
+        return klplat_account_unavailable("ovr_User_GetUserProof", KLPLAT_MSG_USER_PROOF);
     }
     static const char nonce[] = "kleptonOfflineNonce00000000000000000000000000000";
     return klplat_request_str("ovr_User_GetUserProof", KLPLAT_MSG_USER_PROOF, 0, nonce);
+}
+
+static uint64_t klplat_User_GetOrgScopedID(uint64_t user_id) {
+    plat_hit("ovr_User_GetOrgScopedID");
+    (void)user_id;
+    // A local/synthetic user ID cannot establish the organization's real Meta
+    // identity. Bigscreen awaits this before asking for a proof nonce.
+    return klplat_account_unavailable("ovr_User_GetOrgScopedID", KLPLAT_MSG_ORG_SCOPED_ID);
 }
 // The UserProof handle IS the message (one payload per message, as with User);
 // its single field is the nonce string the request above carried.
@@ -826,7 +847,6 @@ static const char *const g_plat_request[] = {
     "ovr_User_GetLoggedInUserFriendsAndRooms",
     "ovr_User_GetLoggedInUserFriendsV2",
     "ovr_User_GetNextUserArrayPage",
-    "ovr_User_GetOrgScopedID",
     "ovr_User_LaunchFriendRequestFlow",
     "ovr_User_GetLoggedInUserManagedInfo",
 };
@@ -1130,6 +1150,7 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     // user was handed out. The exact-match binding overrides ovr_User_GetLoggedInUser's
     // entry in g_plat_request.
     {"ovr_User_GetLoggedInUser",               (void *)klplat_User_GetLoggedInUser},
+    {"ovr_User_GetOrgScopedID",                (void *)klplat_User_GetOrgScopedID},
     {"ovr_Message_GetUser",                    (void *)klplat_Message_GetPayload},
     {"ovr_User_GetID",                         (void *)klplat_User_GetID},
     {"ovr_User_GetOculusID",                   (void *)klplat_User_GetOculusID},

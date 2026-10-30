@@ -22,6 +22,7 @@
 // For kl_jni_locale_parts — AConfiguration and java.util.Locale are two doors
 // onto one fact and must not answer differently.
 #include "kl_jni.h"
+#include "kl_jni_surface.h"
 #include "kl_openxr.h"   // the XR surface-swapchain seam, for ANativeWindow_fromSurface
 
 // ================================================================== ALooper
@@ -352,13 +353,14 @@ typedef struct kl_native_window {
     // AImageReader's output surface (kl_mediandk.c). Opaque here deliberately;
     // see kl_ndk.h.
     void   *owner;
+    void (*retain_owner)(void *), (*release_owner)(void *);
 } kl_native_window;
 
 // Quest 2 per-eye geometry, which is what this title was built against. Only a
 // placeholder: in VR the eye buffers come from the XR runtime, and this
 // surface exists mainly to give Unity a non-zero Screen size at startup. The
 // host overrides it via kl_ndk_set_window once a real drawable exists.
-static kl_native_window g_window = {1, 1832, 1920, 1 /* RGBA_8888 */, NULL};
+static kl_native_window g_window = {.refs=1, .width=1832, .height=1920, .format=1 /* RGBA_8888 */};
 
 void kl_ndk_set_window(int32_t w, int32_t h, int32_t format) {
     g_window.width = w; g_window.height = h; g_window.format = format;
@@ -391,20 +393,37 @@ void kl_ndk_window_free(void *win) {
 void *kl_ndk_window_owner(const void *win) {
     return win ? ((const kl_native_window *)win)->owner : NULL;
 }
+void kl_ndk_window_set_lifetime(void *win, void (*retain)(void *), void (*release)(void *)) {
+    kl_native_window *nw = win;
+    if (nw) { nw->retain_owner = retain; nw->release_owner = release; }
+}
 
 void kl_ndk_window_set_size(void *win, int32_t w, int32_t h) {
     kl_native_window *nw = win ? (kl_native_window *)win : &g_window;
     nw->width = w; nw->height = h;
 }
 
-static void    kl_ANativeWindow_acquire(kl_native_window *w) { if (w) __atomic_fetch_add(&w->refs, 1, __ATOMIC_RELAXED); }
-static void    kl_ANativeWindow_release(kl_native_window *w) { if (w) __atomic_fetch_sub(&w->refs, 1, __ATOMIC_RELAXED); }
+static void kl_ANativeWindow_acquire(kl_native_window *w) {
+    if (!w) return;
+    if (w->retain_owner) w->retain_owner(w->owner);
+    __atomic_fetch_add(&w->refs, 1, __ATOMIC_RELAXED);
+}
+static void kl_ANativeWindow_release(kl_native_window *w) {
+    if (!w) return;
+    __atomic_fetch_sub(&w->refs, 1, __ATOMIC_RELAXED);
+    if (w->release_owner) w->release_owner(w->owner);
+}
 static int32_t kl_ANativeWindow_getWidth(kl_native_window *w)  { return w ? w->width  : 0; }
 static int32_t kl_ANativeWindow_getHeight(kl_native_window *w) { return w ? w->height : 0; }
 static int32_t kl_ANativeWindow_getFormat(kl_native_window *w) { return w ? w->format : 0; }
 
 static void *kl_ANativeWindow_fromSurface(void *env, void *surface) {
     (void)env;
+    void *video = NULL;
+    if (klj_surface_window(surface, &video)) {
+        if (video) kl_ANativeWindow_acquire(video);
+        return video;
+    }
     // XR_KHR_android_surface_swapchain: a Surface handed back by
     // xrCreateSwapchainAndroidSurfaceKHR is NOT the activity's window — it is the
     // producer end of a specific XR swapchain (a guest's game screen). Resolving

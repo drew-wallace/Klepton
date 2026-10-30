@@ -6,6 +6,7 @@ import json
 import plistlib
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -13,6 +14,7 @@ OUT = ROOT/'visionos/build/SteamLocal'
 FRAMEWORKS = ROOT/'visionos/Frameworks/SteamLocal'
 sys.path.insert(0, str(ROOT/'steam/tools'))
 import steam_auth_ui
+import steam_updates
 
 
 def digest(path):
@@ -42,14 +44,32 @@ def host_source(target='walkabout-57013'):
     return source.replace('Walkabout', config.get('display', 'Walkabout'))
 
 
-def inputs(target='walkabout-57013'):
+def runtime_source():
+    channel = os.environ.get('KLEPTON_STEAM_CHANNEL')
+    if channel:
+        return steam_updates.resolve(channel)
+    # Keep direct CLI builds reproducible unless a channel was selected.
     recovery = json.loads((ROOT/'steam/tools/steamframe_recovery.lock.json').read_text())
-    client = next(v for v in recovery['artifacts'] if v['path'] == 'androidarm64/libsteamclient.so')
-    if client['sha256'] != '4b1318ea53168ecbf74318ef5b330eb0a41a3e2d335c14f3827504bebba4b40d':
-        raise ValueError('game-host private ABI requires the audited recovery client')
-    original = ROOT/'build/steam-runtime/steamframe-0.3.0/steam'/client['path']
+    return ROOT/('build/steam-runtime/steamframe-' + recovery['release'] + '/steam'), dict(
+        recovery, version=recovery['release'], source='steamframe-recovery', files=recovery['artifacts'])
+
+
+def inputs(target='walkabout-57013'):
+    steam_source, recovery = runtime_source()
+    client = next(v for v in recovery['files'] if v['path'] == 'androidarm64/libsteamclient.so')
+    steam_updates.client_profile(client['sha256'])
+    original = steam_source/client['path']
     records = [dict(client, path=str(original.relative_to(ROOT)))]
-    records += profile(target)['files']
+    guest_records = profile(target)['files']
+    if os.environ.get('KLEPTON_BUILD_MANIFEST'):
+        # The audited bytes come from the imported APK, never another game
+        # tree which merely happens to exist in this checkout.
+        sys.path.insert(0, str(ROOT/'visionos'))
+        import targets
+        imported = targets.resolve(target)
+        guest_records = [dict(r, path=str(Path(imported['host_srcdir'])/Path(r['path']).name))
+                         for r in guest_records]
+    records += guest_records
     for record in records:
         path = ROOT/record['path']
         if not path.is_file() or path.stat().st_size != record['size'] or digest(path) != record['sha256']:
@@ -65,11 +85,14 @@ def stage(platform='visionossim', target='walkabout-57013'):
     if platform not in ('visionos', 'visionossim'):
         raise ValueError('unsupported Steam framework platform')
     original, records = inputs(target)
-    recovery = json.loads((ROOT/'steam/tools/steamframe_recovery.lock.json').read_text())
+    steam_source, recovery = runtime_source()
     OUT.mkdir(parents=True, exist_ok=True)
     FRAMEWORKS.mkdir(parents=True, exist_ok=True)
     subprocess.run(['make', 'build/klepton-ld'], cwd=ROOT, check=True)
     artifacts = []
+    header = OUT/'SteamLoginABI.h'
+    header.write_text(steam_updates.login_header(records[0]['sha256']))
+    artifacts.append({'path':str(header.relative_to(ROOT)), 'sha256':digest(header)})
     translations = [('libsteamclient_backend', original), ('libsteamclient', original)]
     translations += [(Path(record['path']).stem, ROOT/record['path']) for record in records[1:]]
     for name, source in translations:
@@ -92,14 +115,19 @@ def stage(platform='visionossim', target='walkabout-57013'):
         if not embedded.is_file(): raise ValueError('unexpected generated Steam XCFramework layout')
         artifacts.append({'path':str(embedded.relative_to(ROOT)), 'sha256':digest(embedded)})
     assets = OUT/'SteamAuthAssets'
-    ui = steam_auth_ui.package(ROOT/'build/steam-runtime/steamframe-0.3.0/steam/steamui', assets, interactive=True)
+    if assets.exists():
+        import shutil
+        shutil.rmtree(assets)
+    ui = steam_auth_ui.package(steam_source/'steamui', assets, interactive=True,
+        records=steam_updates.ui_records(recovery['files']) if os.environ.get('KLEPTON_STEAM_CHANNEL') else None)
     swift = OUT/'SteamHostLogin.swift'
     swift.write_text(host_source(target))
     artifacts.append({'path':str(swift.relative_to(ROOT)), 'sha256':digest(swift)})
     for path in sorted(p for p in assets.rglob('*') if p.is_file()):
         artifacts.append({'path':str(path.relative_to(ROOT)), 'sha256':digest(path)})
-    receipt = {'schema_version':1, 'target':target, 'profile':profile(target), 'platform':platform, 'source':'steamframe-recovery',
-        'release':recovery['release'], 'recovery_sha256':recovery['sha256'],
+    receipt = {'schema_version':1, 'target':target, 'profile':profile(target), 'platform':platform, 'source':recovery['source'],
+        'channel':os.environ.get('KLEPTON_STEAM_CHANNEL'), 'release':recovery['version'],
+        'source_build':recovery['build'], 'recovery_sha256':recovery['sha256'],
         'inputs':records, 'auth_ui_inputs':ui, 'artifacts':artifacts,
         'physical_execution_verified':False, 'game_playfab_verified':False}
     (OUT/'manifest.json').write_text(json.dumps(receipt, indent=2)+'\n')
@@ -109,6 +137,12 @@ def stage(platform='visionossim', target='walkabout-57013'):
 def verify_staged(target='walkabout-57013'):
     _, records = inputs(target)
     receipt = json.loads((OUT/'manifest.json').read_text())
+    _, selected = runtime_source()
+    if (receipt.get('channel') != os.environ.get('KLEPTON_STEAM_CHANNEL') or
+            receipt.get('release') != selected['version'] or receipt.get('source_build') != selected['build']):
+        raise ValueError('Steam staging belongs to a different channel or release; rerun mksteam.py')
+    if (OUT/'SteamLoginABI.h').read_text() != steam_updates.login_header(records[0]['sha256']):
+        raise ValueError('Steam login ABI profile changed; rerun mksteam.py')
     if receipt.get('target', 'walkabout-57013') != target or receipt.get('profile', profile(target)) != profile(target):
         raise ValueError('staged Steam profile belongs to another target; rerun mksteam.py --target '+target)
     if receipt['platform'] not in ('visionos', 'visionossim') or receipt['inputs'] != records:

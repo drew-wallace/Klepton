@@ -5,6 +5,7 @@
 #define KL_STEAM_PROBE_LIBRARY 1
 #define KL_STEAM_LOGIN_ABI_PINNED 1
 #define KL_WALKABOUT_API_PINNED 1
+#include "../../../visionos/build/SteamLocal/SteamLoginABI.h"
 #include "../../tools/steam_probe.c"
 
 // Restore the app's working directory after the Steam backend's initialization,
