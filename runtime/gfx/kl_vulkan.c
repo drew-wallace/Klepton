@@ -26,6 +26,7 @@
 
 #include "kl_vulkan.h"
 #include "kl_env.h"
+#include "kl_jni.h"
 #include "kl_driver.h"   // kl_driver_target_name() — per-target GPU identity spoof
 #include "kl_fove.h"     // fixed foveation (the eye-pass recognition below)
 
@@ -60,6 +61,10 @@ int   kl_vulkan_is_handle(const void *h) { (void)h; return 0; }
 void *kl_vulkan_sym(const char *n) { (void)n; return NULL; }
 void *kl_vulkan_lookup(const char *n) { (void)n; return NULL; }
 int   kl_vulkan_available(void) { return 0; }
+unsigned long long kl_vulkan_webview_upload(unsigned long long i,unsigned w,unsigned h,const void *p) { return 0; }
+void kl_vulkan_webview_close(unsigned long long i) {}
+void kl_vulkan_webview_publish(unsigned long long i) {}
+int kl_vulkan_webview_release(unsigned long long i) { return 0; }
 void  kl_vulkan_stats(unsigned *p, unsigned *c) { if (p) *p = 0; if (c) *c = 0; }
 int   kl_vulkan_guest_active(void) { return 0; }
 int   kl_vulkan_display_luid(uint8_t out[8]) { (void)out; return 0; }
@@ -299,12 +304,14 @@ typedef struct {
     PFN_vkResetCommandBuffer          ResetCommandBuffer;
     PFN_vkCmdPipelineBarrier          CmdPipelineBarrier;
     PFN_vkCmdCopyImageToBuffer        CmdCopyImageToBuffer;
+    PFN_vkCmdCopyBufferToImage        CmdCopyBufferToImage;
     PFN_vkCmdClearColorImage          CmdClearColorImage;
     PFN_vkQueueSubmit                 QueueSubmit;
     PFN_vkCreateFence                 CreateFence;
     PFN_vkDestroyFence                DestroyFence;
     PFN_vkWaitForFences               WaitForFences;
     PFN_vkResetFences                 ResetFences;
+    PFN_vkGetFenceStatus              GetFenceStatus;
     PFN_vkDeviceWaitIdle              DeviceWaitIdle;
     PFN_vkQueueWaitIdle               QueueWaitIdle;
     // Readback scratch, created on first use and shared by every capture path
@@ -592,8 +599,8 @@ static void dev_resolve(klvk_device *d) {
     R(InvalidateMappedMemoryRanges);
     R(CreateCommandPool); R(DestroyCommandPool); R(AllocateCommandBuffers);
     R(BeginCommandBuffer); R(EndCommandBuffer); R(ResetCommandBuffer);
-    R(CmdPipelineBarrier); R(CmdCopyImageToBuffer); R(CmdClearColorImage); R(QueueSubmit);
-    R(CreateFence); R(DestroyFence); R(WaitForFences); R(ResetFences);
+    R(CmdPipelineBarrier); R(CmdCopyImageToBuffer); R(CmdCopyBufferToImage); R(CmdClearColorImage); R(QueueSubmit);
+    R(CreateFence); R(DestroyFence); R(WaitForFences); R(ResetFences); R(GetFenceStatus);
     R(DeviceWaitIdle); R(QueueWaitIdle);
 #undef R
 }
@@ -1850,24 +1857,25 @@ static void *klvk_overlay_mtl_texture(VkImage img) {
 static struct {
     VkImage img;
     VkFormat fmt;
-    uint32_t w, h, layers;
+    uint32_t w, h, layers, mips;
     VkImageUsageFlags usage;
 } g_img_info[KLVK_IMG_INFO_MAX];
 static pthread_mutex_t g_img_info_lock = PTHREAD_MUTEX_INITIALIZER;
 static void klvk_img_info_add(VkImage img, VkFormat fmt, uint32_t w, uint32_t h,
-                              uint32_t layers, VkImageUsageFlags usage) {
+                              uint32_t layers, VkImageUsageFlags usage, uint32_t mips) {
     pthread_mutex_lock(&g_img_info_lock);
     for (int i = 0; i < KLVK_IMG_INFO_MAX; i++)
         if (!g_img_info[i].img || g_img_info[i].img == img) {
             g_img_info[i].img = img; g_img_info[i].fmt = fmt;
             g_img_info[i].w = w; g_img_info[i].h = h;
             g_img_info[i].layers = layers; g_img_info[i].usage = usage;
+            g_img_info[i].mips = mips;
             break;
         }
     pthread_mutex_unlock(&g_img_info_lock);
 }
 static int klvk_img_desc(VkImage img, VkFormat *fmt, uint32_t *w, uint32_t *h,
-                         uint32_t *layers, VkImageUsageFlags *usage) {
+                         uint32_t *layers, VkImageUsageFlags *usage, uint32_t *mips) {
     int ok = 0;
     pthread_mutex_lock(&g_img_info_lock);
     for (int i = 0; i < KLVK_IMG_INFO_MAX; i++)
@@ -1877,6 +1885,7 @@ static int klvk_img_desc(VkImage img, VkFormat *fmt, uint32_t *w, uint32_t *h,
             if (h) *h = g_img_info[i].h;
             if (layers) *layers = g_img_info[i].layers;
             if (usage) *usage = g_img_info[i].usage;
+            if (mips) *mips = g_img_info[i].mips;
             ok = 1; break;
         }
     pthread_mutex_unlock(&g_img_info_lock);
@@ -2965,6 +2974,7 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
                 "garbled colour; world colourful => gray was ASTC decode\n",
                 ci->extent.width, ci->extent.height); }
     }
+    uint32_t allocated_mips = ci ? ci->mipLevels : 0;
     VkResult r = real(dev, ci, alloc, out);
     // MoltenVK rejects some formats outright (Wanderer: VK_FORMAT_ASTC_8x8_UNORM/
     // SRGB come back VK_ERROR_FEATURE_NOT_PRESENT) and leaves *out NULL. A null
@@ -2988,6 +2998,7 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
         }
         static int said;
         if (r2 == VK_SUCCESS && *out) {
+            allocated_mips = fb.mipLevels;
             if (said < 16) { said++;
                 VKI("vkCreateImage: format %d rejected (result %d) — substituted "
                     "RGBA8 %ux%u mips %u so the guest gets a real handle (texture "
@@ -3008,7 +3019,7 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     if (r == VK_SUCCESS && out) fove_note_image(*out, ci);
     if (r == VK_SUCCESS && out && ci)
         klvk_img_info_add(*out, ci->format, ci->extent.width, ci->extent.height,
-                          ci->arrayLayers, ci->usage);
+                          ci->arrayLayers, ci->usage, allocated_mips);
     if (r == VK_SUCCESS && out && *out && did_astc_sub) klvk_astc_sub_add(*out);
     if (klvk_trace() && ci && (ci->extent.width >= 480 || ci->extent.height >= 480)
         && (ci->usage & 0x30u))   // colour or depth attachment == a render target
@@ -3106,6 +3117,13 @@ static void VKAPI_CALL klvk_DestroyImage(VkDevice dev, VkImage img,
     if (real) real(dev, img, alloc);
 }
 
+static int klvk_vegas_resident_mips(void) {
+    const char *package=kl_jni_guest_package();long version=0;
+    kl_jni_guest_version(&version,NULL);
+    return package && !strcmp(package,"com.LuckyVR.PokerStarsVR") && version==1102036 &&
+           kl_env_on("KL_VEGAS_VIEW_MIPS",1);
+}
+
 static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
         const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *alloc,
         VkImageView *out) {
@@ -3185,11 +3203,32 @@ static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
     }
     VkImageViewCreateInfo shadow_iv;
     VkFormat shadow_fmt = VK_FORMAT_UNDEFINED;
-    uint32_t shadow_w = 0, shadow_h = 0, shadow_layers = 0;
+    uint32_t shadow_w = 0, shadow_h = 0, shadow_layers = 0, image_mips = 0;
     VkImageUsageFlags shadow_usage = 0;
     int shadow_desc = ci && ci->image &&
         klvk_img_desc(ci->image, &shadow_fmt, &shadow_w, &shadow_h,
-                      &shadow_layers, &shadow_usage);
+                      &shadow_layers, &shadow_usage, &image_mips);
+    VkImageViewCreateInfo resident_iv;
+    if (shadow_desc && image_mips && ci->viewType==VK_IMAGE_VIEW_TYPE_2D &&
+        (shadow_usage & VK_IMAGE_USAGE_SAMPLED_BIT) &&
+        !(shadow_usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
+        ci->subresourceRange.baseMipLevel < image_mips &&
+        ci->subresourceRange.levelCount != VK_REMAINING_MIP_LEVELS &&
+        ci->subresourceRange.levelCount > image_mips-ci->subresourceRange.baseMipLevel &&
+        klvk_vegas_resident_mips()) {
+        // CP178.7's watch menu requests the full logical chain on a smaller
+        // resident texture (observed: 9 levels on a 64x64, 7-level image).
+        // Metal asserts before MoltenVK can return a failure. Keep the actual
+        // allocated pixels, format, layers, and valid base; bound the view to
+        // that image's remaining mip levels. Never modify the caller's record.
+        resident_iv=*ci;
+        resident_iv.subresourceRange.levelCount=image_mips-ci->subresourceRange.baseMipLevel;
+        VKI("Vegas resident mip view: image %#llx requested %u+%u, using %u+%u of %u allocated levels\n",
+            (unsigned long long)(uintptr_t)ci->image,ci->subresourceRange.baseMipLevel,
+            ci->subresourceRange.levelCount,resident_iv.subresourceRange.baseMipLevel,
+            resident_iv.subresourceRange.levelCount,image_mips);
+        ci=&resident_iv;
+    }
     int shadow_r8 = ci && ci->format == VK_FORMAT_R8_UNORM &&
         ((!shadow_desc) || (shadow_w >= 128 && shadow_h >= 128 &&
           shadow_w <= 512 && shadow_h <= 512));
@@ -4234,6 +4273,8 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties2(
 // KL_TRACE: which thread submits guest work. Compared with [thr] createRT this
 // shows whether Unity creates its temp render targets on the same thread that
 // records/submits the frame, or a different one (the temp-RT race hypothesis).
+#include "kl_vulkan_webview.inc"
+
 static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
         const VkSubmitInfo *si, VkFence fence) {
     static PFN_vkQueueSubmit real;
@@ -4246,6 +4287,7 @@ static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
                 klvk_tid(), n, cb, fence != VK_NULL_HANDLE);
         }
     }
+    klvk_webview_pump(q);
     VkResult r = real ? real(q, n, si, fence) : VK_ERROR_INITIALIZATION_FAILED;
     // Same thread, same queue, right after the guest's work: copy every wanted
     // overlay texture into its persistent shadow (see klvk_shadow_pump).

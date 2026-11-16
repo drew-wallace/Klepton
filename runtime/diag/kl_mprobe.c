@@ -277,6 +277,53 @@ static void probe_stack_traces(void) {
 // and the first candidate is the stereo mode: a title authored for Single Pass
 // Instanced whose display hands back two separate 2D textures is a shape its
 // renderer may never have run.
+static void probe_xr_scene(unsigned frame) {
+    static const MethodInfo *all_cameras,*camera_name,*stereo,*enabled,*target,*resources,*display,*running,*passes;
+    static Il2CppClass *loader_class;
+    static int resolved;
+    if (!resolved) {
+        resolved=1;
+        all_cameras=find_method("UnityEngine","Camera","get_allCameras",0);
+        camera_name=find_method("UnityEngine","Object","get_name",0);
+        stereo=find_method("UnityEngine","Camera","get_stereoEnabled",0);
+        enabled=find_method("UnityEngine","Behaviour","get_isActiveAndEnabled",0);
+        target=find_method("UnityEngine","Camera","get_targetTexture",0);
+        resources=find_method("UnityEngine","Resources","FindObjectsOfTypeAll",1);
+        loader_class=find_class("Unity.XR.Oculus","OculusLoader");
+        display=find_method("Unity.XR.Oculus","OculusLoader","get_displaySubsystem",0);
+        running=find_method("UnityEngine","IntegratedSubsystem","get_running",0);
+        passes=find_method("UnityEngine.XR","XRDisplaySubsystem","GetRenderPassCount",0);
+    }
+    Il2CppObject *cameras=invoke(all_cameras,NULL,"Camera.allCameras");
+    uint32_t count=cameras?il.array_length(cameras):0;
+    fprintf(stderr,"  [mprobe f%u] active cameras=%u\n",frame,count);
+    for (uint32_t i=0;i<count && i<8;i++) {
+        Il2CppObject *camera=*(Il2CppObject **)((uint8_t *)cameras+ARR_DATA+i*sizeof(void*));
+        char name[128]="?";
+        Il2CppObject *n=invoke_on(camera,camera_name,NULL,"Camera.name");
+        if (n) str_ascii(n,name,sizeof name);
+        Il2CppObject *e=invoke_on(camera,enabled,NULL,"Camera.enabled");
+        Il2CppObject *s=invoke_on(camera,stereo,NULL,"Camera.stereoEnabled");
+        Il2CppObject *t=invoke_on(camera,target,NULL,"Camera.targetTexture");
+        fprintf(stderr,"  [mprobe f%u] camera \"%s\" enabled=%d stereo=%d targetTexture=%d\n",frame,name,
+                e?*(uint8_t*)il.object_unbox(e):-1,s?*(uint8_t*)il.object_unbox(s):-1,t!=NULL);
+    }
+    if (loader_class && resources && display) {
+        Il2CppObject *type=il.type_get_object(il.class_get_type(loader_class));
+        void *args[]={type};
+        Il2CppObject *loaders=invoke(resources,args,"Find OculusLoader assets");
+        uint32_t n=loaders?il.array_length(loaders):0;
+        for (uint32_t i=0;i<n && i<4;i++) {
+            Il2CppObject *loader=*(Il2CppObject **)((uint8_t*)loaders+ARR_DATA+i*sizeof(void*));
+            Il2CppObject *subsystem=invoke_on(loader,display,NULL,"OculusLoader.displaySubsystem");
+            Il2CppObject *r=subsystem?invoke_on(subsystem,running,NULL,"XRDisplaySubsystem.running"):NULL;
+            Il2CppObject *p=subsystem?invoke_on(subsystem,passes,NULL,"XRDisplaySubsystem.GetRenderPassCount"):NULL;
+            fprintf(stderr,"  [mprobe f%u] OculusLoader[%u] display=%d running=%d passes=%d\n",frame,i,
+                    subsystem!=NULL,r?*(uint8_t*)il.object_unbox(r):-1,p?*(int32_t*)il.object_unbox(p):-1);
+        }
+    }
+}
+
 static void probe_xr_display(unsigned frame) {
     // UnityEngine.XR.StereoRenderingMode { MultiPass = 0, SinglePass = 1,
     // SinglePassInstanced = 2, SinglePassMultiview = 3 }.
@@ -318,6 +365,7 @@ static void probe_xr_display(unsigned frame) {
             ho ? *(int32_t *)il.object_unbox(ho) : -1,
             so ? (double)*(float *)il.object_unbox(so) : -1.0,
             oo ? (*(uint8_t *)il.object_unbox(oo) ? "1" : "0") : "?");
+    if (kl_env_on("KL_PROBE_XR_SCENE",0)) probe_xr_scene(frame);
 }
 
 // ---------------------------------------------------------------------------

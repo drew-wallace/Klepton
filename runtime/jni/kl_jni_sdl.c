@@ -425,6 +425,9 @@ const klj_binding klj_bind_sdl[] = {
     // would have the client negotiate an HDR stream and then tone-map it onto
     // an SDR window, which is the 4K mistake in a different colour space.
     {"com/valvesoftware/steamlink/SteamLinkUtils", "canDisplayHDRVideo", "(ZZ)Z", klj_SDLA_false},
+    // Build 5002527 adds a third option to the probe. The host display still
+    // advertises no HDR types, regardless of the requested options.
+    {"com/valvesoftware/steamlink/SteamLinkUtils", "canDisplayHDRVideo", "(ZZZ)Z", klj_SDLA_false},
     // The overlay SurfaceView's visibility. On Android these post a Runnable to
     // the UI thread and BLOCK on Object.wait() until it has run — the caller's
     // contract is "the surface is now in that state", not "a request was sent".

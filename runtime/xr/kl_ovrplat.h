@@ -40,6 +40,35 @@
 #ifndef KL_OVRPLAT_H
 #define KL_OVRPLAT_H
 #include <stdio.h>
+#include <stdint.h>
+
+// A frontend may connect a real, app-scoped Meta account service. Callbacks
+// must copy app_id before returning and complete each accepted request once.
+// No credentials travel through environment variables or diagnostic logs.
+enum kl_ovrplat_account_kind {
+    KL_OVRPLAT_ACCOUNT_USER = 1,
+    KL_OVRPLAT_ACCOUNT_TOKEN,
+    KL_OVRPLAT_ACCOUNT_PROOF,
+    KL_OVRPLAT_ACCOUNT_ORG_ID,
+};
+typedef void (*kl_ovrplat_account_provider)(uint64_t request, int kind,
+                                           const char *app_id, uint64_t user_id,
+                                           void *context);
+typedef struct {
+    uint64_t user_id;
+    const char *oculus_id;
+    const char *display_name;
+    const char *image_url;
+    const char *small_image_url;
+    const char *string;
+    const char *error;
+    int32_t error_code;
+    int32_t http_code;
+} kl_ovrplat_account_result;
+void kl_ovrplat_set_account_provider(kl_ovrplat_account_provider provider, void *context);
+// Copies the result. Stale/duplicate completions return 0. Payload storage
+// belongs to the SDK message until ovr_FreeMessage, even after sign-out.
+int kl_ovrplat_complete_account(uint64_t request, const kl_ovrplat_account_result *result);
 
 void *kl_ovrplat_dlopen(const char *soname);   // NULL if not the platform loader
 int   kl_ovrplat_claims(const char *soname);   // the same test, without opening

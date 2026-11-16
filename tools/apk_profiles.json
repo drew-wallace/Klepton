@@ -47,6 +47,12 @@
     "entry_sha256": "ea04624f7afb2a4e426ddb8215651100c5c1d04456c2b9ca533cba943d2666e8",
     "apk_sha256": "34978a9f4ef965d14103402676ce429714a22532be47a78198b267893278a4ca"
   },
+  "pistolwhip-12": {
+    "package": "com.cloudheadgames.pistolwhip",
+    "version_code": "12",
+    "entry_sha256": "9348cd29bcdec5b677c7124b111a2ebb285bfd6550282619c8fd178f2982eb5d",
+    "apk_sha256": "9bb1f10e03122306452b671056d0987b4fa6e16245a54449c58b77c7762d50ba"
+  },
   "eleven": {
     "package": "quest.eleven.forfunlabs",
     "version_code": "210648353",

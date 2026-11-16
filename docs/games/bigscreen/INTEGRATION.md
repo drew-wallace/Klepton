@@ -1,14 +1,569 @@
 # Bigscreen Quest startup and WebKit integration
 
-Current status (October 30, 2026): the simulator reaches My Room using Bigscreen's
-own email login. The user has confirmed browser interaction and audible playback;
-the WebKit bridge supplies real browser textures and input. Joining an online
-room exposed a native SCTP socket crash. After its errno fix, the next attempt
-reached an unimplemented video SurfaceTexture constructor. That consumer now
-connects to the real decoder and passes a local decode-to-GPU test. The user
-confirmed that joining an online room now works. Meta platform authentication
-remains unavailable. Saved-session startup uses Bigscreen's own refresh-token
-flow. Earlier sections retain the sequence of observed blockers.
+Current status (November 5, 2026): the user has confirmed email login, browser
+interaction, audible playback, online rooms, social TV, and detailed Lobby
+avatars in the simulator. On Vision Pro, login, room joining, TV playback and
+voice transmission work. After the native-video layer and browser-cookie fixes,
+some shared rooms show video, while others still show black. A theater loaded
+its environment slowly on the first visit and both environment and video quickly
+on rejoining. The remaining cloud-player capture investigation is recorded below.
+Earlier transparency and seated-height reports remain part of the investigation.
+The cloud-browser video capture fix works on Vision Pro. Its 10 FPS capture
+limit is being replaced by adaptive video pacing (below). The user confirms
+that the see-through playback menu still needs a fix.
+Meta platform authentication remains unavailable.
+Saved-session startup uses Bigscreen's own refresh-token flow. Earlier sections
+retain the sequence of observed blockers.
+
+### Physical headset login-screen crash (November 5, 2026)
+
+The GLES 3.1 installer build reached the login screen on Vision Pro, then
+faulted on a managed worker at `libunity.so+0x53c088`. Its IL2CPP stack runs
+through `UnixNetworkInterfaceAPI.getifaddrs`, `LinuxNetworkInterfaceAPI`, and
+`Bigscreen.Cloud.RemoteDesktop.SendRequestForDevices`. Unity was resolving
+libc for the background network-interface scan. The synthetic libc handle
+incorrectly searched every loaded guest image for missing symbols, exposing
+another library's `UnityPluginLoad` callback. Unity's plugin initialization
+then dereferenced a missing thread-local graphics device on the worker.
+
+Synthetic core-library handles now resolve only the runtime shim's exports.
+Explicit guest-image and process-wide symbol lookups retain their existing
+behavior. This also prevents unrelated guest `JNI_OnLoad` exports from leaking
+into libc. The fix applies to Unity guests using these handles, without
+depending on Bigscreen's APK fingerprint or a simulator launch override.
+
+`make loadercheck` exercises a small authored ELF exporting `UnityPluginLoad`.
+The regression fails against the previous loader and passes with the fix:
+libc still exposes `getifaddrs`/`freeifaddrs`, missing plugin callbacks report
+an undefined symbol, and explicit-image/global lookup still finds the plugin.
+Both visionOS platform compile/link gates and Swift typechecking pass. The
+installer rebuilt, signed, and updated the existing physical installation as
+job `2a90cecff45f`, including saved-data backup/restore and asset staging.
+
+The user confirmed that the updated login popup stays open and responds on
+Vision Pro, and that the monitored Quit actions were intentional. They then
+joined a room and reported an immediate crash; room joining on the physical
+headset requires a separate investigation. A diagnostic launch with
+`KL_BOOT_WINDOW=0` had backgrounded and invalidated its immersive renderer;
+that short run alone was not evidence of login stability.
+Evidence is retained locally under
+`build/bigscreen-investigation/headset-20261105/`, including the original
+system crash report, regression results, build logs, and installation result.
+
+### Physical room join: JavaScript result unboxing (November 5, 2026)
+
+The next physical room join aborted in strict JNI dispatch. The system report
+shows `klj_call_common` reached through Unity's AndroidJavaProxy unboxing while
+`klj_vuplex_drain_events` delivered a JavaScript result. The matching retained
+boot log names the missing operation:
+`java/lang/String.toString()Ljava/lang/String;`. The user had restarted after
+the crash, so that signature was in `klepton-boot.log.previous`, rather than
+the current boot log; the original login fault retained in the previous crash
+file was not the cause of this new SIGABRT.
+
+The java.lang bridge now implements String.toString by returning the original
+immutable string. This is general JNI behavior, without an APK-specific gate.
+`make jnistringcheck` verifies identity and contents through the real JNI table,
+including full-signature/name-only lookup, empty strings, and Unicode text.
+The Bigscreen JNI regression also delivers a queued JavaScript result through
+the ReflectionHelper proxy and unboxes its string on the guest thread, checking
+that the request is consumed and its proxy reference released.
+
+Both JNI regressions pass, along with the device/simulator compile/link gates
+and Swift typechecking. Installer job `d23874d61e01` updated the same physical
+app, preserving saved data and staging its assets. The room-join retest on
+Vision Pro confirmed that another person's room opens and responds. Its video
+screen was white while content played, and the menu's main content area was
+blank; this is a separate rendering failure. The new physical launch resumed
+its saved session,
+completed the app's normal sign-in, and connected before a later intentional
+Quit action; no missing JNI operation appeared in that run. The original
+SIGABRT report and matching previous boot
+log, test results, and installation evidence are retained under
+`build/bigscreen-investigation/headset-20261105/` and diagnostics job
+`803271b73971`.
+
+### Additional room shaders lose texture mappings (November 5, 2026)
+
+The physical room test above no longer aborts. Its retained log has thousands
+of GL_INVALID_OPERATION messages; a bounded follow-up trace identifies repeated
+unsupported glMemoryBarrier calls and an invalid framebuffer attachment. These
+errors alone do not establish the cause of the white screen.
+
+A separate GPU stress test reproduces a concrete mapping failure: after the
+64-entry shader/program pin tables fill, the next program silently loses its
+baked sampler location. The test expects location zero but receives 361, which
+breaks Unity's mixed baked/named texture assignment contract. The pin registries
+now grow as needed and collect names that GL has actually deleted. A shared
+mutex protects growth, collection, lookup, and uniform remapping across contexts.
+Objects marked for deletion but retained by an attachment/current binding remain
+valid mappings, matching GL's deferred deletion behavior.
+
+The expanded uniform regression keeps 96 programs live, verifies actual GPU
+pixels for each, repeats room-style loading/deletion three times, and checks a
+deleted-but-current program still draws correctly. It fails against the old
+tables and passes with the fix. Avatar storage/reflection, local H.264, HTTP HLS,
+both visionOS platform link gates, and Swift typechecking pass. Physical visual
+verification is still required; the cache stress result does not by itself prove
+that the reported room's video and menu render correctly.
+
+Installer job `347200e955c3` rebuilt and updated the same headset app with the
+registry fix, preserving its writable data and staging its assets. Evidence:
+`white-uniform-before.log` (sampler 361 instead of zero),
+`white-uniform-after.log`, `white-avatar-regression.log`,
+`white-stream-regression.log`, `white-runtime-build.log`, and
+`white-install.ndjson` under the local headset investigation directory.
+
+The user subsequently confirmed that the video screen works on Vision Pro,
+while the menu remains blank. Thus the registry repair is not sufficient to
+resolve all of the room's rendering issues.
+
+### Menu upload rejection and non-pausing diagnostics (November 5, 2026)
+
+The browser BGRA upload helper always called glTexImage2D for its first frame,
+even if Unity had allocated immutable texture storage. That produces
+GL_INVALID_OPERATION and leaves the pixels unchanged. The helper nevertheless
+returned success, advancing the browser's uploaded serial. A real ANGLE texture
+test reproduces the unchanged pixels with immutable RGBA8 storage.
+
+The helper now queries TEXTURE_IMMUTABLE_FORMAT and uploads into existing
+storage with glTexSubImage2D. It checks that a host GL context is current,
+reports bounded numeric upload failures, and returns failure so the browser can
+retry its frame. An attempted resize of immutable storage fails explicitly and
+preserves the previous pixels and the guest's bindings/unpack state. Mutable
+first allocation, updates and resizing continue to work. The texture regression,
+real browser input, local H.264 and HTTP HLS tests pass, as do both visionOS
+platform compile/link gates and Swift typechecking.
+
+The user also reported loud/static audio and near-zero frame rate requiring a
+force quit. The last healthy compositor record is at 14:19:58; the live-debugger
+attempt began at 14:19:57 and waited for attachment until 14:20:47. Before that
+pause the log records steady rendering and guest PCM peaks below full scale.
+The timing implicates the inspection as the stall trigger, but does not rule
+out an independent audio issue. Live debugger attachment has been stopped.
+The next physical test must run without a debugger before drawing conclusions
+about audio stability.
+
+`KL_WEBVIEW_TRACE=1` adds bounded CPU snapshot statistics, one DOM metadata
+summary per browser and first-upload storage metadata. It records no page text,
+URLs, credentials, screenshots or audio samples, and requires no GL readback or
+thread suspension. This is intended to distinguish an already-blank browser
+snapshot from a texture upload/draw failure. Ordinary builds leave it disabled.
+
+Installer job `584f324b024f` updated the existing headset installation with this
+upload fix and preserved saved data. Temporary `KL_WEBVIEW_TRACE=1` and
+`KL_AUDIO_TRACE=1` settings were enabled for the next normal, debugger-free
+test. The prior env-file state is retained locally in `menu-env-state.json` and
+`menu-env-original.txt`; restore it when the investigation is complete.
+The standalone WebKit and local-video tests also pass with tracing enabled,
+including real CPU snapshot and DOM summaries. Evidence is in
+`menu-upload-before.log`, `menu-upload-after.log`, `menu-webkit-test.log`,
+`menu-webkit-video-test.log`, `menu-web-input-regression.log`,
+`menu-stream-regression.log` and `menu-runtime-build.log` under the headset
+investigation directory. Physical menu visibility and audio stability remain
+pending user confirmation.
+
+### Playback panels, stereo video and seated height (November 5, 2026)
+
+The latest screenshots distinguish a rendering Twitch page with a black video
+rectangle from overlapping native playback/menu panels. CPU snapshots show the
+Twitch page has content and one video element; blank auxiliary views have empty
+DOMs. The loaded browser textures are mutable, so immutable storage was not the
+remaining cause in this run. Local `jar:file:...!/assets/web/youtube_busy.html`
+navigation also failed with unsupported URL -1002. The URL adapter now resolves
+both Android asset URL forms against staged assets, preserves query/fragment,
+and rejects paths escaping the asset root.
+
+Legacy layer destruction left its record in the active compositor list. It now
+removes that record immediately while retaining backing storage for in-flight
+frames. Deferred GLES publication rechecks liveness under the publication lock.
+This fixes a concrete source of old panels remaining above current menus; it
+does not establish that every reported transparency artifact has the same cause.
+
+Disassembly of this APK's OVRPlugin 1.34 wrapper confirms five Android stack
+arguments after the eight previously handled arguments: UV-rectangle override,
+TextureRectMatrixf pointer, colour override, colour scale and colour bias. These
+and the right-eye texture are now retained. Distinct GLES eye textures use
+separate Metal mirror storage; both compositor eyes use the submitted crop and
+colour/alpha settings. Tests cover real right-eye GPU pixels, per-eye stereo
+crops, alpha scale, reflected axes, undefined upper padding in Android's boolean
+stack slots, and destruction of active/pending layers.
+Physical 3D content remains to be verified.
+
+The physical log reports EyeLevel origin with a roughly 1.06 m head Y. After an
+explicit EyeLevel request, the frontend now subtracts its first tracked eye
+height from both head and controller positions. Subsequent head movement stays
+relative to that height, and Recenter recalibrates it. FloorLevel, Stage and
+guests that never explicitly select an OVR origin retain physical height. The
+tracking regression covers seated movement, repeated origin requests, controller
+offsets, recenter, invalid samples, FloorLevel and Stage.
+
+WebKit's [snapshot video issue](https://bugs.webkit.org/show_bug.cgi?id=280824)
+matches the black video rectangle, and its discussion reports canvas video as
+a working snapshot path. `KL_WEBVIEW_VIDEO_CANVAS=1` enables an experimental
+implementation for up to four visible, unprotected, inline main-frame videos,
+capped at 1280×720 each. It paints only at the existing snapshot cadence, keeps
+audio/playback in WebKit, uses pointer-transparent canvas siblings below player
+controls, and removes unused canvases. Native-control video and cross-origin
+frame video are not covered. The local H.264 test verifies moving RGB frames,
+refresh, visible/clickable controls and canvas cleanup. This does not verify
+live Twitch playback on Vision Pro. Safe tracing adds numeric playback readiness,
+error, dimensions and canvas results without recording stream URLs or content.
+
+Evidence is retained under the local `headset-20261105` investigation directory:
+`enqueue-layer-disassembly.txt`, `panels-reproject-test2.log`,
+`panels-touch-test3.log`, `panels-final-layer-test.log`,
+`panels-final-canvas-test.log`, `panels-web-test2.log`, and
+`panels-abi-test.log`. Tests pass and both visionOS platform gates and
+Swift typechecking pass (`panels-abi-runtime-build.log`). The final headset update
+completed as installer job `020733946c3e`, preserving saved data and staging assets,
+and is recorded in `panels-final-install.ndjson`;
+the temporary env file additionally enables the canvas workaround and must be
+restored from `menu-env-original.txt` when the investigation finishes. No live
+debugger is used for this retest.
+
+### Black stereo video and missing microphone control (November 5, 2026)
+
+The next headset test still showed black 3D video and no working microphone.
+Diagnostics job `65977f3d4fa8` records OpenSL recorder creation refused twice
+because the microphone toggle is off, followed by Unity's recording-device
+initialization error. The native control window restricted its microphone
+section to a fixed list of built-in targets, excluding imported Bigscreen. The
+section now appears for imported APKs as well. Capture remains off until the
+user enables it and grants recording permission. The panel explains that a game
+whose capture already failed may need reopening to retry. The saved setting's
+publish path is present in the log; no preference-restoration failure was proven.
+
+The same run contains video conversion shader failures. Both multipass and
+multiview variants unconditionally require `GL_OVR_multiview2`. This rejects
+even the multipass shader whose multiview body is inactive. The GLSL adapter
+now makes that directive optional only in Unity's multipass variant, identified
+by its stereo conditional with no multiview keyword definition. Genuine
+multiview variants retain their requirement and view IDs. An authored shader
+regression and the captured vertex/fragment pair both compile, link and render
+distinct left/right pixels from a side-by-side texture. Guest shader source is
+retained only in the ignored investigation directory, not redistributed in tests.
+This is a candidate fix for black video, pending the user's physical retest.
+
+Separately, backgrounding the app at 15:32:41 invalidated its running H.264
+decoder: callback OSStatus -12911 was followed by repeated submit error -12903,
+including after the immersive space reopened. This timing does not establish
+the cause of black 3D video before backgrounding. The decoder now defers fatal
+session recovery to its submitting thread, drains callbacks, and recreates the
+session using cached parameter sets at the next random-access frame. Dependent
+frames are skipped while waiting; ordinary bad-packet errors keep the session.
+Repeated failures are rate limited in logs. `make decoderrecoverycheck`
+invalidates actual H.264 and HEVC sessions, tests the asynchronous malfunction
+path and verifies nonblank recovered pixels with matching presentation times.
+
+Evidence under `headset-20261105`: `stereo-mic-diagnose.ndjson`,
+`stereo-video-shader-test2.log`, `stereo-captured-shader-test.log`,
+`stereo-decoder-recovery-test2.log`, `stereo-mic-runtime-build.log`, and
+`stereo-mic-install.ndjson`. Both platform build gates and Swift typechecking pass.
+Installer job `8973db1b70b3` completed the physical update, preserving saved data
+and staging assets. The HEVC decode and uniform-mapping GPU regressions pass.
+Microphone capture and the room's 3D picture still require physical confirmation.
+
+### Recorder state mismatch and continuing room rendering failures (November 5, 2026)
+
+The retest enabled capture and granted microphone permission, but other users
+still could not hear speech. Diagnostics job `a9f0f4ce009d` contains two runs
+with a working built-in input route and OpenSL recorder construction. The final
+capture reports have nonzero peaks (22555 and 14578), while the guest read zero
+samples. Its requested record state was logged as STOPPED. The bridge had
+incorrectly numbered recording states 0/1/2; the public
+[Android OpenSL header](https://android.googlesource.com/platform/system/media/+/07c08a29e5c0a8250a5225f57d610eb1250ac225/opensles/include/SLES/OpenSLES.h)
+defines STOPPED/PAUSED/RECORDING as 1/2/3. Thus Unity's request to record never
+ran the feeder. Those constants are corrected, invalid states are rejected, and
+GetPosition now reports delivered recording frames in milliseconds instead of
+always returning zero. State and position getters share the recorder lock.
+
+`tests/t_opensl_record.c` exercises public vtables against synthetic PCM only:
+the opt-in gate, literal standard state numbers, real feeder callbacks, partial
+reads, 48-to-16 kHz resampling, pause/resume and recording position. It does not
+open a microphone or record user audio. The test is included in `openslcheck`.
+Playback, overlay GPU and WebKit regressions pass, along with both visionOS
+platform gates and Swift typechecking. Physical voice transmission remains
+unconfirmed until the next run.
+
+The same retest still had a black theater with visible avatars, a visible room
+without its movie, and later a white movie screen with transparent media menus.
+There are no shader compile failures in these runs. Decoder recovery succeeded
+once after an invalid session, so the prior fixes did not resolve all playback
+paths. The user could not identify the source or room name. No further visual
+fix is claimed from this evidence. Browser diagnostics now restart their
+sampling window on navigation and include later frames, capped at eight
+navigations per view. `KL_OVRP_OVERLAY_TRACE` adds bounded per-layer crop,
+colour/alpha and underlay metadata, without GPU readback or debugger attachment.
+These are enabled for a room-transition reproduction in the next build.
+
+Evidence under `headset-20261105`: `room-mic-retest-diagnose.ndjson`,
+`room-mic-final-recorder-test.log`, `room-mic-playback-regression.log`,
+`room-mic-overlay-regression.log`, `room-mic-final-webview-test.log`,
+`room-mic-final-runtime-build.log`, and `room-mic-install.ndjson`.
+The full `openslcheck` gate passes. Installer job `76f40f0ff8e9` completed the
+physical update, preserving saved data and staging assets. The temporary env
+file now also enables `KL_OVRP_OVERLAY_TRACE`; restore the original env file
+when the investigation is complete.
+
+### Shared-video copy and room cookie crash (November 5, 2026)
+
+The user confirms voice transmission now works. In diagnostics job
+`9e60b1dddd2c`, the corrected OpenSL recorder delivered 47306 buffers and the
+guest read 504.60 seconds of the 504.61 seconds captured, without ring overruns.
+Shared-room movies remained black, while local and social TV playback worked.
+Four native H.264 streams decoded, and their submitted overlay handles exactly
+match their SurfaceTexture handles. Those handles contain native YCbCr images;
+the TV adapter uses BGRA images.
+
+The existing texture regression proved native YCbCr can be sampled. Extending it
+to the actual composition-layer mirror reproduces the missing link: attaching
+the decoded YCbCr texture to a read framebuffer produces status 0x8cd6 and blit
+error 0x506. A process-wide one-message warning had hidden these failures after
+the startup splash's unrelated incomplete framebuffer. The mirror now samples
+externally backed video into an ordinary RGBA layer with an internal shader;
+both native and BGRA sources follow the same sampling semantics. Other layer
+textures keep their existing framebuffer-blit path. Copy errors are bounded per
+layer instead of suppressed process-wide.
+
+`build/t_video_layer` exercises real decoded 8-bit and Main10 frames, compares
+the complete compositor-layer pixels with ordinary texture sampling, and checks
+program, framebuffer, VAO, viewport, texture units, sampler, write mask and render
+enable restoration. It also verifies that copying defers while a delete-pending
+program is current, because switching programs would destroy the guest's object.
+The native test fails before this fix and passes afterward; mean mirror error is
+at most 0.04/255 in the tested frames. Test readback is confined to authored media
+and uncompressed host RGBA textures; no headset GPU readback is added.
+
+A temporary `KL_VTDEC_BGRA=1` comparison made one previously black shared room
+visible on Vision Pro. Joining a different room then aborted at the missing
+static JNI call `WebView3D.setCookie(Ljava/lang/String;)V` (diagnostics job
+`358a9ad1f109`). This was a Klepton app crash, not a system crash. The original
+DEX implementation accepts Vuplex Cookie JSON. The adapter now stores that
+cookie through the shared WebKit store and queues subsequent explicit loads
+until pending cookie writes finish. Domain, path, Secure, HttpOnly, expiry,
+replacement and expired-cookie deletion have real WebKit/network tests. Cookie
+data is never logged. The JNI regression resolves the inherited static call.
+
+Both platform gates and Swift typechecking pass, alongside the video-layer,
+cookie, JNI, browser and ordinary-overlay regressions. Evidence under
+`headset-20261105`: `video-layer-before.log`, `video-copy-final-layer-test.log`,
+`video-cookie-test2.log`, `video-cookie-jni-test.log`,
+`video-copy-overlay-regression.log`, `video-copy-final-web-test.log`,
+`video-copy-final-runtime-build.log` and `video-copy-cookie-install.ndjson`.
+The next physical test showed content in several rooms; some cloud-player rooms remained black (see below).
+Installer job `61ac9a4aec41` completed the update, preserving saved data and
+staging assets. The temporary decoder override is now `KL_VTDEC_BGRA=0` to test
+the corrected native-copy path instead of relying on the converted-output
+comparison. Other bounded diagnostic flags remain enabled for this retest.
+
+### Cloud-browser shadow video (November 5, 2026)
+
+The next user test reports several working rooms, a black Star Wars lobby
+screen, and one theater that recovered after rejoining. Diagnostics job
+`3de5595c5bc0` contains native H.264 decoder sessions and cloud-browser pages.
+The native overlay errors occur before decoded images arrive; no subsequent
+video-copy errors are recorded. This does not establish that every native
+stream succeeds, but separates those paths from the remaining browser cases.
+
+The public cloud-browser page embeds its player in an open shadow root. The
+existing snapshot workaround only searched the light DOM, so it could not
+paint that player's video. Video discovery now traverses open roots with
+bounded node/depth limits. Pointer hit testing, keyboard focus and scrolling
+also descend through open roots. Capture retains its four-visible-video and
+1280×720 limits. Closed roots, cross-origin frames and protected video remain
+outside this workaround.
+
+`t_webview_video` can place authored H.264 inside two nested open roots via
+`KL_TEST_SHADOW_VIDEO=1`. Before the fix, its canvas/click assertion fails;
+afterward, changing video pixels, refresh, overlay-button clicks, keyboard
+input, scrolling and canvas cleanup pass. The light-DOM video, browser input
+and cookie tests also pass, along with both visionOS build gates. Browser diagnostics now count
+deep videos and report HTTP status, script/rejection counts and numeric error
+categories. Navigation logging records origins without query strings, paths,
+credentials or raw error text. The user confirmed that formerly black cloud video now displays;
+this change does not establish a cause for delayed environment loading.
+Installer job `7f3b46abb890` completed installation and asset staging, preserving
+saved data. The existing canvas and bounded diagnostic flags remain enabled.
+
+### Browser video cadence and remaining menu transparency (November 6, 2026)
+
+The user confirms cloud video now works, but reports a low frame rate and the
+same see-through playback menu. Diagnostics job `0d2e15eae6c3` shows the cloud
+player running at readyState 4, 1280×720, unpaused, with one canvas drawn and no
+reported media, script or page error. Every browser snapshot was still limited
+to 10 FPS. That local ceiling can explain choppiness without network lag.
+
+Playing canvas video now targets 30 FPS; static pages and paused video stay at
+10 FPS. `KL_WEBVIEW_VIDEO_FPS` overrides the video target within 10–60 FPS. A
+one-shot timer schedules from the preceding capture's start, with one capture
+in flight. Slow captures cannot queue or incur an extra full interval after
+completion. Bounded cadence logs measure completed FPS and mean capture time;
+this is a target, not a promise of 30 FPS on the headset.
+
+The authored nested-shadow fixture reproduces the 10.5 FPS baseline. At the
+cloud player's 1280×720 source / 1400×788 viewport size, the revised path measures
+25.9 and 27.6 FPS, 9.4 FPS paused, and 26.6 FPS after resuming. Video colors,
+controls, refresh, keyboard, scrolling and cleanup pass. Both visionOS build
+gates and Swift typechecking pass. Physical cadence verification is pending.
+The see-through menu remains unresolved; layer diagnostics now include source
+presence, submission index and pose to investigate its composition separately.
+
+### Cloud Browser panel order and low-memory callback (November 6, 2026)
+
+The user identified the see-through panel as Cloud Browser. After quitting,
+log collection succeeded (`bbf6e36a8764`). The source browser snapshot has no
+near-zero-alpha sample points, and the player remains ready/playing with successful
+canvas draws. Multiple theater and small-panel underlays share the source.
+`EnqueueSetupLayer2` previously discarded compositionDepth. The bridge now
+retains it and stably orders explicitly ranked legacy layers back to front,
+with smaller depths in front, as documented by
+[Meta](https://developers.meta.com/vr/documentation/unity/unity-ovroverlay/). Equal depths and lists
+from other APIs retain their ordering. The real ANGLE-to-Metal regression
+submits the front layer before the back one and verifies compositor order,
+alongside existing image, stereo, crop, colour and destruction checks. This
+fixes a supported API gap; whether it resolves the user's panel remains to be
+verified on Vision Pro.
+
+A separately collected previous-run crash (`00186940414e`) entered managed
+code from `kl_mem_pressure_fire` on a dispatch memory-pressure worker and
+faulted at `libil2cpp+0xa570e8`, address 0x10. OS events now atomically coalesce
+and reach nativeLowMemory at the next guest frame poll, on the frame thread
+that already runs Unity. OS warnings still deliver when footprint polling is
+disabled. `t_lowmem_thread` registers a real synthetic JNI callback and checks
+worker deferral, coalescing, thread identity and warning delivery. It passes,
+as do both platform build gates and Swift typechecking. No debugger attachment
+or headset GPU readback is involved.
+Installer job `c6ce6fbb73ba` completed the frame-rate, layer-order and deferred
+low-memory update, preserving saved data and staging assets. Physical playback
+rate and Cloud Browser panel verification remain pending.
+
+### Immersive renderer remains paused at startup (November 6, 2026)
+
+The next physical test did not get past the Klepton window. Diagnostics job
+`99b2d3961042` reaches boot completion, successful openImmersiveSpace and spatial
+input registration, but no ANGLE initialization or guest frames. Startup
+milestones were added before/after renderer activation, graphics device lookup,
+EGL creation and pipeline setup. Diagnostic build `1f31e8a71424` and logs
+`e9ee545b66ad` / `a76b404c894b` show waitUntilRunning blocked in state paused for
+at least 51 seconds, returning invalidated only after Quit dismisses the space.
+Browser capture and OVR layer ordering have not run at that stage.
+
+Reopen VR now remains available
+in the control window even when openImmersiveSpace returned opened. After
+eight seconds the window explains the wait and directs the user to any headset
+prompt. The diagnostic `KL_RENDERER_STARTUP_RETRY=1` allows one foreground
+reopen, but defaults off: Apple documents that paused can indicate a pending
+system immersion confirmation, which should not be dismissed automatically.
+The policy retains its retry budget across replacement renderers and ignores callbacks
+from obsolete renderers. An invalidated renderer that never started Unity also
+skips nativePause. The standalone Swift policy regression covers timeout,
+foreground/quit guards, retry limits, stale callbacks and healthy activation;
+Swift typechecking passes. Build `310cc3b0e3c6` exercised the one-time retry: the
+old renderer invalidated cleanly but the replacement returned userCancelled
+(logs `bb58a0a70f66`). Manual activation and any system prompt are being checked.
+See [Apple’s renderer lifecycle documentation](https://developer.apple.com/documentation/CompositorServices/drawing-fully-immersive-content-using-metal).
+Installer job `cd488508369d` completed the manual-recovery build with automatic
+retry off, preserved saved data and staged assets. Launching from Home and
+manual activation are awaiting user confirmation; guest rendering has not yet
+been verified in this build.
+The next user attempt still appeared inert. Logs `55bb64fc5964` confirm that
+manual controls do invalidate/create fresh renderer instances, but each remains
+paused before graphics-device lookup. Immediate reopen sometimes returns
+userCancelled. A headset restart and comparison with another immersive app
+have been requested to distinguish system state from app-specific activation.
+
+### PHASE capture initialization exception after reboot (November 6, 2026)
+
+Restarting Vision Pro resolved the renderer activation stall. The next two
+launches reached Bigscreen's title and aborted with an uncaught AVFAudio
+exception, -10868. Diagnostic job `14ec23076cf9` and the matching system IPS
+report (`KleptonImportcd488508369d-2026-11-06-015257.ips`) locate the exception
+inside PHASE StreamRenderer construction / AVAudioEngine.connect. At that
+moment the guest thread is inside cap_build -> AudioUnitInitialize ->
+AUPhaseIO::Initialize, creating Unity's OpenSL recorder. This is microphone
+initialization, before browser playback, rather than the earlier paused view.
+
+The duplex unit requested signed-int16 capture PCM. Device-facing duplex input
+and output now use canonical Float32 noninterleaved planes. Capture converts
+into the existing interleaved int16 ring with saturation and nonfinite values
+silenced; Android readers keep the same rate, channels and sample type.
+Speaker output deinterleaves the actual mix into per-channel buffers, preserving
+the echo-cancellation reference. Callbacks remain allocation/lock free. The
+macOS HAL capture format remains int16.
+
+VoiceIOTests now rejects integer capture at format negotiation and reproduces
+the old failed microphone-open assertion. Afterward it validates canonical
+input/output formats, distinct stereo planes, float conversion boundaries,
+nonfinite samples, underrun silence, shared-device lifecycle, route recovery
+and fallback. The capture filter, PCM mix and OpenSL/AAudio clock/alias tests
+also pass, along with both visionOS build gates. This is a supported-format
+correction; physical initialization is pending retest.
+`PhaseAudioFormatTests.m` additionally feeds the actual runtime ASBDs into
+Apple’s offline AVAudioEngine graph and verifies distinct stereo samples.
+It passes with synthetic PCM and no physical capture/playback devices.
+Installer job `a2f2810fe23e` completed the update, preserving saved data and
+staging assets. The first launch reached a running renderer but was closed
+with Quit before capture initialization. The next manual run stayed open for
+three minutes; diagnostics `55fb977151d6` show successful Float32 VPIO capture
+initialization at 48 kHz, including a later rebuild. The user confirms that
+Bigscreen gets past the title screen and stays open.
+
+### Cloud video after closing the control window (November 6, 2026)
+
+The same run exposed another capture failure: the cloud-browser document
+reported hidden=1 while its video remained readyState=4, playing, 1280×720,
+with a successfully drawn canvas and no media error. Every sampled native
+snapshot pixel had zero alpha. The user confirmed closing the separate
+Klepton control window. One snapshot waited 74 seconds for a screen update.
+The cloud video source was healthy, but its hidden native host could no
+longer supply usable page snapshots.
+
+Native snapshots now use afterScreenUpdates=NO. With the canvas workaround
+enabled, an opaque, full-viewport, playing MediaStream can also supply its
+origin-clean canvas directly while the native host is hidden or detached.
+The exported JPEG is bounded to 1280×720 and 4 MiB, decoded through ImageIO
+after checking its dimensions, then published through the existing BGRA
+texture path. No frame data is logged or saved. Protected video, tainted
+canvases and ordinary HTML player pages do not use this export path. Native
+page capture resumes when the host returns, preserving ordinary page controls.
+
+`tests/t_webview_hidden_video.m` plays a synthetic MediaStream inside a shadow
+root, hides its NSWindow, reopens it, detaches the browser view, then reattaches
+it. Changing RGB frames, corner orientation and opaque alpha survive both
+hidden and detached phases; direct capture occurs only in those phases.
+Normal page input/navigation and nested HD H.264 playback,
+refresh, pause/resume pass as well, with playing captures around 26–28 FPS.
+Both visionOS runtime build gates pass. Physical closed-window playback remains
+to be checked. Installer job `e3810c9bf38c` completed the headset update,
+restored saved data and staged assets; diagnostic settings were byte-verified
+after installation, then the app was launched successfully.
+
+The physical test still failed after closing the control window. Diagnostics
+`a7e90587b582` show the compositor and guest continued running, but the direct
+capture reported ineligible (category 0) and native snapshots again had all
+zero alpha. Source video remained playing with readyState=4. The previous
+guard rejected every CSS transform and required the video element itself to
+cover 90% of the viewport, which excludes centered or letterboxed cloud players
+inside full-page shadow hosts. That layout reproduces the rejection locally;
+the existing log cannot distinguish which eligibility condition the real
+player failed.
+
+Capture now accepts positive axis-aligned scaling and translation, using
+the video's transformed bounds, and allows a letterboxed video inside a
+full-page shadow host. Rotation, reflection, protected media and native
+controls remain excluded. An entirely transparent hidden-host snapshot while
+video is playing no longer replaces a usable texture, preventing empty frames
+from feeding the room lighting. Rejection diagnostics now report a specific
+numeric eligibility category, video/host dimensions and native media playback
+state, without URLs or page text.
+
+The centered/letterboxed fixture fails on the previous guard and passes after
+the correction through visible, hidden, reopened, detached and reattached
+phases. It also verifies that an injected transparent frame does not advance
+the published texture serial. Browser input/navigation, nested HD H.264 video,
+refresh, pause/resume and both visionOS build gates pass. Physical video and
+audio after closing the window remain to be retested.
 
 Tested October 28, 2026 with the local standalone Quest APK:
 
@@ -1074,3 +1629,64 @@ regression, saved-session tests and uniform getter/property-query coherence
 checks pass alongside the graphics and both-platform build gates. Verification
 here is on the visionOS simulator; this avatar path has not been checked on a
 physical Vision Pro.
+
+### Intermittent outgoing echo (November 6, 2026)
+
+The user clarifies that room participants previously reported echo in their
+outgoing voice, but had no complaints in the latest session. Successful voice
+transmission is preserved as an established result; the intermittent echo is
+not treated as a permanently bad microphone or proven local playback reverb.
+
+The old native capture unit disabled its output bus and played the game through
+a separate RemoteIO. Native voice processing therefore lacked the actual game
+speaker mix on its reference bus. Opted-in capture now uses one duplex VPIO unit
+for both directions, retaining noise suppression/AGC and supplying the real
+speaker samples to echo cancellation. The existing default session mode and
+minimum other-audio ducking policy remain. Capture downsampling also gains an
+anti-alias FIR filter, with native-rate samples left unchanged.
+
+`make voicecheck` exercises the speaker-reference connection and recovery with
+fake AudioUnits plus synthetic capture and mixing checks. This does not measure
+acoustic echo attenuation on the Vision Pro. Room participants still need to
+confirm voice clarity and the absence of echo during speech over game/movie
+playback, including after Home/Resume. No physical listening result is claimed
+for this change.
+
+### Hollow/reverberant voice after native capture starts (November 6, 2026)
+
+The user reports that additional room participants describe their outgoing
+voice as echoing in a bathroom. They could not distinguish a delayed duplicate
+from hollow reverberation. This is an audible-quality failure despite successful
+voice transmission; the earlier no-complaints session does not resolve it.
+
+A newer physical install already contained duplex capture and the PHASE float
+format correction. Diagnostics job `2429e006c0a2`, collected from installation
+`a2f2810fe23e`, shows VoiceProcessingIO at 48 kHz mono, a shared speaker reference,
+147.39 seconds captured / 147.38 read, no dropped frames, and last render error 0.
+No raw fallback or rejected voice-property request is logged. These observations
+establish working capture, not acoustic echo attenuation or speech clarity.
+
+Session restoration still enforced `.default` even when native AUVoiceIO had
+selected `.voiceChat`. Apple's [chat-mode documentation](https://developer.apple.com/documentation/avfaudio/avaudiosession/mode-swift.struct/videochat)
+states that instantiating voice I/O implicitly selects voiceChat. The host now
+uses a lock-free native hint to retain chat mode while a voice unit is selected,
+including initialization. Playback-only and raw capture remain default mode;
+the fallback hint clears on initialization failure and teardown. Regression tests
+cover implicit chat-mode preservation without redundant category changes and
+returning to default for raw fallback. Native initialization also reads back and
+logs the effective bypass/AGC properties instead of inferring their state from
+successful pre-initialization requests.
+
+`python3 tests/test_visionos_audio.py`, `make voicecheck`, the Apple offline audio
+graph fixture, `make swiftcheck`, and both visionOS runtime platform gates pass.
+The mode conflict is a concrete policy issue; its contribution to the reported
+sound is an inference. A physical listening comparison is still required, and
+no microphone samples were recorded for these diagnostics.
+
+Installer job `102cb6d3b3f5` completed the physical update, verified and restored
+saved writable data, and finished APK/asset transfer. The app was stopped at
+the install check and was not launched by this workflow. The next manual room
+session should compare voice quality with the same participant and include a
+brief playback-quiet interval to distinguish room coloration from speaker
+feedback. Effective bypass/AGC and session-mode logs are available on that run;
+no acoustic improvement is claimed until the user reports it.

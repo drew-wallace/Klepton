@@ -430,6 +430,26 @@ static obb_entry *find(const char *loose) {
     for (unsigned i = 0; i < g_n; i++)
         if (strcmp(g_ent[i].loose, loose) == 0) return &g_ent[i];
 
+    // Meta's native avatar loader opens these archives by basename or from
+    // the expansion directory. Unity packages them under assets/ inside the
+    // OBB instead. Reuse the same bounded stream over the actual entry, so a
+    // nested ZIP reader can seek to its central directory without extracting
+    // hundreds of MB or asking users to stage duplicate loose archives.
+    if (!g_base_len) {
+        const char *base = strrchr(loose, '/'); base = base ? base + 1 : loose;
+        static const char *const avatar_archives[] = {
+            "assets/Oculus/OvrAvatar2Assets.zip",
+            "assets/SampleAssets/PresetAvatars_Quest.zip",
+            "assets/SampleAssets/PresetAvatars_Quest_Light.zip",
+        };
+        for (unsigned a = 0; a < sizeof avatar_archives / sizeof avatar_archives[0]; a++) {
+            const char *entry = avatar_archives[a];
+            if (strcmp(base, strrchr(entry, '/') + 1)) continue;
+            for (unsigned i = 0; i < g_n; i++)
+                if (!strcmp(g_ent[i].loose, entry)) return &g_ent[i];
+        }
+    }
+
     // Unity's split-data reader probes the hashed resource payload with a
     // platform-specific companion suffix (.resG/.resS/.res), while the
     // Android OBB stores that payload under the bare hash.  Android's

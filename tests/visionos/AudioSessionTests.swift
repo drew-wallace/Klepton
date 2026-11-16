@@ -13,6 +13,8 @@ private var sessionManaged = false
 private var nativeSuspended = false
 private var suspends = 0
 private var readinessNotifications = 0
+private var nativeVoiceProcessing = false
+func kl_audio_mic_voice_processing() -> Int32 { nativeVoiceProcessing ? 1 : 0 }
 func kl_audio_set_session_managed(_ managed: Int32) { sessionManaged = managed != 0 }
 func kl_audio_suspend() { nativeSuspended = true; suspends += 1 }
 func kl_audio_resume() { resumes += 1; nativeSuspended = false; checkPolicy() }
@@ -28,7 +30,8 @@ func kl_audio_interrupted(_ began: Int32) {
 private func checkPolicy() {
     let s = AVAudioSession.sharedInstance()
     precondition(s.category == (KleptonMic.shared.settings.enabled ? .playAndRecord : .playback))
-    precondition(s.mode == .default && s.categoryOptions.contains(.mixWithOthers))
+    let expectedMode: AVAudioSession.Mode = KleptonMic.shared.settings.enabled && nativeVoiceProcessing ? .voiceChat : .default
+    precondition(s.mode == expectedMode && s.categoryOptions.contains(.mixWithOthers))
     precondition(!s.isNowPlayingCandidate)
     if KleptonMic.shared.settings.enabled && !s.isOtherAudioPlaying {
         precondition(s.preferredSampleRate == 48000 && s.preferredIOBufferDuration == 0.010)
@@ -295,6 +298,23 @@ private func checkPolicy() {
         precondition(s.rateRequests == 0 && s.bufferRequests == 0 && s.channelRequests == 0,
                      "enabling capture must preserve a reported caller's route preferences")
         precondition(s.categoryOptions.contains([.allowBluetooth, .defaultToSpeaker]))
+        // AUVoiceIO selects chat mode during initialization. A guardian refresh
+        // must preserve it without generating another category/route change.
+        nativeVoiceProcessing = true
+        s.mode = .voiceChat
+        let chatCategoryChanges = s.categoryChanges
+        KleptonAudio.refreshMixing()
+        checkPolicy()
+        precondition(s.categoryChanges == chatCategoryChanges)
+        s.losePolicy()
+        KleptonAudio.resume()
+        checkPolicy()
+        // If native voice I/O fails, raw capture must return to default mode.
+        nativeVoiceProcessing = false
+        KleptonAudio.refreshMixing()
+        checkPolicy()
+        precondition(s.mode == .default)
+
         s.losePolicy()
         KleptonAudio.resume()
         checkPolicy()

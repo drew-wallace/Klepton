@@ -1,0 +1,23 @@
+{
+  "version": "16.12.1",
+  "url": "https://download.packages.unity.com/com.unity.services.vivox/-/com.unity.services.vivox-16.12.1.tgz",
+  "sha256": "cbfe66c961dbec493f732962b0aeac08862ffea3fce3aaf7d9a51d0832e8dbd6",
+  "files": {
+    "libVivoxNative.a": {
+      "member": "package/Plugins/visionOS/libVivoxNative.a",
+      "sha256": "f9461e03d45d0910e1bf65681e3b228816878d946e6aa323a07dcddc85956c4c"
+    },
+    "libvivoxsdk.a": {
+      "member": "package/Plugins/visionOS/libvivoxsdk.a",
+      "sha256": "643e68a1c73c7776ea321a459d1057513a628660133b3f8c3241c34543ea2557"
+    },
+    "PrivacyInfo.xcprivacy": {
+      "member": "package/Plugins/visionOS/PrivacyInfo.xcprivacy",
+      "sha256": "e2559087a5910f4b105721120fe59e2d4364d91673e08109700b4f5d7f57afc3"
+    },
+    "LICENSE.md": {
+      "member": "package/LICENSE.md",
+      "sha256": "a4b5698be266e59c5209a936384e57b74db75ba40eeaa8fb092fd8c31e7ed284"
+    }
+  }
+}

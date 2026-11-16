@@ -38,3 +38,6 @@
 // where it reads the fence value. The eye TEXTURE still arrives through
 // kl_glfb's own table, so nothing else about this seam widens.
 #import "kl_vulkan.h"
+
+// Native per-game Meta session provider, shared with the account sign-in UI.
+#import "kl_meta_account.h"

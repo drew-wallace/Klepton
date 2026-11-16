@@ -35,6 +35,7 @@
 #include "klepton.h"
 #include "kl_env.h"
 #include "kl_audio.h"
+#include "kl_pcm_filter.h"
 #include "kl_opensl.h"
 
 typedef uint32_t SLuint32;
@@ -42,17 +43,17 @@ typedef int32_t  SLresult;
 typedef uint32_t SLboolean;
 
 #define SL_RESULT_SUCCESS            0
+#define SL_RESULT_PARAMETER_INVALID  2
 #define SL_RESULT_FEATURE_UNSUPPORTED 12
 #define SL_BOOLEAN_FALSE             0
 #define SL_OBJECT_STATE_REALIZED     2
 #define SL_PLAYSTATE_STOPPED         1
 #define SL_PLAYSTATE_PAUSED          2
 #define SL_PLAYSTATE_PLAYING         3
-// The record-state enum is a SEPARATE numbering from playstate: STOPPED is 0
-// here, not 1. A recorder handed a playstate value would sit in the wrong state.
-#define SL_RECORDSTATE_STOPPED       0
-#define SL_RECORDSTATE_PAUSED        1
-#define SL_RECORDSTATE_RECORDING     2
+// OpenSL ES uses the same 1/2/3 numbering for playback and recording.
+#define SL_RECORDSTATE_STOPPED       1
+#define SL_RECORDSTATE_PAUSED        2
+#define SL_RECORDSTATE_RECORDING     3
 
 // The 128-bit interface id. FMOD passes these straight through from dlsym to
 // GetInterface, so identity is what matters; the contents are here so that a
@@ -257,7 +258,9 @@ typedef struct kl_sl_recorder {
     int16_t *in_hold;                        // mic frames pulled, not yet consumed
     size_t   in_hold_cap, in_have;
     double   in_pos;
+    kl_pcm_filter filter;
     unsigned long filled;
+    uint64_t recorded_frames;
 } kl_sl_recorder;
 
 static kl_sl_engine g_engine;
@@ -273,7 +276,6 @@ static kl_sl_recorder g_recorder;
 #define KL_SL_MAX_PLAYERS 4
 static kl_sl_player g_players[KL_SL_MAX_PLAYERS];
 static int          g_audio_users;     // players that opened kl_audio (refcount)
-static unsigned     g_device_rate;     // the rate the device was opened at (first player)
 static pthread_mutex_t g_players_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned long g_buffers_consumed;
 
@@ -369,7 +371,7 @@ static void *feeder(void *arg) {
         // draining) leaves the remainder to be paced the old way. That keeps one
         // code path for both cases: with no audio, `played` is 0 and this is
         // byte-for-byte the usleep loop it replaced.
-        size_t played = (buf && p->mixes) ? kl_audio_write_src(p, buf, size) : 0;
+        size_t played = (buf && p->mixes) ? kl_audio_write_pcm(p, buf, size, p->rate, p->channels) : 0;
         if (played < size) {
             uint64_t rem = ((uint64_t)size - played) / frame;
             useconds_t us = (useconds_t)(rem * 1000000ull / rate);
@@ -421,31 +423,10 @@ static SLresult obj_Realize(SLObjectItf self, SLboolean async) {
     (void)async;
     kl_sl_player *p = obj_as_player(self);
     if (p && !p->started) {
-        // Open the device before the feeder exists, so its first buffer already
-        // has somewhere to go. Only the FIRST player opens it (and fixes the
-        // ring's format); later players mix into that same device by source key.
-        // A failure here is not fatal — the feeder falls back to usleep pacing,
-        // which is what this player did for its whole life before kl_audio.c.
-        // kl_audio has ONE input rate (the ring + per-source mix cursors assume
-        // it). The first player fixes that rate; a later player at the SAME rate
-        // mixes in, but one at a DIFFERENT rate (vampire: UE4's 44.1 kHz output
-        // alongside FMOD's 48 kHz) would advance the mix cursor at the wrong step
-        // and desync the ring — heard as the render callback starving and the
-        // device restarting (the "no render callback for N s" breakup). So a
-        // mismatched-rate player does NOT feed kl_audio; it paces with usleep and
-        // stays silent to the device, which is correct when it is the secondary,
-        // near-silent output (UE4's here). Same-rate players mix as before.
-        if (g_audio_users == 0) {
-            kl_audio_open(p->rate, p->channels, p->bits);
-            g_device_rate = p->rate;
-            p->mixes = 1;
-        } else {
-            p->mixes = (p->rate == g_device_rate);
-            if (!p->mixes)
-                fprintf(stderr, "  [sl] player #%d at %u Hz != device %u Hz — pacing "
-                        "silently (not mixed) to avoid ring desync\n",
-                        (int)(p - g_players), p->rate, g_device_rate);
-        }
+        // Every player keeps its own rate/channel conversion in the sink.
+        // A secondary 44.1/24/16 kHz voice stream must remain audible and paced
+        // at its own rate while a 48 kHz game mixer is running.
+        p->mixes = kl_audio_open(p->rate, p->channels, p->bits) == 0;
         g_audio_users++;
         p->started = p->running = 1;
         pthread_create(&p->thread, NULL, feeder, p);
@@ -646,8 +627,7 @@ static void player_stop(kl_sl_player *p) {
     // others remain, un-pause it so their feeders resume (the pause above hit
     // every feeder, not just this one's).
     if (g_audio_users > 0) g_audio_users--;
-    if (g_audio_users == 0) kl_audio_close();   // only after the join: feeder is the producer
-    else if (any_player_playing()) kl_audio_play();
+    kl_audio_forget_src(p); // AAudio/FMOD may still share the host sink.
     pthread_mutex_destroy(&p->lock);
     pthread_cond_destroy(&p->wake);
     pthread_cond_destroy(&p->cb_done);
@@ -731,7 +711,11 @@ static int rec_pull(kl_sl_recorder *r, int16_t *dst, int frames) {
     if (r->in_have < need) {
         int got = kl_audio_mic_read_i16(r->in_hold + r->in_have * mch,
                                         (int)(need - r->in_have));
-        if (got > 0) r->in_have += (size_t)got;
+        if (got > 0) {
+            kl_pcm_filter_apply(&r->filter, r->in_hold + r->in_have * mch,
+                                (size_t)got, mch, r->mic_rate, r->rate);
+            r->in_have += (size_t)got;
+        }
     }
     int produced = 0;
     while (produced < frames) {
@@ -813,10 +797,14 @@ static void *rec_feeder(void *arg) {
         if (r->state != SL_RECORDSTATE_RECORDING) continue;
         void (*cb)(SLBufferQueueItf, void *) = r->cb;
         void *cb_ctx = r->cb_ctx;
+        r->recorded_frames += (unsigned)done;
+        unsigned long filled = ++r->filled;
         r->in_cb = 1;
         pthread_mutex_unlock(&r->lock);
 
-        r->filled++;
+        if (filled == 1)
+            fprintf(stderr,"  [sl] first recording buffer delivered: %d frames, %u Hz/%u ch\n",
+                    done,r->rate,r->channels);
         if (cb) cb((SLBufferQueueItf)&r->bq_vt, cb_ctx);
 
         pthread_mutex_lock(&r->lock);
@@ -866,9 +854,10 @@ static const struct SLBufferQueueItf_ g_rec_bq_vt = {
     rec_bq_Enqueue, rec_bq_Clear, rec_bq_GetState, rec_bq_RegisterCallback,
 };
 
-// The SLRecordItf. Only the record-state pair does anything; the marker/position
-// knobs answer success with a zero, as the play vtable's spare slots do.
+// Record state and delivered-frame position use the public OpenSL contract.
 static SLresult rec_SetRecordState(SLRecordItf self, SLuint32 state) {
+    if (state < SL_RECORDSTATE_STOPPED || state > SL_RECORDSTATE_RECORDING)
+        return SL_RESULT_PARAMETER_INVALID;
     kl_sl_recorder *r = KL_SL_REC_R(self);
     pthread_mutex_lock(&r->lock);
     r->state = state;
@@ -886,7 +875,19 @@ static SLresult rec_SetRecordState(SLRecordItf self, SLuint32 state) {
     return SL_RESULT_SUCCESS;
 }
 static SLresult rec_GetRecordState(SLRecordItf self, SLuint32 *st) {
-    if (st) *st = KL_SL_REC_R(self)->state;
+    if(!st)return SL_RESULT_PARAMETER_INVALID;
+    kl_sl_recorder *r=KL_SL_REC_R(self);
+    pthread_mutex_lock(&r->lock);
+    *st=r->state;
+    pthread_mutex_unlock(&r->lock);
+    return SL_RESULT_SUCCESS;
+}
+static SLresult rec_GetPosition(SLRecordItf self, SLuint32 *ms) {
+    kl_sl_recorder *r=KL_SL_REC_R(self);
+    if(!ms)return SL_RESULT_PARAMETER_INVALID;
+    pthread_mutex_lock(&r->lock);
+    *ms=r->rate?(SLuint32)(r->recorded_frames*1000/r->rate):0;
+    pthread_mutex_unlock(&r->lock);
     return SL_RESULT_SUCCESS;
 }
 static SLresult rec_SetU32(SLRecordItf s, SLuint32 v)  { (void)s; (void)v; return SL_RESULT_SUCCESS; }
@@ -895,7 +896,7 @@ static SLresult rec_Reg(SLRecordItf s, void *c, void *x) { (void)s; (void)c; (vo
 static SLresult rec_Clear(SLRecordItf s) { (void)s; return SL_RESULT_SUCCESS; }
 static const struct SLRecordItf_ g_rec_vt = {
     rec_SetRecordState, rec_GetRecordState, rec_SetU32 /*SetDurationLimit*/,
-    rec_GetU32 /*GetPosition*/, rec_Reg /*RegisterCallback*/,
+    rec_GetPosition, rec_Reg /*RegisterCallback*/,
     rec_SetU32 /*SetCallbackEventsMask*/, rec_GetU32 /*GetCallbackEventsMask*/,
     rec_SetU32 /*SetMarkerPosition*/, rec_Clear /*ClearMarkerPosition*/,
     rec_GetU32 /*GetMarkerPosition*/, rec_SetU32 /*SetPositionUpdatePeriod*/,
@@ -957,7 +958,8 @@ static SLresult eng_CreateAudioRecorder(SLEngineItf self, SLObjectItf *out,
             r->bits = f->bitsPerSample;
         }
     }
-    if (r->bits != 16) {
+    if (r->bits != 16 || r->rate < 8000 || r->rate > 192000 ||
+        r->channels < 1 || r->channels > 2) {
         fprintf(stderr, "  [sl] CreateAudioRecorder: %u-bit sink not implemented "
                         "(16-bit PCM only) -> UNSUPPORTED\n", r->bits);
         return SL_RESULT_FEATURE_UNSUPPORTED;

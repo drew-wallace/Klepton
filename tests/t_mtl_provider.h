@@ -16,6 +16,8 @@ unsigned long kl_mtl_count_lit(int eye, int stage, int *out_w, int *out_h);
 // The same, for a guest's non-eye LAYER — the only measurement there is for a
 // guest that presents its whole frame as a quad, whose eye table stays empty.
 unsigned long kl_mtl_count_lit_layer(int layer, int stage, int *out_w, int *out_h);
+// Authored-fixture regression only: copy an uncompressed RGBA8 layer.
+int kl_mtl_layer_rgba(int layer,int stage,void *out,unsigned long capacity);
 
 // Mean of the sum-of-three-channels the last kl_mtl_count_lit() sampled — the
 // same quantity kl_glfb prints as "mean luma", for the same reason.

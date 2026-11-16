@@ -145,14 +145,19 @@ def resolve(channel):
     root, receipt = installed(channel)
     if not receipt:
         raise ValueError('Steam ' + channel + ' is not installed. Click its Update button first.')
-    if not receipt.get('compatible'):
-        raise ValueError('Steam ' + channel + ' ' + receipt['version'] +
-                         ' needs a Klepton login bridge compatibility update. ' + receipt.get('compatibility_error', ''))
     for record in receipt['files']:
         from steam_runtime import archive_path
         path = root/archive_path(record['path'])
         if not path.is_file() or path.stat().st_size != record['size'] or digest(path) != record['sha256']:
             raise ValueError('Missing or changed Steam ' + channel + ' input: ' + record['path'] + '. Click Update to repair it.')
+    if not receipt.get('compatible'):
+        # Compatibility belongs to the current bridge, not just the version
+        # that downloaded this immutable payload. New profiles need no download.
+        usable, reason = compatibility(root, receipt['files'])
+        if not usable:
+            raise ValueError('Steam ' + channel + ' ' + receipt['version'] +
+                             ' needs a Klepton login bridge compatibility update. ' + reason)
+        receipt = dict(receipt, compatible=True, compatibility_error='')
     return root, receipt
 
 
@@ -163,12 +168,13 @@ def status(remote=True):
             _, receipt = installed(channel)
             if receipt:
                 result['current'] = {key:receipt.get(key) for key in ('version', 'build', 'compatible', 'compatibility_error')}
-                if receipt.get('compatible'):
-                    try:
-                        resolve(channel)
-                    except (OSError, ValueError, KeyError) as error:
-                        result['current']['compatible'] = False
-                        result['current']['compatibility_error'] = str(error)
+                try:
+                    _, checked = resolve(channel)
+                    result['current']['compatible'] = checked['compatible']
+                    result['current']['compatibility_error'] = checked.get('compatibility_error', '')
+                except (OSError, ValueError, KeyError) as error:
+                    result['current']['compatible'] = False
+                    result['current']['compatibility_error'] = str(error)
         except (OSError, ValueError, KeyError) as error:
             result['error'] = str(error)
         if remote:

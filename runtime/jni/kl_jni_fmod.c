@@ -52,22 +52,25 @@ static klj_val klf_blockSize(void *env, void *self, const klj_val *a, int n) {
 // than OpenSL. The supplied helper's args are channels, sample rate, DSP block
 // length and block count; write's count is int16 samples, not bytes.
 static const char klf_output_source;
+typedef struct { int open; unsigned rate, channels; } klf_output;
 static klj_val klf_device_init(void *env, void *self, const klj_val *a, int n) {
     klj_object *object = klj_as_object(self);
     if (!object || n != 4 || !a[0].j || !a[1].j) return (klj_val){.j = 0};
     if (!object->data) {
-        object->data = calloc(1, sizeof(int));
+        object->data = calloc(1, sizeof(klf_output));
         if (!object->data) return (klj_val){.j = 0};
         klj_own(self, free);
     }
     int ok = kl_audio_open((unsigned)a[1].j, (unsigned)a[0].j, 16) == 0;
-    *(int *)object->data = ok;
+    klf_output *output = object->data;
+    output->open = ok; output->rate = (unsigned)a[1].j; output->channels = (unsigned)a[0].j;
     if (ok) kl_audio_play();
     return (klj_val){.j = ok};
 }
 static klj_val klf_device_close(void *env, void *self, const klj_val *a, int n) {
     klj_object *object = klj_as_object(self);
-    if (object && object->data) *(int *)object->data = 0;
+    if (object && object->data) ((klf_output *)object->data)->open = 0;
+    kl_audio_forget_src(&klf_output_source);
     // The output sink is shared with Unity/OpenSL. Stop this producer without
     // shutting down other active producers; its bounded queued audio drains.
     return (klj_val){0};
@@ -76,9 +79,11 @@ static klj_val klf_device_write(void *env, void *self, const klj_val *a, int n) 
     klj_object *object = klj_as_object(self);
     klj_array *samples = n == 2 ? klj_arr(a[0].l) : NULL;
     int count = n == 2 ? (int)a[1].j : -1;
-    if (object && object->data && *(int *)object->data && samples &&
+    klf_output *output = object ? object->data : NULL;
+    if (output && output->open && samples &&
         samples->kind == 'S' && count > 0 && count <= samples->len)
-        kl_audio_write_src(&klf_output_source, samples->data, (size_t)count * sizeof(int16_t));
+        kl_audio_write_pcm(&klf_output_source, samples->data, (size_t)count * sizeof(int16_t),
+                           output->rate, output->channels);
     return (klj_val){0};
 }
 

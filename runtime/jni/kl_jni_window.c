@@ -646,7 +646,7 @@ static klj_val klj_Context_checkSelfPermission(void *env, void *self, const klj_
     (void)env; (void)self;
     const char *p = n > 0 ? klj_str(a[0].l) : "", *why = "";
     int granted = klj_permission_state(p, &why);
-    KLJ_LOG("Activity.checkSelfPermission(\"%s\") -> %s%s", p,
+    KLJ_TRACE("Activity.checkSelfPermission(\"%s\") -> %s%s", p,
             granted ? "GRANTED" : "DENIED", why);
     return (klj_val){.j = granted ? 0 : (uint64_t)(int64_t)-1};
 }

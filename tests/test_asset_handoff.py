@@ -26,6 +26,12 @@ def main():
             archive.writestr("assets/bin/Data/resource", "packaged settings fixture",
                              compress_type=zipfile.ZIP_DEFLATED)
             archive.writestr("assets/bin/Data/UnitySubsystems/UnityOpenXR/UnitySubsystemsManifest.json", "{}")
+            archive.writestr("assets/Oculus/OvrAvatar2Assets.zip", "avatar core fixture",
+                             compress_type=zipfile.ZIP_STORED)
+            archive.writestr("assets/SampleAssets/PresetAvatars_Quest.zip", "avatar presets fixture",
+                             compress_type=zipfile.ZIP_DEFLATED)
+            archive.writestr("assets/SampleAssets/PresetAvatars_Quest_Light.zip", "avatar light fixture",
+                             compress_type=zipfile.ZIP_STORED)
         subprocess.run([*sys.argv[1:], str(probe), str(game)], check=True)
 
 

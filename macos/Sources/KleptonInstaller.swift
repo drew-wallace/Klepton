@@ -19,7 +19,7 @@ struct SteamLibraryBranch: Decodable, Identifiable {
     let locked: Bool
     let available: Bool
     let revision: String?
-    let remoteKnown: Bool?
+    var remoteKnown: Bool?
     let downloaded: [String: SteamDownloadInfo]?
 }
 
@@ -35,7 +35,7 @@ struct SteamLibraryGame: Decodable, Identifiable {
     let name: String
     let vr: Bool
     let androidAvailable: Bool
-    let branches: [SteamLibraryBranch]
+    var branches: [SteamLibraryBranch]
     let launches: [SteamLibraryLaunch]
 }
 
@@ -90,11 +90,19 @@ private func steamQR(_ challenge: String) -> NSImage? {
 }
 
 // Keep synchronous directory enumeration outside an asynchronous context.
-private func selectedDataSize(_ urls: [URL]) -> Int64 {
+private func selectedDataSize(_ urls: [URL], include: Set<String> = []) -> Int64 {
     var total: Int64 = 0
     for url in urls {
         var directory: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue {
+            if !include.isEmpty {
+                for relative in include {
+                    if let size = try? url.appendingPathComponent(relative).resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                        total += Int64(size)
+                    }
+                }
+                continue
+            }
             if let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) {
                 for case let file as URL in enumerator {
                     if let values = try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]), values.isRegularFile == true {
@@ -102,7 +110,8 @@ private func selectedDataSize(_ urls: [URL]) -> Int64 {
                     }
                 }
             }
-        } else if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+        } else if (include.isEmpty || include.contains(url.lastPathComponent)),
+                  let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
             total += Int64(size)
         }
     }
@@ -184,6 +193,7 @@ struct APKInfo {
     let graphics: String
     let suggestions: [String]
     let suggestedDataPath: String
+    let dataInclude: Set<String>
     let bytes: Int64
     let requirements: [String: [String: Any]]
     let vulkanRequired: Bool
@@ -205,6 +215,7 @@ struct APKInfo {
         graphics = d["graphics"] as? String ?? "Automatic"
         suggestions = d["suggested_data"] as? [String] ?? []
         suggestedDataPath = d["suggested_data_path"] as? String ?? ""
+        dataInclude = Set((d["catalog_data"] as? [String: Any])?["files"] as? [String] ?? [])
         bytes = d["transfer_bytes"] as? Int64 ?? 0
         requirements = d["data_requirements"] as? [String: [String: Any]] ?? [:]
         vulkanRequired = d["vulkan_required"] as? Bool ?? false
@@ -228,10 +239,19 @@ final class InstallerModel: ObservableObject {
     }
     @Published var steamVersions: [String: SteamChannelInfo] = [:]
     @Published var source = "steam"
+    @Published var metaGames: [MetaLibraryGame] = []
+    @Published var metaAccount = ""
+    @Published var metaSearch = ""
+    @Published var metaGameID = ""
+    @Published var metaCheckedAt: String?
+    @Published var metaRemoteKnown = false
+    @Published var showMetaLogin = false
+    private var metaSession: [String: String] = [:]
+    private var loadedMetaSession = false
+    private var attemptedMetaRefresh = false
     @Published var libraryGames: [SteamLibraryGame] = []
     @Published var librarySearch = ""
-    @Published var libraryVROnly = true
-    @Published var libraryAndroidOnly = true
+    @Published var libraryVROnly = false
     @Published var libraryGameID = ""
     @Published var libraryBranch = "public"
     @Published var libraryLaunch = ""
@@ -246,7 +266,6 @@ final class InstallerModel: ObservableObject {
     private var pendingInput: [String: Any]?
     private var loadedCachedLibrary = false
     private var attemptedLibraryRefresh = false
-    private var expandedLibrary = false
     @Published var kind = ""
     @Published var entry = ""
     @Published var glesVersion = ""
@@ -258,8 +277,11 @@ final class InstallerModel: ObservableObject {
     @Published var dataBytes: Int64 = 0
     @Published var verbose = false
     @Published var busy = false
+    @Published var showStorage = false
+    @Published var storageReport: InstallerStorageReport?
+    private var storageLibraryReloads: [String] = []
     @Published var cancelling = false
-    @Published var message = "Sign in to your Steam library or choose a local APK."
+    @Published var message = "Sign in to Steam or Meta, or choose a local APK."
     @Published var error = ""
     @Published var logs = ""
     @Published var logPath = ""
@@ -296,15 +318,68 @@ final class InstallerModel: ObservableObject {
         restoreDiagnosticsJob()
     }
 
-    var filteredLibrary: [SteamLibraryGame] {
-        libraryGames.filter { (!libraryVROnly || $0.vr) && (!libraryAndroidOnly || $0.androidAvailable) &&
-            (librarySearch.isEmpty || $0.name.localizedCaseInsensitiveContains(librarySearch)) }
+    var filteredMetaLibrary: [MetaLibraryGame] {
+        metaGames.filter { metaSearch.isEmpty || $0.name.localizedCaseInsensitiveContains(metaSearch) }
     }
-    var libraryRefreshScope: String { expandedLibrary || !libraryVROnly || !libraryAndroidOnly ? "all" : "vr_android" }
+    func reconcileMetaSelection() {
+        if !metaGameID.isEmpty && !filteredMetaLibrary.contains(where: { $0.id == metaGameID }) {
+            metaGameID = ""; clearMetaSelection()
+        }
+    }
+    var selectedMetaGame: MetaLibraryGame? { metaGames.first { $0.id == metaGameID } }
+    var metaDownloadAction: String {
+        guard let local = selectedMetaGame?.downloaded else { return "Download" }
+        if !local.valid { return "Repair" }
+        guard selectedMetaGame?.remoteKnown == true, let latest = selectedMetaGame?.latest else { return "Use Downloaded" }
+        return latest.buildId == local.buildId ? "Use Downloaded" : "Update"
+    }
+    func loadMetaLibrary() {
+        guard !busy else { return }
+        if !loadedMetaSession {
+            metaSession = KleptonMetaKeychain.load()
+            metaAccount = metaSession["account_name"] ?? ""
+            loadedMetaSession = true
+        }
+        if metaSession["account_id"] != nil && metaGames.isEmpty { metaAction("cached") }
+    }
+    func metaSignedIn(_ session: [String: String]) {
+        if metaSession["account_id"] != session["account_id"] {
+            metaGames = []; metaGameID = ""; clearMetaSelection()
+        }
+        metaSession = session; metaAccount = session["account_name"] ?? "Meta account"
+        loadedMetaSession = true; showMetaLogin = false
+        metaAction("refresh")
+    }
+    func metaAction(_ action: String) {
+        guard !busy, !metaSession.isEmpty else { return }
+        var payload: [String: Any] = metaSession
+        if action == "refresh" {
+            metaRemoteKnown = false
+            for index in metaGames.indices { metaGames[index].remoteKnown = false }
+        }
+        if action == "download" || action == "use" {
+            guard !metaGameID.isEmpty else { return }
+            payload["app_id"] = metaGameID
+            installed = false; steam = "auto"; clearMetaSelection()
+        }
+        pendingInput = payload
+        execute(["meta-library", "--action", action], operation: "meta-" + action)
+        pendingInput = nil
+    }
+    func clearMetaSelection() {
+        if source == "meta" { info = nil; filename = ""; data = []; dataBytes = 0; unmappedSteamData = [] }
+    }
+    func signOutMeta() {
+        guard !busy else { return }
+        do { try KleptonMetaKeychain.remove() }
+        catch { self.error = error.localizedDescription; return }
+        metaSession = [:]; metaAccount = ""; metaGames = []; metaGameID = ""
+        metaRemoteKnown = false; metaCheckedAt = nil; attemptedMetaRefresh = false; clearMetaSelection()
+    }
 
-    func libraryFiltersChanged() {
-        expandedLibrary = true
-        if !steamSession.isEmpty { libraryAction("refresh") }
+    var filteredLibrary: [SteamLibraryGame] {
+        libraryGames.filter { $0.androidAvailable && (!libraryVROnly || $0.vr) &&
+            (librarySearch.isEmpty || $0.name.localizedCaseInsensitiveContains(librarySearch)) }
     }
     var selectedGame: SteamLibraryGame? { libraryGames.first { $0.id == libraryGameID } }
     var selectedBranch: SteamLibraryBranch? { selectedGame?.branches.first { $0.name == libraryBranch } }
@@ -333,10 +408,35 @@ final class InstallerModel: ObservableObject {
         if source == "steam" { info = nil; filename = ""; data = []; dataBytes = 0; unmappedSteamData = [] }
     }
 
+    func updateSteamLibrary(_ games: [SteamLibraryGame], afterDownload: Bool = false) {
+        var games = games
+        if afterDownload {
+            // A download checks one game. Its catalog also contains saved rows
+            // for other games; retain checks already completed in this session.
+            for gameIndex in games.indices {
+                guard let previous = libraryGames.first(where: { $0.id == games[gameIndex].id }) else { continue }
+                for branchIndex in games[gameIndex].branches.indices {
+                    let branch = games[gameIndex].branches[branchIndex]
+                    if let old = previous.branches.first(where: { $0.name == branch.name }),
+                       old.remoteKnown == true, old.revision == branch.revision,
+                       old.buildId == branch.buildId, old.available == branch.available, old.locked == branch.locked {
+                        games[gameIndex].branches[branchIndex].remoteKnown = true
+                    }
+                }
+            }
+        }
+        libraryGames = games
+        if !libraryGameID.isEmpty && selectedGame == nil { libraryGameID = ""; selectLibraryGame() }
+        if let game = selectedGame {
+            if !game.branches.contains(where: { $0.name == libraryBranch }) || !game.launches.contains(where: { $0.id == libraryLaunch }) {
+                selectLibraryGame()
+            }
+        }
+    }
+
     func libraryAction(_ action: String, input: [String: Any] = [:]) {
         guard !busy else { return }
         var payload: [String: Any] = action == "login" ? [:] : steamSession
-        if action == "refresh" || action == "login" { payload["scope"] = libraryRefreshScope }
         input.forEach { payload[$0.key] = $0.value }
         if action == "download" || action == "use" {
             payload["app_id"] = libraryGameID
@@ -368,7 +468,6 @@ final class InstallerModel: ObservableObject {
         guard SteamKeychain.remove() else { error = "Could not remove the Steam session from Keychain. Try again."; return }
         steamSession = [:]
         steamAccount = ""
-        expandedLibrary = false
         libraryGames = []
         libraryGameID = ""
         selectLibraryGame()
@@ -399,14 +498,15 @@ final class InstallerModel: ObservableObject {
         panel.canChooseFiles = false
         if panel.runModal() == .OK, let url = panel.url {
             checkout = url.path
+            storageReport = nil
             UserDefaults.standard.set(checkout, forKey: "KleptonCheckout")
             restoreDiagnosticsJob()
             info = nil
             libraryGames = []
             libraryGameID = ""
+            metaGames = []; metaGameID = ""; attemptedMetaRefresh = false
             loadedCachedLibrary = false
             attemptedLibraryRefresh = false
-            expandedLibrary = false
             refresh()
         }
     }
@@ -454,6 +554,24 @@ final class InstallerModel: ObservableObject {
     }
 
     func refresh() { execute(["doctor"], operation: "doctor") }
+    func refreshStorage() {
+        execute(["storage"], operation: "storage-scan")
+    }
+
+    func cleanStorage(_ ids: Set<String>) {
+        guard !busy, !ids.isEmpty else { return }
+        pendingInput = ["ids": Array(ids)]
+        execute(["storage", "--action", "cleanup"], operation: "storage-cleanup")
+        pendingInput = nil
+    }
+
+    private func reloadStorageLibraries() {
+        guard !storageLibraryReloads.isEmpty else { return }
+        let service = storageLibraryReloads.removeFirst()
+        pendingInput = service == "steam" ? ["steam_id": steamSession["steam_id"] ?? ""] : ["account_id": metaSession["account_id"] ?? ""]
+        execute([service + "-library", "--action", "cached"], operation: "storage-cache-" + service)
+        pendingInput = nil
+    }
     func refreshSteam() { execute(["steam-status"], operation: "steam-status") }
     func updateSteam(_ channel: String) {
         execute(["steam-update", "--channel", channel], operation: "steam-update")
@@ -478,9 +596,12 @@ final class InstallerModel: ObservableObject {
 
     func countData() {
         let selected = data
+        let include = info?.dataInclude ?? []
         Task.detached {
-            let size = selectedDataSize(selected)
-            await MainActor.run { if self.data == selected { self.dataBytes = size } }
+            let size = selectedDataSize(selected, include: include)
+            await MainActor.run {
+                if self.data == selected && self.info?.dataInclude == include { self.dataBytes = size }
+            }
         }
     }
 
@@ -567,6 +688,9 @@ final class InstallerModel: ObservableObject {
         case "steam-status": message = "Checking Valve’s stable and beta releases…"
         case "steam-update": message = "Preparing the Steam update…"
         case "diagnose": message = "Collecting headset logs…"
+        case "storage-scan": message = "Measuring installer storage…"
+        case "storage-cleanup": message = "Deleting selected installer files…"
+        case let action where action.hasPrefix("meta-"): message = "Connecting to your Meta library…"
         case let action where action.hasPrefix("library-"): message = "Connecting to your Steam library…"
         default: message = "Inspecting APK…"
         }
@@ -630,7 +754,7 @@ final class InstallerModel: ObservableObject {
     private func receive(_ line: String) {
         guard let bytes = line.data(using: .utf8), let d = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
               d["schema_version"] as? Int == 1 else {
-            if !operation.hasPrefix("library-") { appendLog(line) }
+            if !operation.hasPrefix("library-") && !operation.hasPrefix("meta-") { appendLog(line) }
             return
         }
         let status = d["status"] as? String ?? ""
@@ -678,6 +802,20 @@ final class InstallerModel: ObservableObject {
             if !devices.contains(where: { $0.id == device }) { device = devices.first?.id ?? "" }
             if !teams.contains(where: { $0.id == team }) { team = teams.first?.id ?? "" }
             message = d["ready"] as? Bool == true ? "Local build tools are ready." : "Complete the setup steps below."
+        } else if stage == "storage" {
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            do {
+                storageReport = try decoder.decode(InstallerStorageReport.self, from: bytes)
+                if operation == "storage-cleanup" {
+                    info = nil; data = []; dataBytes = 0; filename = ""
+                    steamDownloadFolder = ""; unmappedSteamData = []
+                    message = "Selected files deleted. Choose an APK or use a downloaded game to continue."
+                    storageLibraryReloads = []
+                    if !steamSession.isEmpty { storageLibraryReloads.append("steam") }
+                    if !metaSession.isEmpty { storageLibraryReloads.append("meta") }
+                } else { message = "Installer storage measured." }
+            } catch { self.error = "Could not read the storage report: \(error.localizedDescription)" }
         } else if stage == "steam-status" {
             let channels = d["channels"] as? [String: [String: Any]] ?? [:]
             steamVersions = channels.mapValues(SteamChannelInfo.init)
@@ -687,19 +825,22 @@ final class InstallerModel: ObservableObject {
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             if let games = d["games"], let encoded = try? JSONSerialization.data(withJSONObject: games),
                let decoded = try? decoder.decode([SteamLibraryGame].self, from: encoded) {
-                libraryGames = decoded
-                if !libraryGameID.isEmpty && selectedGame == nil { libraryGameID = ""; selectLibraryGame() }
-                if let game = selectedGame {
-                    if !game.branches.contains(where: { $0.name == libraryBranch }) || !game.launches.contains(where: { $0.id == libraryLaunch }) {
-                        selectLibraryGame()
-                    }
-                }
+                updateSteamLibrary(decoded, afterDownload: operation == "library-download")
             }
             showSteamLogin = false
-        } else if stage == "inspect" || stage == "steam-game" {
+        } else if stage == "meta-library" {
+            let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+            if let games = d["games"], let encoded = try? JSONSerialization.data(withJSONObject: games),
+               let decoded = try? decoder.decode([MetaLibraryGame].self, from: encoded) {
+                metaGames = decoded
+                if selectedMetaGame == nil { metaGameID = ""; clearMetaSelection() }
+            }
+            metaCheckedAt = d["checked_at"] as? String
+            metaRemoteKnown = d["remote_known"] as? Bool ?? false
+        } else if stage == "inspect" || stage == "steam-game" || stage == "meta-game" {
             info = APKInfo(d)
-            if stage == "steam-game" {
-                filename = selectedGame?.name ?? "Steam APK"
+            if stage == "steam-game" || stage == "meta-game" {
+                filename = stage == "meta-game" ? (selectedMetaGame?.name ?? "Meta APK") : (selectedGame?.name ?? "Steam APK")
                 steamDownloadFolder = d["download_folder"] as? String ?? ""
                 data = (d["downloaded_data"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
                 unmappedSteamData = d["unmapped_data"] as? [String] ?? []
@@ -740,7 +881,12 @@ final class InstallerModel: ObservableObject {
             steamAuthKind = ""
             steamQRChallenge = ""
         }
-        if operation == "doctor", status == 0 { refreshSteam() }
+        if operation == "storage-cleanup" || operation.hasPrefix("storage-cache-") {
+            reloadStorageLibraries()
+        } else if operation == "meta-cached", status == 0 && !attemptedMetaRefresh {
+            attemptedMetaRefresh = true
+            metaAction("refresh")
+        } else if operation == "doctor", status == 0 { refreshSteam() }
         else if operation == "steam-status" && !steamSession.isEmpty && !loadedCachedLibrary {
             loadedCachedLibrary = true
             libraryAction("cached")
@@ -772,6 +918,10 @@ struct InstallerView: View {
                     Text("Convert an Android VR APK and install it on Vision Pro.").foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button { model.showStorage = true; model.refreshStorage() } label: {
+                    Label("Storage", systemImage: "internaldrive")
+                }.disabled(model.busy || model.checkout.isEmpty)
+                    .accessibilityIdentifier("installerStorage")
                 Button("Checkout…") { model.chooseCheckout() }.disabled(model.busy)
                     .help(model.checkout.isEmpty ? "Choose your prepared Klepton checkout" : model.checkout)
             }.padding(22)
@@ -801,8 +951,6 @@ struct InstallerView: View {
             if model.info != nil && model.kind.isEmpty { advanced = true }
         }
         .onChange(of: model.libraryGameID) { _, _ in model.selectLibraryGame() }
-        .onChange(of: model.libraryVROnly) { _, _ in model.libraryFiltersChanged() }
-        .onChange(of: model.libraryAndroidOnly) { _, _ in model.libraryFiltersChanged() }
         .onChange(of: model.filteredLibrary.map(\.id)) { _, _ in model.reconcileLibrarySelection() }
         .onChange(of: model.source) { _, _ in
             model.info = nil
@@ -810,7 +958,10 @@ struct InstallerView: View {
             model.data = []
             model.dataBytes = 0
             model.unmappedSteamData = []
+            if model.source == "meta" { model.loadMetaLibrary() }
         }
+        .onChange(of: model.metaGameID) { _, _ in model.clearMetaSelection() }
+        .onChange(of: model.filteredMetaLibrary.map(\.id)) { _, _ in model.reconcileMetaSelection() }
         .onChange(of: model.libraryBranch) { _, _ in
             if model.source == "steam" { model.info = nil; model.data = []; model.dataBytes = 0; model.unmappedSteamData = [] }
         }
@@ -818,6 +969,10 @@ struct InstallerView: View {
             if model.source == "steam" { model.info = nil; model.data = []; model.dataBytes = 0; model.unmappedSteamData = [] }
         }
         .sheet(isPresented: $model.showSteamLogin) { SteamSignInView(model: model) }
+        .sheet(isPresented: $model.showStorage) { InstallerStorageView(model: model) }
+        .sheet(isPresented: $model.showMetaLogin) {
+            KleptonMetaSignInView(onSuccess: { model.metaSignedIn($0) }, onCancel: { model.showMetaLogin = false })
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             if model.busy { model.cancel() }
         }
@@ -828,10 +983,13 @@ struct InstallerView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Picker("Game source", selection: $model.source) {
                     Text("Steam Library").tag("steam")
+                    Text("Meta Library").tag("meta")
                     Text("Local APK").tag("apk")
                 }.pickerStyle(.segmented).accessibilityIdentifier("gameSource")
                 if model.source == "steam" {
                     steamLibrarySection
+                } else if model.source == "meta" {
+                    MetaLibrarySection(model: model)
                 } else {
                 HStack(spacing: 14) {
                     Image(systemName: "shippingbox").font(.system(size: 26)).foregroundStyle(.secondary).accessibilityHidden(true)
@@ -888,10 +1046,7 @@ struct InstallerView: View {
                 }.accessibilityIdentifier("steamLibrarySignIn")
             }
             TextField("Search your library", text: $model.librarySearch).textFieldStyle(.roundedBorder)
-            HStack {
-                Toggle("VR titles", isOn: $model.libraryVROnly)
-                Toggle("Android bundle available", isOn: $model.libraryAndroidOnly)
-            }.toggleStyle(.checkbox)
+            Toggle("VR titles", isOn: $model.libraryVROnly).toggleStyle(.checkbox)
             if model.libraryGames.isEmpty {
                 Text(model.steamAccount.isEmpty ? "Sign in to find the Android VR games you own." : "No cached games. Refresh your Steam library to check available releases.")
                     .font(.callout).foregroundStyle(.secondary).padding(.vertical, 10)

@@ -456,8 +456,11 @@ static void klvm_draw_overlays(id<MTLRenderCommandEncoder> enc, int eye, int sta
         // a compositor through kl_glfb's layer table — an OpenXR quad on GL is
         // bound there, and a Vulkan one is recorded there too. Asking kl_vulkan
         // first keeps RE4's path exactly as it was.
-        void *texp = kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, eye, &tw, &th);
-        if (!texp) texp = kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &tw, &th);
+        int stereo_right = eye == 1 && ov.tex_right && ov.tex_right != ov.tex;
+        void *texp = kl_vulkan_mtl_for_handle(stereo_right ? ov.tex_right : ov.tex);
+        if (!texp) texp = kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, eye, &tw, &th);
+        if (!texp) texp = kl_glfb_layer_mtl_texture(
+            kl_ovrp_overlay_texture_layer(ov.layer_id, stereo_right), ov.stage, &tw, &th);
         // Named once per layer, because "the guest submitted a layer we cannot
         // reach" and "the guest submitted no layers" are the same picture.
         if (!texp) {
@@ -492,6 +495,7 @@ static void klvm_draw_overlays(id<MTLRenderCommandEncoder> enc, int eye, int sta
         [enc setVertexBytes:&u length:sizeof u atIndex:0];
         [enc setFragmentBytes:&u length:sizeof u atIndex:0];
         [enc setFragmentTexture:t atIndex:0];
+        [enc setFragmentTexture:t atIndex:1];
         [enc setFragmentSamplerState:g_samp atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         static int said;

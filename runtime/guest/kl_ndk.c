@@ -571,6 +571,8 @@ static int kl_AAsset_read(kl_asset *a, void *buf, size_t count) {
     if (!a || !a->f) return -1;
     return (int)fread(buf, 1, count, a->f);
 }
+// Bionic arm64 uses a 64-bit off_t, so both NDK spellings share the same
+// signature and implementation. Wwise in Pistol Whip imports AAsset_seek.
 static int64_t kl_AAsset_getLength64(kl_asset *a) { return a ? a->len : -1; }
 static int64_t kl_AAsset_seek64(kl_asset *a, int64_t off, int whence) {
     if (!a || !a->f || fseeko(a->f, off, whence) != 0) return -1;
@@ -582,11 +584,6 @@ static void kl_AAsset_close(kl_asset *a) {
     free(a->buf);
     free(a);
 }
-// The 32-bit spelling. Both exist in the NDK and the newer SDL3 in the VR build
-// imports this one; truncating is what Android does too, and no asset here is
-// anywhere near 2 GB.
-static int kl_AAsset_getLength(kl_asset *a) { return a ? (int)a->len : -1; }
-
 // Directory enumeration. Android returns FILE names only — no subdirectories,
 // no "." or ".." — and returns NULL to end iteration, which is also how the
 // caller learns the directory was empty. The name belongs to the AAssetDir and
@@ -874,8 +871,9 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
     N("AAsset_read",            kl_AAsset_read),
     N("AAsset_getLength64",     kl_AAsset_getLength64),
     N("AAsset_seek64",          kl_AAsset_seek64),
+    N("AAsset_seek",            kl_AAsset_seek64),
     N("AAsset_close",           kl_AAsset_close),
-    N("AAsset_getLength",       kl_AAsset_getLength),
+    N("AAsset_getLength",       kl_AAsset_getLength64),
     N("AAsset_getBuffer",       kl_AAsset_getBuffer),
     N("AAsset_openFileDescriptor", kl_AAsset_openFileDescriptor),
     N("AAssetManager_openDir",  kl_AAssetManager_openDir),

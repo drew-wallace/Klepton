@@ -185,42 +185,59 @@ class SteamLibraryTests(unittest.TestCase):
         self.assertFalse(event['games'][0]['branches'][0]['remote_known'])
         self.assertTrue(event['games'][0]['branches'][0]['downloaded']['0']['valid'])
 
-    def test_scoped_refresh_shortlists_vr_android_and_retains_unchecked_games(self):
+    def test_refresh_shortlists_all_android_games_and_drops_cached_desktop_games(self):
         self.publish()
         desktop = dict(copy.deepcopy(self.game), app_id='11', vr=False, android_available=False)
+        non_vr = dict(copy.deepcopy(self.game), app_id='12', vr=False)
         removed = dict(copy.deepcopy(self.game), app_id='99')
-        self.cache.save_catalog(dict(steam_id=ACCOUNT, games=[self.game, desktop, removed],
-                                    owned_app_ids=['10', '11', '99']))
+        # Simulate an older catalog containing desktop entries.
+        u.write_json(self.cache.account(ACCOUNT)/'catalog.json', dict(steam_id=ACCOUNT,
+                     games=[self.game, desktop, non_vr, removed], owned_app_ids=['10', '11', '12', '99']))
         updated = copy.deepcopy(self.game)
         updated['branches'][0]['revision'] = 'second'
-        result = dict(steam_id=ACCOUNT, games=[updated], checked_app_ids=['10'], owned_app_ids=['10', '11'])
+        result = dict(steam_id=ACCOUNT, games=[updated], checked_app_ids=['10'], owned_app_ids=['10', '11', '12'])
         output = io.StringIO()
-        request = dict(steam_id=ACCOUNT, scope='vr_android', refresh_token='fixture')
+        request = dict(steam_id=ACCOUNT, refresh_token='fixture')
         with patch.object(u, 'STORE', self.store), patch.object(library, 'run_helper', return_value=result) as helper, \
              patch.object(sys, 'stdin', io.StringIO(json.dumps(request)+'\n')), contextlib.redirect_stdout(output):
             u.library_job('refresh', u.Runner(self.root/'job'))
         sent = helper.call_args.args[1]
-        self.assertEqual(sent['app_ids'], ['10', '99'])
-        self.assertEqual(sent['known_app_ids'], ['10', '11', '99'])
+        self.assertEqual(sent['app_ids'], ['10', '12', '99'])
+        self.assertEqual(sent['known_app_ids'], ['10', '11', '12', '99'])
         event = [json.loads(line) for line in output.getvalue().splitlines() if json.loads(line)['status'] == 'result'][-1]
         games = {g['app_id']: g for g in event['games']}
-        self.assertEqual(set(games), {'10', '11'})
+        self.assertEqual(set(games), {'10', '12'})
         self.assertTrue(games['10']['branches'][0]['remote_known'])
-        self.assertFalse(games['11']['branches'][0]['remote_known'])
+        self.assertFalse(games['12']['branches'][0]['remote_known'])
         self.assertEqual(games['10']['branches'][0]['revision'], 'second')
         self.assertTrue(games['10']['branches'][0]['downloaded']['0']['valid'])
-        self.assertEqual(self.cache.cached(ACCOUNT)['owned_app_ids'], ['10', '11'])
+        self.assertEqual(self.cache.cached(ACCOUNT)['owned_app_ids'], ['10', '11', '12'])
+        self.assertEqual({g['app_id'] for g in self.cache.read_catalog(ACCOUNT)['games']}, {'10', '12'})
 
-    def test_full_refresh_does_not_send_a_shortlist(self):
-        self.cache.save_catalog(dict(steam_id=ACCOUNT, games=[self.game]))
+    def test_login_without_cached_account_discovers_games_without_a_shortlist(self):
         output = io.StringIO()
-        request = dict(steam_id=ACCOUNT, scope='all')
+        request = dict(refresh_token='fixture')
         with patch.object(u, 'STORE', self.store), \
              patch.object(library, 'run_helper', return_value=dict(steam_id=ACCOUNT, games=[self.game])) as helper, \
              patch.object(sys, 'stdin', io.StringIO(json.dumps(request)+'\n')), contextlib.redirect_stdout(output):
-            u.library_job('refresh', u.Runner(self.root/'job'))
+            u.library_job('login', u.Runner(self.root/'job'))
         self.assertNotIn('app_ids', helper.call_args.args[1])
         self.assertNotIn('known_app_ids', helper.call_args.args[1])
+
+    def test_cached_and_saved_catalogs_exclude_desktop_games(self):
+        desktop = dict(copy.deepcopy(self.game), app_id='11', android_available=False)
+        non_vr = dict(copy.deepcopy(self.game), app_id='12', vr=False)
+        catalog = dict(steam_id=ACCOUNT, games=[self.game, desktop, non_vr], owned_app_ids=['10', '11', '12'])
+        u.write_json(self.cache.account(ACCOUNT)/'catalog.json', catalog)
+        self.assertEqual([g['app_id'] for g in self.cache.cached(ACCOUNT)['games']], ['10', '12'])
+        self.cache.save_catalog(catalog)
+        self.assertEqual([g['app_id'] for g in self.cache.read_catalog(ACCOUNT)['games']], ['10', '12'])
+        self.assertEqual(self.cache.read_catalog(ACCOUNT)['owned_app_ids'], ['10', '11', '12'])
+
+    def test_refresh_removes_game_that_no_longer_has_an_android_bundle(self):
+        self.cache.save_catalog(dict(steam_id=ACCOUNT, games=[self.game], owned_app_ids=['10']))
+        result = self.cache.save_catalog(dict(steam_id=ACCOUNT, games=[], checked_app_ids=['10'], owned_app_ids=['10']))
+        self.assertEqual(result['games'], [])
 
     def start_bridge(self, scenario=''):
         root = Path(__file__).resolve().parents[1]
@@ -263,16 +280,26 @@ class SteamLibraryTests(unittest.TestCase):
         desktop = dict(copy.deepcopy(self.game), app_id='11', vr=False, android_available=False)
         self.cache.save_catalog(dict(steam_id=ACCOUNT, games=[self.game, desktop], owned_app_ids=['10', '11']))
         child = self.start_bridge('scoped')
-        output, errors = child.communicate(json.dumps(dict(steam_id=ACCOUNT, refresh_token='fixture', scope='vr_android'))+'\n', timeout=10)
+        output, errors = child.communicate(json.dumps(dict(steam_id=ACCOUNT, refresh_token='fixture'))+'\n', timeout=10)
         self.assertEqual(child.returncode, 0, errors)
         event = next(json.loads(line) for line in output.splitlines()
                      if json.loads(line)['status'] == 'result' and json.loads(line)['stage'] == 'steam-library')
         games = {g['app_id']: g for g in event['games']}
-        self.assertEqual(set(games), {'10', '11', '12'})
+        self.assertEqual(set(games), {'10', '12'})
         self.assertTrue(games['10']['branches'][0]['remote_known'])
-        self.assertFalse(games['11']['branches'][0]['remote_known'])
         self.assertTrue(games['12']['branches'][0]['remote_known'])
+        self.assertFalse(games['12']['vr'])
         self.assertEqual(self.cache.cached(ACCOUNT)['owned_app_ids'], ['10', '11', '12'])
+
+    def test_real_pipe_bridge_reports_safe_failure_details(self):
+        child = self.start_bridge('connection')
+        output, errors = child.communicate(json.dumps(dict(refresh_token='private-token'))+'\n', timeout=10)
+        self.assertEqual(child.returncode, 1, errors)
+        event = next(json.loads(line) for line in output.splitlines() if json.loads(line)['status'] == 'error')
+        self.assertIn('while connecting', event['message'])
+        self.assertIn('Steam result 5', event['message'])
+        self.assertNotIn('sensitive-client-error', output + errors)
+        self.assertNotIn('private-token', output + errors)
 
     def test_cancellation_stops_pending_authentication_and_reports_cancelled(self):
         child = self.start_bridge('waiting')

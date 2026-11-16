@@ -286,31 +286,23 @@ enum KleptonAudio {
     /// Keep game audio mixable with other apps, including Discord calls.
     /// OFF → playback with mixing, leaving microphone capture to the calling app.
     /// ON → playAndRecord for guest voice chat; mixing does not guarantee that
-    /// two apps can capture the microphone at the same time. Use .default mode
-    /// because the C capture unit provides its own voice processing.
+    /// two apps can capture the microphone at the same time. Preserve the chat
+    /// mode selected by native voice I/O; keep raw capture in default mode.
     static func setCategoryForMic(_ session: AVAudioSession, _ mic: Bool) throws {
         let category: AVAudioSession.Category = mic ? .playAndRecord : .playback
+        let mode: AVAudioSession.Mode = mic && kl_audio_mic_voice_processing() != 0
+            ? .voiceChat : .default
         let options: AVAudioSession.CategoryOptions = mic
             ? [.mixWithOthers, .allowBluetooth, .defaultToSpeaker] : [.mixWithOthers]
         // Changing category emits another route notification. Do not turn that
         // notification into an endless reconfiguration/restart loop.
-        guard session.category != category || session.mode != .default
+        guard session.category != category || session.mode != mode
                 || session.categoryOptions != options else { return }
-        if mic {
-            // mode .default, NOT .voiceChat — and this is deliberate even though the
-            // capture unit is now VoiceProcessingIO. .voiceChat makes the SYSTEM
-            // insert its own voice-processing I/O; with our VPIO that is redundant,
-            // and if VPIO ever fails and kl_audio.c falls back to a plain RemoteIO
-            // capture unit, .voiceChat's system unit STARVES it → silence (the
-            // recurring "peak 0" / no-sound regression). .default has no system
-            // voice unit to compete, so BOTH capture units stay audible: VPIO still
-            // applies its own noise-suppression/AGC (unit-level, not mode-gated) for
-            // clean voice, and a RemoteIO fallback is raw but working — never silent.
-            try session.setCategory(.playAndRecord, mode: .default,
-                                    options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
-        } else {
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-        }
+        // AUVoiceIO selects voiceChat implicitly. Forcing default on every
+        // route/style/resume event fights that native policy. Raw fallback is
+        // still default so it cannot compete with a system voice input unit.
+        try session.setCategory(category, mode: mode, options: options)
+        NSLog("[au] session policy: mode=\(mode.rawValue), nativeVoiceIO=\(kl_audio_mic_voice_processing())")
     }
 
     /// Called by KleptonMic when the toggle changes at runtime. Reconfigures the

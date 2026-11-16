@@ -125,10 +125,12 @@ enum Immersive {
     @Published var steamReady = false
 #endif
     private var rendererID: ObjectIdentifier?
+    private var rendererActivation = KLRendererActivation()
 
     func rendererStarted(_ id: ObjectIdentifier) {
         guard !quitting else { return }
         rendererID = id
+        rendererActivation.began(id, at: ProcessInfo.processInfo.systemUptime)
         openedSpace = true
         wantsImmersive = true
         canRestoreAutomatically = false
@@ -136,8 +138,28 @@ enum Immersive {
 
     func rendererEnded(_ id: ObjectIdentifier) {
         guard rendererID == id else { return }
+        rendererActivation.ended(id)
         rendererID = nil
         openedSpace = false
+    }
+
+    func rendererRunning(_ id: ObjectIdentifier) {
+        rendererActivation.running(id)
+    }
+
+    func takeRendererActivationRetry(windowActive: Bool) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        // Paused can mean a pending system immersion confirmation. Leave that
+        // prompt intact by default; automatic replacement is a diagnostic opt-in.
+        let retry = klEnvOn("KL_RENDERER_STARTUP_RETRY", default: false)
+            && rendererActivation.takeRetry(at: now,
+                foreground: phase == .active && windowActive, quitting: quitting)
+        if rendererActivation.stalled(at: now) {
+            let message = retry ? "Reopening paused VR view…"
+                : "Waiting for VR. Check for a headset prompt, or tap Reopen VR."
+            if status != message { status = message }
+        }
+        return retry
     }
 }
 
@@ -470,6 +492,8 @@ struct BootView: View {
     // folder plus per-title options, and boot on a button rather than on their own.
     // Observe the active files object so the Start button tracks file readiness;
     // the fallback is inert (no such bookmark) for the runtime-debugging targets.
+    @StateObject private var metaAccount = KleptonMetaGameSession()
+    @State private var showMetaAccount = false
     @ObservedObject private var files = klActiveFiles() ?? LauncherFiles(bookmarkKey: "none", expected: "")
     private var isLauncher: Bool { klIsLauncher() }
     private var bootLogURL: URL? {
@@ -486,11 +510,6 @@ struct BootView: View {
         klEnvOn("KL_STEAM_OFFLINE", default: false)
     }
 #endif
-    // Show microphone opt-in for targets with a voice capture path.
-    private var showMic: Bool {
-        ["steamlink-vr", "hl1", "cs1", "walkabout-57013", "eleven"].contains(klTargetName())
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             Group {
@@ -520,8 +539,33 @@ struct BootView: View {
                     guestContent
                 }
 #else
-                Group {
-                    guestContent
+                VStack(spacing: 12) {
+                    if metaAccount.required {
+                        VStack(spacing: 10) {
+                            if metaAccount.checking {
+                                ProgressView("Checking Meta session…")
+                            } else if !metaAccount.ready {
+                                Text("Connect your Meta account to start this game.")
+                                if !metaAccount.error.isEmpty { Text(metaAccount.error).foregroundStyle(.red) }
+                                HStack {
+                                    Button("Sign in to Meta") { metaAccount.showSignIn = true }
+                                    Button("Retry Connection") { Task { await metaAccount.prepare(); if metaAccount.ready { boot() } } }
+                                }
+                            } else if !running && !finished {
+                                HStack {
+                                    Label(metaAccount.accountName, systemImage: "checkmark.circle")
+                                    Button("Sign Out") { metaAccount.signOut() }
+                                }
+                            }
+                        }.padding()
+                    }
+                    if !metaAccount.required || metaAccount.ready || running || finished { guestContent }
+                }
+                .task {
+                    if metaAccount.required {
+                        await metaAccount.prepare()
+                        if metaAccount.ready, klEnvOn("KL_AUTOBOOT", default: true) { boot() }
+                    }
                 }
 #endif
 #endif
@@ -536,11 +580,40 @@ struct BootView: View {
                     .accessibilityIdentifier("toggleKleptonSettings")
                 }
                 Spacer()
+                if metaAccount.required {
+                    Button("Meta Account…") { showMetaAccount = true }
+                        .popover(isPresented: $showMetaAccount) {
+                            VStack(alignment: .leading, spacing: 14) {
+                                Text(metaAccount.accountName).font(.headline)
+                                Text(metaAccount.ready ? "Connected to this game's Meta account services." : "Sign in to connect this game's Meta account services.")
+                                if !metaAccount.error.isEmpty { Text(metaAccount.error).foregroundStyle(.red) }
+                                Button("Sign in again…") { showMetaAccount = false; metaAccount.showSignIn = true }
+                                Button("Sign Out and Quit", role: .destructive) {
+                                    metaAccount.signOut()
+                                    if !metaAccount.ready { quit() }
+                                }
+                            }.padding(24).frame(width: 360)
+                        }
+                }
                 Button("Quit Klepton", role: .destructive) { quit() }
                     .accessibilityIdentifier("quitKlepton")
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("KleptonMetaSessionExpired"))) { _ in
+            guard metaAccount.required else { return }
+            metaAccount.ready = false
+            metaAccount.error = "Your Meta session expired. Sign in again, then reopen the game if its login did not recover."
+            metaAccount.showSignIn = true
+        }
+        .sheet(isPresented: $metaAccount.showSignIn) {
+            KleptonMetaSignInView(onSuccess: { profile in
+                Task {
+                    await metaAccount.signedIn(profile)
+                    if metaAccount.ready { boot() }
+                }
+            }, onCancel: { metaAccount.showSignIn = false })
         }
         // Keep the keyboard bridge in the hierarchy when the shell replaces
         // the boot report. SwiftUI provides text edits rather than key events.
@@ -655,6 +728,11 @@ struct BootView: View {
                 // cannot both open it.
                 session.wantsImmersive = true
             }
+            if !session.openingSpace, session.openedSpace,
+               session.takeRendererActivationRetry(windowActive: windowPhase == .active) {
+                NSLog("[cp] renderer activation timed out; reopening VR once")
+                await reopenImmersiveSession()
+            }
             if session.phase == .active, windowPhase == .active,
                session.wantsImmersive, !session.openedSpace,
                !session.openingSpace, !session.restorationBlocked,
@@ -686,12 +764,23 @@ struct BootView: View {
             if !klEnvOn("KL_BOOT_WINDOW", default: true) { dismissWindow(id: "main") }
         case .userCancelled:
             session.restorationBlocked = true
+            status = "VR opening was cancelled. Tap Resume session to try again."
         case .error:
             session.restorationBlocked = true
             status = "Could not restore the immersive view. Tap Resume session to try again."
         @unknown default:
             session.restorationBlocked = true
         }
+    }
+
+    @MainActor private func reopenImmersiveSession() async {
+        guard !session.quitting, !session.openingSpace else { return }
+        session.openingSpace = true
+        if session.openedSpace { await dismissImmersiveSpace() }
+        session.openedSpace = false
+        session.openingSpace = false
+        guard !session.quitting else { return }
+        await presentImmersiveSession()
     }
 
     // One typed character to the guest, as the Android keycode SDL expects. The
@@ -760,12 +849,10 @@ struct BootView: View {
             // ...and the microphone opt-in, same window, collapsed by default.
             // Off unless a person turns it on: it is the one dial that opens a
             // privacy surface and changes the audio session out from under the
-            // music, so it never engages on its own. Hidden entirely except on the
-            // targets with a voice capture path, including Walkabout.
-            if showMic {
-                DisclosureGroup("Microphone") { MicView() }
-                    .font(.callout)
-            }
+            // music, so it never engages on its own. Imported APKs can use the
+            // same OpenSL/AAudio input path as the built-in targets.
+            DisclosureGroup("Microphone") { MicView() }
+                .font(.callout)
 
             HStack(spacing: 16) {
                 Button(running ? "Running…" : "Boot") {
@@ -776,10 +863,14 @@ struct BootView: View {
                     boot()
                 }
                 .disabled(running || finished || (isLauncher && !files.canLaunch))
-                if session.wantsImmersive, !session.openedSpace {
-                    Button("Resume session") {
-                        Task { await presentImmersiveSession() }
+                if session.wantsImmersive {
+                    Button(session.openedSpace ? "Reopen VR" : "Resume session") {
+                        Task {
+                            if session.openedSpace { await reopenImmersiveSession() }
+                            else { await presentImmersiveSession() }
+                        }
                     }
+                    .accessibilityIdentifier("reopenVR")
                     .disabled(session.openingSpace)
                 }
                 if running { ProgressView() }
@@ -832,7 +923,7 @@ struct BootView: View {
         if text.contains("HTTP error: Input error. Call GetErrorList()") {
             runtimeWarning = "The app reports a login input-validation error. Check that the form accepted your text and read any details in the app. If it persists, export logs for development; exclude passwords and access tokens. This error alone does not establish that the password is wrong."
         } else if text.contains("[plat] account service unavailable:") || text.contains("Meta account services are unavailable on this host.") {
-            runtimeWarning = "This app requested Meta/Oculus account services. Klepton has no authenticated Meta account provider, so automatic Oculus login is unavailable. Try the app's own email login if offered. Export logs for development; exclude passwords and access tokens."
+            runtimeWarning = "This app requested Meta/Oculus account services. Use the Meta sign-in in Klepton to connect or renew this game's account session, then reopen the game."
         } else if text.contains("[jni] Vuplex browser unavailable:") || text.contains("WebViewUnavailableException") {
             runtimeWarning = "The embedded browser could not initialize. Use Export log or Collect Headset Logs in the Mac installer for a development report."
         } else if text.contains("[webview] navigation failed") || text.contains("[webview] WebKit content process terminated") {
@@ -843,6 +934,9 @@ struct BootView: View {
     }
 
     private func boot() {
+        guard !metaAccount.required || metaAccount.ready else {
+            status = "Sign in to Meta before starting the game."; return
+        }
 #if KL_STEAM_GAME_HOST
         guard steamReady || steamOfflineDiagnostics else {
             status = "Sign in to Steam before starting the game."; return

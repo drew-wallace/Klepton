@@ -3,6 +3,7 @@
 // follows the last callback. Capture and permission stay behind KleptonMic.
 #include "kl_jni_int.h"
 #include "kl_audio.h"
+#include "kl_pcm_filter.h"
 #include "klepton.h"
 #include <stdlib.h>
 #include <string.h>
@@ -47,6 +48,7 @@ typedef struct {
     int16_t *held;
     size_t capacity, have;
     double position;
+    kl_pcm_filter filter;
 } photon_audio;
 static pthread_mutex_t capture_owner_lock = PTHREAD_MUTEX_INITIALIZER;
 static photon_audio *capture_owner;
@@ -104,7 +106,11 @@ static int photon_samples(photon_audio *r, int16_t *dst, int frames) {
     }
     if (r->have < need) {
         int got = kl_audio_mic_read_i16(r->held + r->have * r->source_channels, (int)(need - r->have));
-        if (got > 0) r->have += (size_t)got;
+        if (got > 0) {
+            kl_pcm_filter_apply(&r->filter, r->held + r->have * r->source_channels,
+                                (size_t)got, r->source_channels, r->source_rate, r->rate);
+            r->have += (size_t)got;
+        }
     }
     int out = 0;
     while (out < frames && (size_t)r->position + 1 < r->have) {
@@ -178,6 +184,7 @@ static klj_val photon_start(void *env, void *self, const klj_val *a, int n) {
         kl_audio_mic_close(); pthread_mutex_unlock(&r->lock); pthread_mutex_unlock(&capture_owner_lock); return (klj_val){0};
     }
     r->rate = rate ? rate : r->source_rate; r->channels = channels; r->callback = a[1].l;
+    memset(&r->filter, 0, sizeof r->filter);
     r->have = 0; r->position = 0; atomic_store(&r->stop, 0); r->running = 1; capture_owner = r;
     kl_jni_pin_object(r->self); kl_jni_pin_object(r->callback);
     int result = pthread_create(&r->thread, NULL, photon_worker, r);

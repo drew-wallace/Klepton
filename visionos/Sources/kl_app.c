@@ -17,6 +17,7 @@
 #include "kl_driver.h"    // the guest's own sequences, shared with build/m_boot
 #include "kl_audio.h"     // kl_audio_set_latency_ms — streamed audio needs a deeper buffer
 #include "kl_ovrp.h"      // kl_ovrp_set_frame_pacer — the OVRPlugin frame clock
+#include "kl_meta_account.h"
 #include "kl_openxr.h"    // kl_openxr_set_frame_pacer — the OpenXR one
 #include "kl_slink.h"
 #include "kl_mono.h"      // the flat guest's window seam — frame out, pointer in
@@ -313,6 +314,7 @@ int kl_app_configure(const char *resources, const char *container) {
         kl_jni_set_assets_dir(g_assets);
         kl_jni_set_apk_path(g_apk);
         kl_jni_set_files_dir(g_files);
+        kl_meta_account_install();
         // The OBB layout is per-target and kl_jni must be TOLD it: on device
         // KL_TARGET is unset, so kl_jni's own fallback resolves the default
         // guest and hands a UE4 title the wrong OBB directory. g_target is the

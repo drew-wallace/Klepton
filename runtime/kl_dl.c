@@ -11,6 +11,8 @@
 #include <wchar.h>
 #include "kl_egl.h"
 #include "guest/kl_driver.h"
+#include "guest/kl_unity_compat.h"
+#include "jni/kl_jni_vuplex.h"
 #include "kl_jni.h"
 #include "kl_opensl.h"
 #include "kl_ovrp.h"
@@ -18,6 +20,7 @@
 #include "kl_mediandk.h"
 #include "kl_vulkan.h"
 #include "kl_aaudio.h"
+#include "kl_vivox.h"
 #include "kl_openxr.h"
 #include "../steam/runtime/kl_steam.h"
 
@@ -320,6 +323,9 @@ void *kl_guest_sym_global(const char *name) {
     if (v) {
         void *w = kl_fmod_interpose(name, v); if (w) return w;
         w = kl_steam_interpose(name, v); if (w) return w;
+        w = kl_unity_oculus_interpose(name, v); if (w) return w;
+        w = kl_unity_vivox_interpose(name, v); if (w) return w;
+        w = klj_vuplex_interpose(name, v); if (w) return w;
     }
     return v;
 }
@@ -698,8 +704,7 @@ static void kl_dl_trace_shims(void);
 // "libc.so" to cache a libc entry point; the NULL both broke that init AND drove
 // the failure-diagnostic frame walk into libunity's chainless .text (the 0x7
 // fault). Serving the handle removes both: klb_dlsym routes it to the shim
-// lookup + global image search, the same resolution a NULL/RTLD_DEFAULT handle
-// gets, so a name the shim serves comes back and one it does not returns a clean
+// lookup, so a name the shim serves comes back and one it does not returns a clean
 // dlerror instead of a crash.
 //
 // Matched by basename so a full path into the guest lib dir claims too. Not
@@ -759,6 +764,8 @@ void *klb_dlopen(const char *path, int flags) {
     // OVRPlugin: the real one only forwards to a system service that is not here.
     void *plat = kl_ovrplat_dlopen(path);
     if (plat) return plat;
+    void *voice = kl_vivox_dlopen(path);
+    if (voice) return voice;
     void *md = kl_mediandk_dlopen(path);
     if (md) return md;
     // Vulkan (BONELAB). Same reasoning as the GL line above: there is no
@@ -874,18 +881,18 @@ void *klb_dlsym(void *handle, const char *name) {
     if (kl_opensl_is_handle(handle)) return kl_opensl_sym(name);
     if (kl_ovrp_is_handle(handle)) return kl_ovrp_sym(name);
     if (kl_ovrplat_is_handle(handle)) return kl_ovrplat_sym(name);
+    if (kl_vivox_is_handle(handle)) return kl_vivox_sym(name);
     if (kl_mediandk_is_handle(handle)) return kl_mediandk_sym(name);
     if (kl_vulkan_is_handle(handle)) return kl_vulkan_sym(name);
     if (kl_aaudio_is_handle(handle)) return kl_aaudio_sym(name);
     if (kl_openxr_is_handle(handle)) return kl_openxr_sym(name);
-    // A core system-library handle (libc.so &c.) resolves like RTLD_DEFAULT: the
-    // shim serves libc, and the global image search covers anything a guest .so
-    // exported. A name neither has is a clean undefined-symbol dlerror, not a
-    // fault — which is the whole point of serving the handle rather than NULL.
+    // A synthetic system library has only the shim's exports. Searching all
+    // guest images here leaks unrelated UnityPluginLoad callbacks into libc:
+    // Unity then initializes a graphics plugin while resolving getifaddrs on a
+    // managed worker, where its thread-local graphics device can be NULL.
+    // Process-wide lookup remains available through NULL/RTLD_DEFAULT below.
     if (kl_core_shim_is_handle(handle)) {
         void *s = kl_shim_lookup(name);
-        if (s) return s;
-        s = kl_guest_sym_global(name);
         if (!s) snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
         return s;
     }
@@ -894,7 +901,9 @@ void *klb_dlsym(void *handle, const char *name) {
         if (s) return s;
         for (int i = 0; i < g_nimgs; i++) {
             void *v = kl_sym(g_imgs[i].img, name);
-            if (v) return v;
+            if (v) { void *w=kl_unity_oculus_interpose(name,v);
+                if (!w) w=kl_unity_vivox_interpose(name,v);
+                if (!w) w=klj_vuplex_interpose(name,v); return w?w:v; }
         }
         snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
         return klb_dlsym_null(name);
@@ -1026,6 +1035,10 @@ static void kl_dl_trace_shims(void) {
 }
 
 static void *kl_dl_interpose(const char *name, void *real) {
+    void *unity=kl_unity_oculus_interpose(name,real);
+    if (!unity) unity=kl_unity_vivox_interpose(name,real);
+    if (!unity) unity=klj_vuplex_interpose(name,real);
+    if (unity) return unity;
     void *fmod = kl_fmod_c_interpose(name, real);
     if (fmod) return fmod;
     if (strcmp(name, "iplHRTFCreate") == 0) {

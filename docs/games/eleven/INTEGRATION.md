@@ -60,3 +60,40 @@ This installs **Eleven Table Tennis** (`drewwallace.dev.klepton.target.eleven`),
 2. Verified: real Steam login, app ID 488310, ownership, and independent diagnostic ticket callbacks with the original SDK.
 3. Verified by the user: joined an online match and heard the other player clearly.
 4. Verified by the user: physical gameplay and online voice work. Game audio still pops/clicks after the producer-registration fix; investigate the FMOD source PCM separately from Unity voice output.
+
+### Voice timing and native microphone processing (November 6, 2026)
+
+The user reports slow/muddy outgoing voice and fast/choppy incoming voice.
+The shared sink previously used the first stream's rate/channel count and one
+fractional resampler history for every producer. OpenSL also silently discarded
+secondary streams at another rate. FMOD Java, OpenSL and AAudio now supply each
+producer's actual PCM format; the sink retains independent conversion history
+and mixes their converted frames on the same hardware clock. One stream opening
+or closing no longer reconfigures or closes another API's sink. Tiny downsampled
+blocks which consume input without emitting a device frame are acknowledged
+without adding fallback sleep.
+
+Opted-in microphone capture now shares one duplex Apple VoiceProcessingIO unit
+with game playback, giving native echo cancellation the real speaker signal.
+Capture starts with the native format, retains its advertised client clock over
+route recovery, and validates the negotiated input format. A shared FIR filter
+prevents aliasing when OpenSL, AAudio or Photon downsample microphone PCM; native
+rate capture bypasses that filter. Capture readers discard excessive queued
+backlog after stalls instead of steadily delivering old voice. The raw fallback
+remains available and does not claim echo cancellation.
+
+`make voicecheck` verifies mixed rates and pitch with irregular tiny buffers,
+OpenSL/AAudio capture duration and alias rejection, the real speaker-reference
+connection through fake AudioUnits, mic-first/output-first startup, route and
+interruption recovery, microphone disable, raw fallback and failed capture start.
+These are synthetic host tests; neither Eleven's exact device failure nor the
+perceived result is established by them. A physical two-way voice retest remains
+necessary before calling the reported symptoms resolved.
+
+Validation for this change: `make voicecheck`, `make openslcheck`, the FMOD PCM
+fixture, `python3 tests/test_visionos_audio.py`, `make swiftcheck`, and both
+`make xros-device xros-sim` gates pass. The broader `make elevencheck` reaches an
+unrelated Steam profile test failure: it expects “another target”, while current
+staging validation raises “different channel or release”. No Steam logic was
+changed for this audio work. The runtime libraries were rebuilt; headset app
+installation and listening verification remain pending.

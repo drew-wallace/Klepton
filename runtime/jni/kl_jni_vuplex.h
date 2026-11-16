@@ -1,6 +1,7 @@
 #ifndef KL_JNI_VUPLEX_H
 #define KL_JNI_VUPLEX_H
 int klj_vuplex_is_view(void *object);
+void *klj_vuplex_interpose(const char *name,void *real);
 void klj_vuplex_drain_events(void);
 void klj_vuplex_render(void *object);
 void klj_vuplex_pointer(void *object, const char *type, int x, int y, int button);

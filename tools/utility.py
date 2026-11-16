@@ -41,6 +41,9 @@ sys.path.insert(0, str(ROOT / 'steam/tools'))
 import targets
 import steam_updates
 import steam_library
+import meta_library
+import meta_game
+import installer_storage
 
 ANDROID = '{http://schemas.android.com/apk/res/android}'
 STEAM_PROFILES = {
@@ -66,6 +69,35 @@ class UtilityError(Exception):
 
 class Cancelled(UtilityError):
     pass
+
+
+def provisioning_error(output):
+    # Xcode may also report a fallback wildcard profile's missing capabilities.
+    # Resolve a blocked developer account first so it can create the right profile.
+    if any(text in output for text in ('PLA Update available', 'latest Program License Agreement',
+                                       'in-effect agreement that has not been signed')):
+        return ('Apple has blocked provisioning until the Account Holder reviews and accepts the updated '
+                'Developer Program License Agreement at https://developer.apple.com/account/. '
+                'After accepting it, retry Build & Install so Xcode can create the app’s provisioning profile. '
+                'A fallback wildcard profile may also report a missing Increased Memory Limit capability. '
+                'No app was installed.')
+    if 'No Accounts:' in output or 'No Account for Team' in output:
+        return ('Xcode could not find an Apple account for the selected signing team. '
+                'Sign in to that team’s Apple account in Xcode → Settings → Apple Accounts '
+                '(Accounts in older Xcode versions), then retry Build & Install so Xcode can create '
+                'this app’s provisioning profile. A fallback wildcard profile may also report a missing '
+                'Increased Memory Limit capability. No app was installed.')
+    if ('Provisioning profile' in output and
+            ("doesn't include" in output or 'does not include' in output) and
+            ('Increased Memory Limit' in output or 'com.apple.developer.kernel.increased-memory-limit' in output)):
+        return ('The selected provisioning profile lacks Increased Memory Limit, which this app requests. '
+                'Check the selected team in Xcode → Settings → Accounts and regenerate a provisioning profile '
+                'for this app identifier with Increased Memory Limit enabled, then retry. No app was installed.')
+    if 'No profiles for' in output:
+        return ('Xcode could not provision the selected team and bundle identifier. '
+                'Verify the selected signing team and check its account/profile status '
+                'under Xcode → Settings → Accounts, then retry. No app was installed.')
+    return ''
 
 
 def emit(stage, status, message='', **data):
@@ -201,11 +233,9 @@ class Runner:
             self.check_cancelled()
             if code:
                 tail = self.log_path.read_bytes()[-2400:].decode('utf-8', errors='replace')
-                if 'No Account for Team' in tail or 'No profiles for' in tail:
-                    raise UtilityError('Xcode could not provision the selected team and bundle identifier. '
-                                       'Verify the selected signing team and check its account/profile status '
-                                       'under Xcode → Settings → Accounts, then retry. '
-                                       f'No app was installed. Details: {self.log_path}')
+                signing_error = provisioning_error(tail)
+                if signing_error:
+                    raise UtilityError(signing_error+f' Details: {self.log_path}')
                 raise UtilityError(f'{self.stage} failed (exit {code}). See {self.log_path}.\n{tail}')
 
     def dev_json(self, args):
@@ -395,7 +425,11 @@ def decoded_metadata(tree, libraries):
     graphics = 'Vulkan + GLES (detected libraries/manifest)' if 'vulkan' in ET.tostring(manifest).decode().lower() else 'Automatic (ANGLE / MoltenVK)'
     vulkan_required = any(f.get(ANDROID+'name', '').startswith('android.hardware.vulkan') and
                           f.get(ANDROID+'required', 'true') != 'false' for f in manifest.findall('uses-feature'))
-    return dict(package=package, name=label[:160], version_code=yaml_value(version_text, 'versionCode'),
+    meta_app = next((m.get(ANDROID+'value', '') for m in manifest.iter('meta-data')
+                     if m.get(ANDROID+'name') == 'com.oculus.sdk.appid'), '')
+    if not re.fullmatch(r'[1-9][0-9]{0,39}', meta_app):
+        meta_app = ''
+    return dict(package=package, meta_app_id=meta_app, name=label[:160], version_code=yaml_value(version_text, 'versionCode'),
                 version_name=yaml_value(version_text, 'versionName'), architecture='ARM64',
                 kind=kind, entry=entry, libraries=libraries, steam='libsteam_api' in libraries,
                 obb_required=obb_required, graphics=graphics, vulkan_required=vulkan_required)
@@ -452,6 +486,75 @@ def decode_import(snapshot, tree, runner):
     partial.replace(tree)
 
 
+def catalog_game_data(source, info):
+    """Read Unity's external bundle paths from matching nearby OBBs.
+
+    Keep a file allowlist rather than importing an APK's entire download folder:
+    that folder can also contain symbols, redundant ZIPs, and unrelated APKs.
+    """
+    destination = 'Android/obb/'+info['package']
+    prefix = '/sdcard/'+destination+'/'
+    archives = []
+    data_folder = source.parent
+    # Users commonly keep the APK beside a dedicated data folder. Prefer
+    # adjacent expansion files, then that explicit folder, without recursively
+    # scanning unrelated downloads or mixing archives from separate locations.
+    for folder in (source.parent, source.parent/'game data'):
+        candidates = [folder/f'{part}.{info["version_code"]}.{info["package"]}.obb'
+                      for part in ('main', 'patch')]
+        archives = [p for p in candidates if p.is_file()]
+        if archives:
+            data_folder = folder
+            break
+    bundles = set()
+    for archive in archives:
+        try:
+            with zipfile.ZipFile(archive) as z:
+                for entry in z.infolist():
+                    path = PurePosixPath(entry.filename)
+                    if (not entry.filename.startswith('assets/aa/') or
+                            not path.name.startswith('catalog') or path.suffix != '.json' or
+                            entry.file_size > 32*1024**2):
+                        continue
+                    catalog = json.loads(z.read(entry))
+                    if not isinstance(catalog, dict):
+                        continue
+                    identifiers = catalog.get('m_InternalIds', [])
+                    if not isinstance(identifiers, list):
+                        continue
+                    for value in identifiers:
+                        if not isinstance(value, str) or not value.startswith(prefix):
+                            continue
+                        relative = value[len(prefix):]
+                        parts = PurePosixPath(relative).parts
+                        if (relative.endswith('.bundle') and
+                                re.fullmatch(r'[A-Za-z0-9_./-]+', relative) and
+                                parts and all(p not in ('', '.', '..') for p in relative.split('/'))):
+                            bundles.add(relative)
+        except (zipfile.BadZipFile, ValueError, OSError, RuntimeError):
+            continue  # Ordinary/non-ZIP expansion data keeps its existing manual workflow.
+    if not bundles:
+        return {}
+    return dict(destination=destination, source_folder=str(data_folder), obb_files=[p.name for p in archives],
+                files=sorted({p.name for p in archives} | bundles),
+                description=f'{len(bundles)} catalog-referenced bundles; only these bundles and matching OBBs are transferred. '
+                            'Other files in the selected folder are ignored.')
+
+
+def selected_data_files(paths, include=()):
+    """Yield source/relative pairs, applying the inspected catalog when present."""
+    allowed = set(include)
+    for path in paths:
+        sources = ([path] if path.is_file() else
+                   [path/name for name in sorted(allowed)] if allowed else
+                   sorted(path.rglob('*')))
+        for source in sources:
+            if source.is_file():
+                relative = source.name if path.is_file() else source.relative_to(path).as_posix()
+                if not allowed or relative in allowed:
+                    yield source, relative
+
+
 def inspect_apk(apk, runner):
     source = Path(apk).expanduser().resolve()
     if not source.is_file():
@@ -478,6 +581,7 @@ def inspect_apk(apk, runner):
     decode_import(snapshot, tree, runner)
     info = decoded_metadata(tree, libraries)
     info['apk_sha256'] = fingerprint
+    info['meta_app_id'] = meta_game.app_id(tree, fingerprint)
     # Keep the Makefile as the authority for replaced/injected libraries.
     try:
         info['entry_libraries'] = targets.libs_for(str(tree/'lib/arm64-v8a')).split()
@@ -490,12 +594,19 @@ def inspect_apk(apk, runner):
     reason = ('Package, version and entry-library fingerprint match an existing profile.' if len(matches) == 1 else
               'Several profiles share these bytes; choose a profile or use Experimental.' if matches else
               'No exact profile match. Native-library detection does not establish compatibility.')
+    if selected and targets.TARGETS[selected].get('compatibility_note'):
+        reason += ' ' + targets.TARGETS[selected]['compatibility_note']
     suggested = []
     for p in source.parent.iterdir():
         if p.is_file() and re.fullmatch(r'(main|patch)\.[0-9]+\.'+re.escape(info['package'])+r'\.obb', p.name):
             suggested.append(str(p))
         elif p.is_dir() and p.name == 'obb':
             suggested.append(str(p))
+    catalog_data = catalog_game_data(source, info)
+    if catalog_data:
+        info['catalog_data'] = catalog_data
+        info['suggested_data_path'] = catalog_data['destination']
+        suggested = [catalog_data['source_folder']]
     result = dict(info, import_id=fingerprint, apk_path=str(snapshot), host_tree=str(tree),
                   source_path=str(source), profile=selected, matches=matches, reason=reason,
                   steam_audited_profiles=audited, suggested_data=sorted(suggested),
@@ -521,17 +632,24 @@ def resolve_steam(mode, info, profile):
     if mode not in ('auto', 'none', 'runtime', 'offline'):
         raise UtilityError('Unknown Steam mode.')
     audited = steam_audit(profile, info['host_tree'])
+    meta_source = info.get('game_source') == 'meta'
+    if mode == 'auto' and meta_source:
+        return 'none'
     if mode == 'auto':
         mode = 'runtime' if audited else 'offline' if info['steam'] else 'none'
     if mode == 'runtime' and not audited:
         raise UtilityError('Steam runtime requires an audited profile and matching imported SDK binaries. Use Offline diagnostics or choose the matching APK.')
-    if mode == 'none' and info['steam']:
+    if mode == 'none' and info['steam'] and not meta_source:
         raise UtilityError('This APK contains Steam libraries. Choose Auto, Steam runtime, or Offline diagnostics.')
     return mode
 
 
 def data_requirements(info, profile):
     package, version = info['package'], info['version_code']
+    if info.get('catalog_data'):
+        catalog = info['catalog_data']
+        return dict(required=True, files=catalog['obb_files'], loose=True,
+                    description=catalog['description'])
     files = []
     if profile and profile.startswith('roborecall-'):
         files = [f'main.{version}.{package}.obb']
@@ -567,7 +685,13 @@ def validate_request(request, info, job):
         raise UtilityError('Choose a supported boot type and an entry library present in the imported APK.')
     if not profile and kind not in ('unity', 'ue4', 'native'):
         raise UtilityError('This boot type requires an existing game profile.')
-    name = profile or ('import-'+hashlib.sha256(info['package'].encode()).hexdigest()[:16])
+    name = p.get('installer_target', profile) if profile else ('import-'+hashlib.sha256(info['package'].encode()).hexdigest()[:16])
+    # Re-evaluate the committed fingerprints at build time too, so an older
+    # cached inspection/Experimental request gains newly verified defaults.
+    matches = match_profiles(info, info['host_tree'])
+    settings_profile = profile if profile in matches else matches[0] if not profile and len(matches) == 1 else None
+    runtime_defaults = targets.validate_runtime_defaults(
+        targets.TARGETS.get(settings_profile, {}).get('runtime_defaults', {}))
     bundle = request.get('bundle') or targets.bundle_for(name)
     if not re.fullmatch(r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+', bundle):
         raise UtilityError('Bundle identifier must be dot-separated letters, digits, and hyphens.')
@@ -596,19 +720,28 @@ def validate_request(request, info, job):
             raise UtilityError(f'{path} contains symbolic links. Supply a folder of real files.')
     if requirements['required'] and not paths:
         raise UtilityError('This APK/profile requires external game data. Add its matching OBB files or data folder.')
-    supplied = {p.name for path in paths for p in ([path] if path.is_file() else path.rglob('*')) if p.is_file()}
+    catalog = info.get('catalog_data', {})
+    included = catalog.get('files', [])
+    supplied = {relative for _, relative in selected_data_files(paths, included)}
+    # Existing profiles accept OBBs/retail files inside a supplied directory.
+    if not catalog:
+        supplied |= {PurePosixPath(relative).name for relative in supplied}
     missing = [name for name in requirements['files'] if name not in supplied]
     if missing:
         raise UtilityError('Missing required game data: '+', '.join(missing))
+    missing_bundles = sorted(set(included) - supplied)
+    if missing_bundles:
+        raise UtilityError(f'Missing {len(missing_bundles)} catalog-referenced game-data files: '+
+                           ', '.join(missing_bundles[:5])+('. Add the complete data folder.'))
     if requirements['loose'] and not any(p.is_dir() and any(f.is_file() and f.suffix != '.obb' for f in p.rglob('*')) for p in paths):
         raise UtilityError('This profile needs the complete data folder, including its loose game bundles.')
     folders = {path for path in paths if path.is_dir()}
     suggested_folders = {Path(v).resolve() for v in info.get('suggested_data', []) if Path(v).is_dir()}
-    inferred_data_path = info.get('suggested_data_path', '') if not profile and folders and folders <= suggested_folders else ''
+    inferred_data_path = catalog.get('destination') or (info.get('suggested_data_path', '') if not profile and folders and folders <= suggested_folders else '')
     if not profile and folders and not request.get('data_path') and not inferred_data_path:
         raise UtilityError('Choose where this folder’s contents belong inside the game’s Android storage. '
                            'Set Advanced → Data folder destination (for example, obb). Do not enter a folder path on your Mac.')
-    obb_path = p.get('obb', 'Android/obb/'+info['package'] if kind == 'ue4' else 'obb')
+    obb_path = catalog.get('destination') or p.get('obb', 'Android/obb/'+info['package'] if kind == 'ue4' else 'obb')
     data_path = request.get('data_path') or RETAIL_PATHS.get(profile) or p.get('stage_files') or inferred_data_path or obb_path
     if (PurePosixPath(data_path).is_absolute() or '..' in PurePosixPath(data_path).parts or
             not re.fullmatch(r'[A-Za-z0-9_./-]+', data_path)):
@@ -618,8 +751,12 @@ def validate_request(request, info, job):
              product='KleptonImport'+job.name.replace('-', ''), framework_key='import-'+job.name,
              display=info['name'], steam_mode=steam, steam_channel=steam_channel,
              adapters=adapters, import_id=info['import_id'],
+             meta_app_id=meta_game.app_id(info['host_tree'], info['import_id'], info.get('meta_app_id', '')),
              gles_version=gles_version,
+             runtime_profile=settings_profile if runtime_defaults else None,
+             runtime_defaults=runtime_defaults,
              data=[str(p) for p in paths], data_path=data_path, obb_path=obb_path,
+             data_include=included,
              team=request['team'], device=request['device'])
     return m
 
@@ -782,22 +919,23 @@ def prepare_payload(manifest, job, backed_up):
     loose = root/'loose'
     destinations = {}
     protected = {r['path'] for r in backed_up}
-    for supplied in manifest['data']:
-        path = Path(supplied)
-        sources = [path] if path.is_file() else sorted(p for p in path.rglob('*') if p.is_file())
-        for source in sources:
-            relative = source.name if path.is_file() else source.relative_to(path).as_posix()
-            is_obb = source.suffix.lower() == '.obb'
-            dest_rel = manifest['obb_path']+'/'+source.name if is_obb else manifest['data_path']+'/'+relative
-            remote = 'Documents/android-files/'+safe_relative(dest_rel)
-            if remote in protected and not is_obb:
-                continue  # The existing save always wins over selected seed data.
-            if remote in destinations:
-                raise UtilityError(f'Two supplied data files map to {dest_rel}; remove the duplicate selection.')
-            local = (obb/source.name) if is_obb else (loose/relative)
-            local.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, local)
-            destinations[remote] = local
+    include = manifest.get('data_include', [])
+    files = list(selected_data_files([Path(p) for p in manifest['data']], include))
+    missing = sorted(set(include) - {relative for _, relative in files})
+    if missing:
+        raise UtilityError('Game data changed after validation. Missing: '+', '.join(missing[:5]))
+    for source, relative in files:
+        is_obb = source.suffix.lower() == '.obb'
+        dest_rel = manifest['obb_path']+'/'+source.name if is_obb else manifest['data_path']+'/'+relative
+        remote = 'Documents/android-files/'+safe_relative(dest_rel)
+        if remote in protected and not is_obb:
+            continue  # The existing save always wins over selected seed data.
+        if remote in destinations:
+            raise UtilityError(f'Two supplied data files map to {dest_rel}; remove the duplicate selection.')
+        local = (obb/source.name) if is_obb else (loose/relative)
+        local.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, local)
+        destinations[remote] = local
     return destinations
 
 
@@ -836,9 +974,15 @@ def diagnose_logs(text):
                     'Attach the collected logs and report.json to a development report.')
     jni = re.findall(r'\[jni\] UNIMPLEMENTED[^\n]*', text)
     methods = re.findall(r'\[jni\] no host implementation for ([^\n]+)', text)
-    if jni or methods:
-        detail = ': ' + methods[-1][:300] if methods else ''
-        return dict(category='runtime', message='The app reached an unsupported runtime/JNI call'+detail+'. '
+    fields = re.findall(r'\[jni\] no host value for field ([^\n]+)', text)
+    if ('Unable to initialize the Unity Engine Graphics API' in text and not jni and not fields and
+            all(method == 'com/unity3d/player/UnityPlayer.kill()V' for method in methods)):
+        return dict(category='graphics', message='Unity could not initialize its graphics API before rendering. '
+                    'A subsequent UnityPlayer.kill() call is its shutdown path after that failure. '
+                    'Attach the collected logs and report.json to investigate graphics compatibility.')
+    if jni or methods or fields:
+        detail = ': ' + (methods[-1] if methods else fields[-1])[:300] if methods or fields else ''
+        return dict(category='runtime', message='The app reached an unsupported runtime/JNI call or field'+detail+'. '
                     'Attach the collected logs and report.json for a Klepton development fix.')
     if 'WebViewUnavailableException' in text or '[jni] Vuplex browser unavailable:' in text:
         return dict(category='runtime', message='The app reports that its Vuplex WebView browser is unavailable. '
@@ -1000,6 +1144,10 @@ def run_job(request, runner):
     runner.run(['make', 'build/klepton-ld', 'xros', 'XROS_PLATFORMS=xros'], env)
     runner.run(['bash', 'visionos/mkangle.sh'], env)
     runner.run(['bash', 'visionos/mkmvk.sh'], env)
+    import vivox_native
+    if vivox_native.supports_tree(m['host_tree']):
+        runner.start('voice', 'Preparing the native Vivox voice SDK for Vision Pro…')
+        runner.run([sys.executable, 'tools/vivox_native.py'], env)
     runner.start('translate', 'Translating imported ARM64 native libraries…')
     runner.run(['bash', 'visionos/mkguest.sh'], env)
     if m['steam_mode'] == 'runtime':
@@ -1058,7 +1206,8 @@ def run_job(request, runner):
     # A remote receipt proves that staging reached its end in this container.
     receipt = dict(schema_version=1, device=m['device'], bundle=m['bundle'], import_id=m['import_id'],
                    job=str(runner.directory), container=container, installed_at=time.time(),
-                   immutable_paths=[p for p in payload if p.endswith('.obb')],
+                   immutable_paths=[p for p in payload if p.endswith('.obb') or
+                                    (m.get('data_include') and p.endswith('.bundle'))],
                    data=payload_records)
     local_receipt = runner.directory/'transfer.json'
     write_json(local_receipt, receipt)
@@ -1111,6 +1260,7 @@ def update_steam(channel, runner):
 def steam_game_data(info, folder, receipt):
     """Remember the downloaded data layout independently of compatibility pins."""
     data, unmapped = steam_library.data_candidates(folder, receipt)
+    info['game_source'] = 'steam'
     info['source_path'] = str(folder.joinpath(*steam_library.safe_path(receipt['executable']).parts))
     info['suggested_data'] = data
     info['suggested_data_path'] = (
@@ -1146,10 +1296,10 @@ def library_job(action, runner):
                                               'app_id', 'branch', 'launch_id') if k in request}
     helper_request['action'] = action
     if action in ('login', 'refresh'):
-        if request.get('scope') == 'vr_android' and request.get('steam_id'):
+        if request.get('steam_id'):
             cached = cache.read_catalog(request['steam_id'])
             helper_request.update(steam_id=request['steam_id'],
-                                  app_ids=[g['app_id'] for g in cached['games'] if g['vr'] and g['android_available']],
+                                  app_ids=[g['app_id'] for g in cached['games'] if g['android_available']],
                                   known_app_ids=cached.get('owned_app_ids', [g['app_id'] for g in cached['games']]))
         if action == 'refresh' and request.get('steam_id'):
             emit('steam-library', 'result', 'Checking remote Steam versions…', **cache.cached(request['steam_id']))
@@ -1168,6 +1318,69 @@ def library_job(action, runner):
         emit('steam-game', 'result', **info, downloaded_data=data, unmapped_data=unmapped, download_folder=str(folder))
 
 
+def meta_library_job(action, runner):
+    runner.start('meta-library', 'Preparing Meta library…')
+    try:
+        request = json.loads(sys.stdin.readline())
+    except ValueError:
+        raise UtilityError('Invalid Meta library request.') from None
+    if not isinstance(request, dict):
+        raise UtilityError('Invalid Meta library request.')
+    cache = meta_library.LibraryStore(STORE, digest, write_json)
+    account = meta_library.identifier(request.get('account_id', ''))
+    if action == 'cached':
+        emit('meta-library', 'result', 'Showing saved Meta library; refresh to check versions.', **cache.cached(account))
+        return
+    if action == 'refresh':
+        client = meta_library.Client(request.get('profile_token'), runner.check_cancelled)
+        result = cache.refresh(client, lambda done, total: emit('meta-library', 'running', f'Checking Meta versions ({done:,} / {total:,})…'), expected_account=account)
+        if result['account_id'] != account:
+            raise UtilityError('Meta account changed. Sign in again.')
+        emit('meta-library', 'result', 'Meta library and available versions refreshed.', **result)
+        return
+    app = meta_library.identifier(request.get('app_id', ''))
+    if action == 'use':
+        local = cache.local(account, app)
+        if not local or not local['valid']:
+            damaged = cache.cached(account)
+            for game in damaged['games']:
+                if game['app_id'] == app and game.get('downloaded'):
+                    game['downloaded']['valid'] = False
+            emit('meta-library', 'result', 'Downloaded files need repair.', **damaged)
+            raise UtilityError('Downloaded Meta files are missing or damaged. Repair the download before installing.')
+        folder = Path(local['folder'])
+        executable = folder.joinpath(*meta_library.safe_path(local['executable']).parts)
+        if executable.is_symlink() or folder.resolve() not in executable.resolve().parents:
+            raise UtilityError('Unsafe Meta APK path.')
+        info = inspect_apk(executable, runner)
+        catalog = cache.cached(account)
+    else:
+        client = meta_library.Client(request.get('profile_token'), runner.check_cancelled,
+                                     status=lambda text: emit('meta-library', 'running', text))
+        last = [0.0]
+        def progress(done, total):
+            if time.monotonic() - last[0] >= .4 or done == total:
+                last[0] = time.monotonic()
+                emit('meta-library', 'running', f'Downloading Meta game ({done/1024**2:,.1f} / {total/1024**2:,.1f} MiB)…', completed=done, total=total)
+        info, local, catalog = cache.acquire(client, account, app, lambda apk: inspect_apk(apk, runner), progress)
+        folder = Path(local['folder'])
+    # Use the store app ID only after verifying the actual APK belongs to this
+    # selected game. Freeze it with the inspection used by the build pipeline.
+    info['meta_app_id'] = meta_game.app_id(info['host_tree'], info['import_id'], app)
+    info['game_source'] = 'meta'
+    info['source_path'] = str(folder.joinpath(*meta_library.safe_path(local['executable']).parts))
+    data_folder = folder/'game data'
+    data = [str(data_folder)] if data_folder.is_dir() and any(data_folder.iterdir()) else []
+    info['suggested_data'] = data
+    info['suggested_data_path'] = info.get('suggested_data_path') or 'obb'
+    # Catalog paths must refer to the published folder, not the pending folder.
+    if info.get('catalog_data'):
+        info['catalog_data']['source_folder'] = str(data_folder)
+    write_json(STORE/'imports'/info['import_id']/'inspection.json', info)
+    emit('meta-library', 'result', 'Meta download verified and ready to install.', **catalog)
+    emit('meta-game', 'result', **info, downloaded_data=data, download_folder=str(folder))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -1175,6 +1388,10 @@ def main(argv=None):
     sub.add_parser('steam-status')
     library = sub.add_parser('steam-library')
     library.add_argument('--action', choices=('login', 'refresh', 'cached', 'download', 'use'), required=True)
+    meta = sub.add_parser('meta-library')
+    meta.add_argument('--action', choices=('refresh', 'cached', 'download', 'use'), required=True)
+    storage = sub.add_parser('storage')
+    storage.add_argument('--action', choices=('scan', 'cleanup'), default='scan')
     steam_update = sub.add_parser('steam-update')
     steam_update.add_argument('--channel', choices=steam_updates.CHANNELS, required=True)
     inspect = sub.add_parser('inspect')
@@ -1195,11 +1412,23 @@ def main(argv=None):
             emit('steam-status', 'result', channels=steam_updates.status())
             return 0
         with checkout_lock():
+            if args.command == 'storage':
+                if args.action == 'cleanup':
+                    request = json.loads(sys.stdin.readline())
+                    if not isinstance(request, dict):
+                        raise UtilityError('Invalid storage cleanup request.')
+                    result = installer_storage.cleanup(STORE, request.get('ids'))
+                else:
+                    result = installer_storage.inventory(STORE)
+                emit('storage', 'result', **result)
+                return 0
             job = STORE/'jobs'/uuid.uuid4().hex[:12]
             request = json.loads(args.request.read_text()) if args.command == 'run' else {}
             runner = Runner(job, verbose=bool(request.get('verbose', False)))
             runner.install_handlers()
-            if args.command == 'steam-library':
+            if args.command == 'meta-library':
+                meta_library_job(args.action, runner)
+            elif args.command == 'steam-library':
                 library_job(args.action, runner)
             elif args.command == 'inspect':
                 result = inspect_apk(args.apk, runner)

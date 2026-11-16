@@ -153,7 +153,21 @@ def run_helper(root, request, runner, emit):
                         safe_reasons = {'CDN request timed out', 'File checksum mismatch', 'Chunk checksum mismatch',
                                         'Chunk decompression failed', 'CDN transfer failed', 'ENOSPC', 'EIO', 'EACCES',
                                         'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'Slow CDN connection replaced', 'No verified download progress'}
+                        safe_reasons.update({'Missing Steam app metadata', 'Invalid Steam metadata location', 'Steam metadata download failed',
+                                             'Steam metadata too large', 'Steam metadata checksum mismatch'})
                         detail = ' (' + reason + ')' if reason in safe_reasons or re.fullmatch(r'HTTP [0-9]{3}', reason) else ''
+                        phases = {'sign_in': 'sign-in', 'connect': 'connecting', 'ownership': 'reading licenses',
+                                  'metadata': 'reading game details', 'manifest': 'reading depot manifests',
+                                  'download': 'downloading files'}
+                        phase = phases.get(event.get('phase'))
+                        if phase:
+                            detail += f' (while {phase})'
+                        eresult = event.get('eresult')
+                        if type(eresult) is int and 0 < eresult < 200:
+                            detail += f' (Steam result {eresult})'
+                        network_code = event.get('network_code')
+                        if network_code in {'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED', 'EHOSTUNREACH'}:
+                            detail += f' ({network_code})'
                         raise ValueError(ERRORS.get(event.get('code'), ERRORS['steam_failed']) + detail)
                     elif kind == 'result':
                         result = {k: event[k] for k in ('steam_id', 'games', 'game', 'branch', 'launch', 'files',
@@ -230,7 +244,7 @@ class LibraryStore:
 
     def cached(self, steam_id, remote_known=False):
         catalog = self.read_catalog(steam_id)
-        catalog['games'] = self.decorate(steam_id, catalog['games'], remote_known)
+        catalog['games'] = self.decorate(steam_id, [g for g in catalog['games'] if g['android_available']], remote_known)
         return catalog
 
     def save_catalog(self, result):
@@ -243,6 +257,8 @@ class LibraryStore:
             catalog['games'].sort(key=lambda g: g['name'].casefold())
         if 'owned_app_ids' in result:
             catalog['owned_app_ids'] = result['owned_app_ids']
+        # Drop desktop entries from older catalogs and partial-refresh merges.
+        catalog['games'] = [g for g in catalog['games'] if g['android_available']]
         self.write_json(self.account(result['steam_id'])/'catalog.json', catalog)
         return self.cached(result['steam_id'], set(checked) if checked is not None else True)
 
@@ -262,6 +278,7 @@ class LibraryStore:
         folder = self.account(steam_id)/'downloads'/identifier
         folder.parent.mkdir(parents=True, exist_ok=True)
         receipt = dict(schema_version=1, download_id=identifier, steam_id=steam_id, app_id=app_id(game['app_id']),
+                       name=game['name'],
                        branch=branch['name'], launch_id=launch['id'], executable=launch['executable'],
                        build_id=branch['build_id'], revision=branch['revision'], depots=branch['depots'],
                        remote_updated_at=branch['updated_at'], downloaded_at=datetime.now(timezone.utc).isoformat(timespec='seconds'),
@@ -271,6 +288,7 @@ class LibraryStore:
         cached['games'] = [g for g in cached['games'] if g['app_id'] != game['app_id']] + [game]
         self.write_json(self.account(steam_id)/'catalog.json', cached)
         check_cancelled()
+        self.write_json(self.account(steam_id)/'receipts'/(identifier+'.json'), receipt)
         pending.replace(folder)
         check_cancelled()
         self.write_json(self.pointer(steam_id, game['app_id'], branch['name'], launch['id']), receipt)

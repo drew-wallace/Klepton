@@ -54,6 +54,15 @@ void *kl_vulkan_lookup(const char *name);
 // symbol somewhere inside Unity's device selection.
 int   kl_vulkan_available(void);
 
+// WebKit BGRA frames become ordinary Vulkan images, without Android hardware
+// buffers. Uploads run on the guest queue before its next submit; the latest
+// pending frame replaces older frames without waiting for the GPU.
+unsigned long long kl_vulkan_webview_upload(unsigned long long image, unsigned w,
+                                            unsigned h, const void *bgra);
+void kl_vulkan_webview_close(unsigned long long image);
+void kl_vulkan_webview_publish(unsigned long long image);
+int kl_vulkan_webview_release(unsigned long long image);
+
 // ---------------------------------------------------------------------------
 // The eye-texture seam, for kl_ovrp.c
 // ---------------------------------------------------------------------------

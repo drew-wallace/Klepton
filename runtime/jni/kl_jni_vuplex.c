@@ -7,7 +7,35 @@
 #include "kl_webview.h"
 #include "kl_glfb.h"
 #include "kl_egl.h"
+#include "kl_vulkan.h"
 #include "kl_jni_vuplex.h"
+#include "klepton.h"
+
+static _Atomic(void (*)(uint64_t)) original_destroy_vulkan;
+static int browser_vulkan_supported(void) {
+    // This Java adapter uses ordinary VkImages, not AHardwareBuffer imports.
+    return kl_vulkan_guest_active();
+}
+static void browser_destroy_vulkan(uint64_t image) {
+    if(kl_vulkan_webview_release(image))return;
+    void (*original)(uint64_t)=atomic_load(&original_destroy_vulkan);
+    if(original)original(image);
+}
+void *klj_vuplex_interpose(const char *name,void *real) {
+    if(!name||!real)return NULL;
+    int capability=!strcmp(name,"WebView_deviceHasRequiredVulkanExtension");
+    int destroy=!strcmp(name,"WebView_destroyVulkanTexture");
+    if(!capability&&!destroy)return NULL;
+    long version=0;kl_jni_guest_version(&version,NULL);
+    const char *package=kl_jni_guest_package();
+    if(!package||strcmp(package,"com.LuckyVR.PokerStarsVR")||version!=1102036)return NULL;
+    size_t offset=0;const char *module=kl_addr_image(real,&offset);
+    if(!module||strcmp(module,"libVuplexWebViewAndroid.so")||
+       offset!=(capability?0x7afd0:0x7ac80))return NULL;
+    if(capability)return (void*)browser_vulkan_supported;
+    atomic_store(&original_destroy_vulkan,(void (*)(uint64_t))real);
+    return (void*)browser_destroy_vulkan;
+}
 
 static atomic_int alternative_pointer_input;
 static atomic_int alternative_keyboard_input;
@@ -17,6 +45,10 @@ static pthread_mutex_t user_agent_lock = PTHREAD_MUTEX_INITIALIZER;
 static char *global_user_agent;
 static int global_user_agent_mode=-1;
 static void apply_global_user_agent(void);
+static klj_val browser_clear_data(void *env,void *self,const klj_val *a,int n) {
+    kl_webview_clear_data();
+    return (klj_val){0};
+}
 
 static klj_val klj_vuplex_user_agent(void *env, void *self, const klj_val *args, int count) {
     (void)env; (void)self; (void)count;
@@ -78,6 +110,9 @@ static klj_val klj_vuplex_available(void *env, void *self, const klj_val *args, 
 typedef struct browser_view {
     uint64_t id, serial;
     unsigned texture, refs;
+    uint64_t vulkan_texture;
+    int vulkan;
+    int native_keyboard_requested;
     int destroyed, uploaded_width, uploaded_height, rendered;
     char *target;
     void *host;
@@ -142,7 +177,7 @@ static void browser_release(void *data) {
     while (*slot && *slot!=v) slot=&(*slot)->next;
     if (*slot) *slot=v->next;
     pthread_mutex_unlock(&browser_lock);
-    kl_webview_close(v->host); free(v->target); free(v);
+    kl_webview_close(v->host); kl_vulkan_webview_close(v->vulkan_texture); free(v->target); free(v);
 }
 void klj_vuplex_drain_events(void) {
     pthread_mutex_lock(&browser_lock);
@@ -174,6 +209,7 @@ void klj_vuplex_drain_events(void) {
         } else if (target) {
             void (*send)(void *,void *,void *,void *,void *)=kl_jni_native("com/unity3d/player/UnityPlayer","nativeUnitySendMessage","(Ljava/lang/String;Ljava/lang/String;[B)V");
             if (send) {
+                if(!strcmp(e->method,"HandleTextureChanged"))kl_vulkan_webview_publish(strtoull(e->value,NULL,10));
                 size_t len=strlen(e->value);
                 void *bytes=klj_new_array('B',NULL,(int)len);
                 memcpy(klj_arr(bytes)->data,e->value,len);
@@ -200,6 +236,7 @@ static klj_val browser_create(void *env,void *self,const klj_val *a,int n) {
     browser_view *v=calloc(1,sizeof *v);
     if (!v) return (klj_val){0};
     v->target=strdup(klj_str(a[0].l)?:""); v->texture=(unsigned)a[1].j; v->refs=1;
+    v->vulkan=!!a[4].j;
     pthread_mutex_lock(&browser_lock);
     v->id=++next_browser_id; v->next=browsers; browsers=v;
     pthread_mutex_unlock(&browser_lock);
@@ -225,6 +262,7 @@ static klj_val browser_destroy(void *env,void *self,const klj_val *a,int n) {
         void *host=v->host; v->host=NULL; v->destroyed=1;
         pthread_mutex_unlock(&browser_lock);
         kl_webview_close(host);
+        kl_vulkan_webview_close(v->vulkan_texture);
     }
     return (klj_val){0};
 }
@@ -257,17 +295,31 @@ static klj_val browser_resize(void *env,void *self,const klj_val *a,int n) {
 void klj_vuplex_render(void *object) {
     browser_view *v=browser_of(object);
     pthread_mutex_lock(&browser_lock);
-    if(!v||!v->host||!v->texture) {pthread_mutex_unlock(&browser_lock);return;}
+    if(!v||!v->host||(!v->texture&&!v->vulkan)) {pthread_mutex_unlock(&browser_lock);return;}
     if(!v->rendered)KLJ_LOG("WebKit render view=%llu context=%p",(unsigned long long)v->id,kl_egl_current_context());
     v->rendered=1;
     uint64_t serial=v->serial; int w=0,h=0;
     void *pixels=kl_webview_copy_frame(v->host,&serial,&w,&h);
     if(pixels) {
-        if(kl_glfb_upload_webview_bgra(v->texture,w,h,pixels,w!=v->uploaded_width||h!=v->uploaded_height)) {
+        int uploaded=0;uint64_t changed=0;
+        if(v->vulkan) {
+            if(v->vulkan_texture && (w!=v->uploaded_width||h!=v->uploaded_height)) {
+                kl_vulkan_webview_close(v->vulkan_texture);v->vulkan_texture=0;
+            }
+            uint64_t image=kl_vulkan_webview_upload(v->vulkan_texture,w,h,pixels);
+            if(image) {changed=image!=v->vulkan_texture?image:0;v->vulkan_texture=image;uploaded=1;}
+        } else uploaded=kl_glfb_upload_webview_bgra(v->texture,w,h,pixels,w!=v->uploaded_width||h!=v->uploaded_height);
+        if(uploaded) {
             if(!v->serial)KLJ_LOG("WebKit first texture upload view=%llu texture=%u %dx%d",(unsigned long long)v->id,v->texture,w,h);
             v->serial=serial; v->uploaded_width=w; v->uploaded_height=h;
         }
         free(pixels);
+        if(changed) {
+            uint64_t id=v->id;char value[32];snprintf(value,sizeof value,"%llu",(unsigned long long)changed);
+            pthread_mutex_unlock(&browser_lock);
+            browser_event_received(id,"HandleTextureChanged",value,0);
+            return;
+        }
     }
     pthread_mutex_unlock(&browser_lock);
 }
@@ -279,9 +331,32 @@ COMMAND(browser_forward,"forward",0)
 COMMAND(browser_reload,"reload",0)
 COMMAND(browser_pause,"paused",1)
 COMMAND(browser_resume,"paused",0)
+static klj_val browser_pause_all(void *env,void *self,const klj_val *a,int n) {
+    pthread_mutex_lock(&browser_lock);
+    for(browser_view *v=browsers;v;v=v->next)
+        if(v->host&&!v->destroyed)kl_webview_command(v->host,"paused",1);
+    pthread_mutex_unlock(&browser_lock);
+    return (klj_val){0};
+}
+static klj_val browser_resume_all(void *env,void *self,const klj_val *a,int n) {
+    pthread_mutex_lock(&browser_lock);
+    for(browser_view *v=browsers;v;v=v->next)
+        if(v->host&&!v->destroyed)kl_webview_command(v->host,"paused",0);
+    pthread_mutex_unlock(&browser_lock);
+    return (klj_val){0};
+}
 COMMAND(browser_focus,"focus",(int)a[0].j)
 COMMAND(browser_rendering,"rendering",(int)a[0].j)
 COMMAND(browser_focus_events,"focusedInputFieldEvents",(int)a[0].j)
+static klj_val browser_native_keyboard(void *env,void *self,const klj_val *a,int n) {
+    browser_view *v=browser_of(self);
+    WITH_BROWSER(v,v->native_keyboard_requested=!!a[0].j);
+    // This is an optional Android InputMethodManager policy, not a request to
+    // create a browser or report successful text entry. Our offscreen WebKit
+    // surface has no Android keyboard; the guest's sendKey path stays usable.
+    if(v&&a[0].j)KLJ_LOG_ONCE("Vuplex native Android keyboard unavailable; guest sendKey input remains available");
+    return (klj_val){0};
+}
 int klj_vuplex_is_fullscreen(void *object) {
     int result=0;browser_view *v=browser_of(object);
     WITH_BROWSER(v,result=kl_webview_is_fullscreen(v->host));return result;
@@ -300,13 +375,20 @@ POINTER(browser_move,"pointermove")
 static klj_val browser_click(void *env,void *self,const klj_val *a,int n) { browser_down(env,self,a,2);browser_up(env,self,a,2);return (klj_val){0}; }
 static klj_val browser_scroll(void *env,void *self,const klj_val *a,int n) {klj_vuplex_scroll(self,(int)a[0].j,(int)a[1].j,n>2?(int)a[2].j:0,n>2?(int)a[3].j:0);return (klj_val){0};}
 static klj_val browser_key(void *env,void *self,const klj_val *a,int n) {browser_view *v=browser_of(self);WITH_BROWSER(v,kl_webview_key(v->host,klj_str(a[0].l)));return (klj_val){0};}
+static klj_val browser_set_cookie(void *env,void *self,const klj_val *a,int n) {
+    if(n)kl_webview_set_cookie(klj_str(a[0].l));
+    return (klj_val){0};
+}
 
 const klj_binding klj_bind_vuplex[] = {
+    {"com/vuplex/webview/WebView3D", "<init>", "(Ljava/lang/String;IIIZZLcom/vuplex/webview/BiConsumer;Landroid/os/Message;)V", browser_create},
+    {"com/vuplex/webview/WebView3D", "<init>", "(Ljava/lang/String;IIIZZLcom/vuplex/webview/BiConsumer;Ljava/lang/Object;)V", browser_create},
     {"com/vuplex/webview/WebView3D", "<init>", "(Ljava/lang/String;IIIZZZLcom/vuplex/webview/BiConsumer;Ljava/lang/Object;)V", browser_create},
 
     {"com/vuplex/webview/WebView", "globallySetUserAgent", "(Ljava/lang/String;)V", klj_vuplex_user_agent},
     {"com/vuplex/webview/WebView", "globallySetUserAgent", "(Z)V", klj_vuplex_user_agent_mode},
     {"com/vuplex/webview/WebView", "setAutoplayEnabled", "(Z)V", klj_vuplex_autoplay},
+    {"com/vuplex/webview/WebView", "setCookie", "(Ljava/lang/String;)V", browser_set_cookie},
     {"com/vuplex/webview/WebView", "setDrmEnabled", "(Z)V", klj_vuplex_drm},
     {"com/vuplex/webview/WebView", "isWebViewAvailable", "()Z", klj_vuplex_available},
     {"com/vuplex/webview/WebView", "setAlternativePointerInputSystemEnabled", "(Z)V", klj_vuplex_pointer_input},
@@ -325,8 +407,12 @@ const klj_binding klj_bind_vuplex[] = {
     {"com/vuplex/webview/WebView", "reload", "()V", browser_reload},
     {"com/vuplex/webview/WebView", "pause", "()V", browser_pause},
     {"com/vuplex/webview/WebView", "resume", "()V", browser_resume},
+    {"com/vuplex/webview/WebView", "pauseAll", "()V", browser_pause_all},
+    {"com/vuplex/webview/WebView", "resumeAll", "()V", browser_resume_all},
+    {"com/vuplex/webview/WebView", "clearAllData", "()V", browser_clear_data},
     {"com/vuplex/webview/WebView", "setFocused", "(Z)V", browser_focus},
     {"com/vuplex/webview/WebView", "setFocusedInputFieldEventsEnabled", "(Z)V", browser_focus_events},
+    {"com/vuplex/webview/WebView", "setNativeOnScreenKeyboardEnabled", "(Z)V", browser_native_keyboard},
     {"com/vuplex/webview/WebView", "setRenderingEnabled", "(Z)V", browser_rendering},
     {"com/vuplex/webview/WebView", "setUserAgent", "(Ljava/lang/String;)V", browser_agent},
     {"com/vuplex/webview/WebView", "setUserAgent", "(Z)V", browser_agent_mode},

@@ -646,7 +646,7 @@ TARGETS = {
 # Local game profiles are maintained with their game-specific tooling.
 import runpy as _runpy
 from pathlib import Path as _Path
-for _game in ('4xvr', 'roborecall', 'walkabout', 'eleven'):
+for _game in ('4xvr', 'roborecall', 'walkabout', 'eleven', 'pistolwhip'):
     TARGETS.update(_runpy.run_path(str(_Path(__file__).resolve().parents[1] / 'games' / _game / 'targets.py'))['TARGETS'])
 
 for _profile in TARGETS.values():
@@ -737,10 +737,20 @@ def resolve(name):
         sys.exit(1)
     t = dict(TARGETS[name])
     t["name"] = name
-    t["bundle"] = bundle_for(name)
+    t["bundle"] = bundle_for(t.get('installer_target', name))
     if t["libs"] is None:
         t["libs"] = libs_for(t["srcdir"])
     return t
+
+
+def validate_runtime_defaults(values):
+    """Runtime environment defaults compiled from a profile/build manifest."""
+    import re
+    if not isinstance(values, dict) or any(
+            not isinstance(k, str) or not re.fullmatch(r'KL_[A-Z0-9_]+', k)
+            or not isinstance(v, str) or '\0' in v for k, v in values.items()):
+        raise ValueError('Invalid profile runtime defaults')
+    return dict(values)
 
 
 def resolve_manifest(path, name=None):
@@ -753,7 +763,9 @@ def resolve_manifest(path, name=None):
     profile = m.get('profile')
     if profile and profile not in TARGETS:
         raise ValueError('Unknown build profile')
-    key = profile or m['target']
+    key = m['target']
+    if profile and key != TARGETS[profile].get('installer_target', profile):
+        raise ValueError('Build manifest target does not match its profile')
     if name and name != key:
         raise ValueError('Build manifest target does not match KLEPTON_TARGET')
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,79}', key):
@@ -783,6 +795,9 @@ def resolve_manifest(path, name=None):
              host_assets=str(host_tree/'assets'), host_srcdir=str(host_tree/'lib/arm64-v8a'),
              steam_diagnostics=m['steam_mode'] == 'offline',
              guest_prepare=t.get('guest_prepare', '') if m.get('adapters', False) else '')
+    t['meta_app_id'] = m.get('meta_app_id', '')
+    t['import_id'] = m.get('import_id', '')
+    t['runtime_defaults'] = validate_runtime_defaults(m.get('runtime_defaults', t.get('runtime_defaults', {})))
     t['obb'] = m.get('obb_path', t['obb'])
     t['gles_version'] = m.get('gles_version', '')
     if t['gles_version'] not in ('', '3.0', '3.1'):
@@ -799,11 +814,14 @@ def build_target_source(t):
     import json
     fields = [t[k] for k in ('name', 'tree', 'apk', 'assets', 'srcdir', 'entry')]
     fields += [t.get('userdata', t['name']), t['obb']]
+    defaults = validate_runtime_defaults(t.get('runtime_defaults', {}))
+    settings = ''.join(f' setenv({json.dumps(k)}, {json.dumps(v)}, 0);' for k, v in sorted(defaults.items()))
     compatibility = f" kl_egl_set_gles_version(3, {t['gles_version'][-1]});" if t.get('gles_version') else ''
-    return ('#include "kl_target.h"\n' + ('#include "kl_egl.h"\n' if compatibility else '') +
+    return ('#include "kl_target.h"\n' + ('#include <stdlib.h>\n' if defaults else '') +
+            ('#include "kl_egl.h"\n' if compatibility else '') +
             'static const kl_target target = {\n' +
             ',\n'.join(json.dumps(v) for v in fields) + ',\nKL_GUEST_' + t['kind'].upper() + '\n};\n' +
-            'void kl_install_build_target(void) { kl_target_register_build(&target);' + compatibility + ' }\n')
+            'void kl_install_build_target(void) { kl_target_register_build(&target);' + settings + compatibility + ' }\n')
 
 
 # The runtime's copy of the table, as an X-macro list. Only the fields C needs

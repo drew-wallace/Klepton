@@ -1,4 +1,4 @@
-// Steam Link 2.0.23 JNI startup and IME bridge, without an APK or Steam host.
+// Steam Link JNI startup, display probes and IME bridge, without an APK or host.
 #include <assert.h>
 #include <string.h>
 #include "kl_jni.h"
@@ -48,6 +48,18 @@ int main(void) {
     instance_void(env, kl_jni_activity(),
                   instance_method(env, steam, "trySetupUsbNetwork", "()V"), NULL);
 
+    void *utils = kl_jni_class("com/valvesoftware/steamlink/SteamLinkUtils");
+    const char *hdr_signatures[] = {"(ZZ)Z", "(ZZZ)Z"};
+    for (int signature = 0; signature < 2; signature++) {
+        void *hdr = method(env, utils, "canDisplayHDRVideo", hdr_signatures[signature]);
+        // Every option combination must preserve the SDR capability answer.
+        for (int mask = 0; mask < (1 << (signature + 2)); mask++) {
+            argument options[] = {{.i = mask & 1}, {.i = (mask >> 1) & 1},
+                                  {.i = (mask >> 2) & 1}};
+            assert(!call_bool(env, utils, hdr, options));
+        }
+    }
+
     const kl_jni_method keyboard[] = {
         {"onNativeKeyDown", "(I)V", down},
         {"onNativeKeyUp", "(I)V", up},
@@ -71,5 +83,5 @@ int main(void) {
     kl_mono_key(1, backspace);
     kl_mono_key(0, backspace);
     assert(backspace == 67 && key_down == backspace && key_up == backspace);
-    puts("Steam Link startup, both SDL IME signatures, UTF-8 text and backspace passed");
+    puts("Steam Link startup, both HDR/SDL IME signatures, UTF-8 text and backspace passed");
 }

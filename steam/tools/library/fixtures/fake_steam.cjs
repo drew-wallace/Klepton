@@ -18,12 +18,12 @@ class FakeClient extends EventEmitter {
   logOn() {
     this.steamID = {getSteamID64: () => '76561198000000001'};
     setImmediate(() => {
-      if (scenario === 'connection') return this.emit('error', new Error('sensitive-client-error'));
+      if (scenario === 'connection') return this.emit('error', Object.assign(new Error('sensitive-client-error'), {eresult: 5}));
       this.emit('loggedOn'); this.emit('licenses');
     });
   }
   logOff() {}
-  getOwnedApps() { return scenario === 'no_license' ? [] : scenario === 'large' ? Array.from({length: 1500}, (_, i) => i + 10) : [10]; }
+  getOwnedApps() { return scenario === 'mixed' ? [10, 11, 12, 13, 14] : scenario === 'no_license' ? [] : scenario === 'large' ? Array.from({length: 1500}, (_, i) => i + 10) : [10]; }
   getOwnedPackages(filter) {
     if (filter.excludeShared !== true) throw new Error('shared licenses included');
     return [1];
@@ -32,8 +32,25 @@ class FakeClient extends EventEmitter {
   async getProductInfo(ids, packages) {
     if (packages.length) return {packages: {1: {packageinfo: {
       appids: scenario === 'scoped' ? [10, 11, 12] : this.getOwnedApps(), depotids: [100]}}}};
+    if (scenario === 'background_error') {
+      queueMicrotask(() => { throw new Error('sensitive-background-error'); });
+      return new Promise(() => {});
+    }
     if (scenario === 'scoped' && ids.some(id => ![10, 12].includes(id.appid))) throw new Error('unrelated metadata requested');
-    return {apps: Object.fromEntries(ids.map(id => [id.appid, {appinfo: app}]))};
+    return {apps: Object.fromEntries(ids.map(id => {
+      const info = structuredClone(app);
+      if ((scenario === 'mixed' || scenario === 'scoped') && id.appid === 12) info.common.categories = {};
+      if (scenario === 'mixed') {
+        if (id.appid === 11) {
+          info.config.launch[0].executable = 'game.exe';
+          info.config.launch[0].config.oslist = 'windows';
+          info.depots[100].config.oslist = 'windows';
+        }
+        if (id.appid === 13) info.depots.branches.public.pwdrequired = '1';
+        if (id.appid === 14) delete info.config.launch;
+      }
+      return [id.appid, {appinfo: info}];
+    }))};
   }
   async getManifest() {
     if (scenario === 'manifest') throw new Error('sensitive-manifest-error');

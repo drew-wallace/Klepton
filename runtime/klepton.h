@@ -176,6 +176,9 @@ void kl_madv_report(void);
 // _fire is the on-demand knob — the way to A/B this without a headset.
 void kl_mem_pressure_init(void);
 void kl_mem_pressure_poll(void);
+// Thread-safe OS event ingress; delivery occurs in the guest frame's _poll,
+// even when footprint polling is disabled. Repeated pending events coalesce.
+void kl_mem_pressure_request_system(int critical);
 void kl_mem_pressure_fire(const char *why);
 void kl_mem_report(void);
 

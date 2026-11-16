@@ -75,6 +75,17 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(failure['category'], 'runtime')
         self.assertIn('page texture', failure['message'])
 
+    def test_unity_graphics_failure_is_not_hidden_by_its_exit_callback(self):
+        log = ('[jni] AlertDialog.message: Unable to initialize the Unity Engine Graphics API.\n'
+               '[jni] no host implementation for com/unity3d/player/UnityPlayer.kill()V')
+        self.assertEqual(u.diagnose_logs(log)['category'], 'graphics')
+        self.assertIn('shutdown path', u.diagnose_logs(log)['message'])
+        self.assertEqual(u.diagnose_logs(log+'\n[jni] no host implementation for other.Method()V')['category'], 'runtime')
+        field = '[jni] no host value for field android/media/AudioAttributes.USAGE_GAME I'
+        self.assertEqual(u.diagnose_logs(field)['category'], 'runtime')
+        self.assertIn('USAGE_GAME', u.diagnose_logs(field)['message'])
+        self.assertEqual(u.diagnose_logs(log+'\n'+field)['category'], 'runtime')
+
     def test_missing_meta_account_is_distinguished_from_network_failure(self):
         for log in ('[plat] account service unavailable: ovr_User_GetLoggedInUser',
                     'Meta account services are unavailable on this host.'):
@@ -388,6 +399,46 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(str(self.apk), runner.log_path.read_text())
         with self.assertRaisesRegex(u.UtilityError, 'exit 7'):
             runner.run([sys.executable, '-c', 'import sys;sys.exit(7)'])
+
+    def test_pending_apple_agreement_takes_precedence_over_fallback_profile_error(self):
+        output = ('error: PLA Update available: agree to the latest Program License Agreement.\n'
+                  'error: Provisioning profile "iOS Team Provisioning Profile: *" '
+                  "doesn't include the Increased Memory Limit capability.")
+        message = u.provisioning_error(output)
+        self.assertIn('Account Holder', message)
+        self.assertIn('https://developer.apple.com/account/', message)
+        self.assertIn('retry Build & Install', message)
+        runner = u.Runner(self.root/'agreement-job')
+        with self.assertRaisesRegex(u.UtilityError, 'Apple has blocked provisioning'):
+            runner.run([sys.executable, '-c', 'import sys;print(sys.argv[1]);sys.exit(65)', output])
+
+    def test_profile_capability_and_unrelated_build_errors_are_distinguished(self):
+        output = ('Provisioning profile "wildcard" doesn\'t include the '
+                  'com.apple.developer.kernel.increased-memory-limit entitlement.')
+        self.assertIn('regenerate a provisioning profile', u.provisioning_error(output))
+        self.assertNotIn('License Agreement', u.provisioning_error(output))
+        self.assertEqual(u.provisioning_error('error: use of undeclared identifier'), '')
+        self.assertIn('selected signing team', u.provisioning_error('No Account for Team TEST'))
+
+    def test_missing_xcode_account_takes_precedence_over_fallback_profile_error(self):
+        for account_error in ('No Accounts: Add a new account in Accounts settings.',
+                              'No Account for Team TEST'):
+            with self.subTest(account_error=account_error):
+                output = (f'error: {account_error}\n'
+                          'error: Provisioning profile "iOS Team Provisioning Profile: *" '
+                          "doesn't include the Increased Memory Limit capability.")
+                message = u.provisioning_error(output)
+                self.assertIn('Sign in', message)
+                self.assertIn('Apple Accounts', message)
+                self.assertNotIn('regenerate a provisioning profile', message)
+                runner = u.Runner(self.root/'account-job')
+                with self.assertRaisesRegex(u.UtilityError, 'Xcode could not find an Apple account'):
+                    runner.run([sys.executable, '-c', 'import sys;print(sys.argv[1]);sys.exit(65)', output])
+
+    def test_pending_agreement_takes_precedence_over_missing_account(self):
+        output = ('error: PLA Update available: agree to the latest Program License Agreement.\n'
+                  'error: No Accounts: Add a new account in Accounts settings.')
+        self.assertIn('Account Holder', u.provisioning_error(output))
 
     def test_checkout_lock_and_signal_cancel(self):
         with u.checkout_lock(), self.assertRaisesRegex(u.UtilityError, 'Another'):

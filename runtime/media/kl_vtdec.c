@@ -84,6 +84,8 @@ struct kl_vtdec {
     int ring_head, ring_count;
 
     unsigned n_submitted, n_decoded, n_dropped, n_failed;
+    OSStatus session_failure;   // callback marks; submitting thread rebuilds
+    unsigned n_submit_failed, n_recoveries, n_recovery_skipped;
     unsigned n_stale_dropped, queue_high_water;
     // Parameter-set bookkeeping. Separated because they answer different
     // questions: how often the host re-describes the stream (n_set_change),
@@ -156,6 +158,11 @@ static void klvt_teardown_session(kl_vtdec *d) {
     if (d->fmt) { CFRelease(d->fmt); d->fmt = NULL; }
 }
 
+static int klvt_session_failed(OSStatus status) {
+    return status == kVTInvalidSessionErr || status == kVTVideoDecoderMalfunctionErr ||
+           status == kVTVideoDecoderNotAvailableNowErr;
+}
+
 static void klvt_output(void *decompressionOutputRefCon, void *sourceFrameRefCon,
                         OSStatus status, VTDecodeInfoFlags flags,
                         CVImageBufferRef image, CMTime pts, CMTime duration) {
@@ -164,9 +171,10 @@ static void klvt_output(void *decompressionOutputRefCon, void *sourceFrameRefCon
 
     if (status != noErr || !image) {
         pthread_mutex_lock(&d->lock);
-        d->n_failed++;
+        unsigned failed = ++d->n_failed;
+        if (klvt_session_failed(status)) d->session_failure = status;
         pthread_mutex_unlock(&d->lock);
-        if (status != noErr)
+        if (status != noErr && (failed <= 4 || failed % 128 == 0))
             fprintf(stderr, "  [vtdec] decode failed: OSStatus %d\n", (int)status);
         return;
     }
@@ -495,6 +503,41 @@ static int klvt_hold(kl_vtdec *d, int slot, const uint8_t *p, size_t n) {
     return 1;
 }
 
+// VideoToolbox can invalidate a session after a decoder malfunction or host
+// suspension. Repeatedly feeding it never recovers. Retire it on the submitting
+// thread, after callbacks finish, and resume only at a random-access frame.
+// Rebuilding on its own callback thread would deadlock the asynchronous drain.
+static int klvt_recover(kl_vtdec *d, int keyframe) {
+    pthread_mutex_lock(&d->lock);
+    OSStatus failure = d->session_failure;
+    if (failure && !keyframe) d->n_recovery_skipped++;
+    pthread_mutex_unlock(&d->lock);
+    if (!failure) return 0;
+    if (!keyframe) return 1;
+
+    klvt_teardown_session(d);
+    pthread_mutex_lock(&d->lock);
+    while (d->ring_count) {
+        CVPixelBufferRelease(d->ring[d->ring_head].pb);
+        d->ring[d->ring_head].pb = NULL;
+        d->ring_head = (d->ring_head + 1) % KLVT_RING;
+        d->ring_count--; d->n_dropped++;
+    }
+    d->session_failure = 0;
+    unsigned attempts = ++d->n_recoveries;
+    pthread_mutex_unlock(&d->lock);
+    if (attempts <= 4 || attempts % 60 == 0)
+        fprintf(stderr,"  [vtdec] recovering failed session (%d) at keyframe, attempt %u\n",
+                (int)failure, attempts);
+    if (klvt_rebuild(d) < 0 || !d->sess) {
+        pthread_mutex_lock(&d->lock);
+        d->session_failure = failure;
+        pthread_mutex_unlock(&d->lock);
+        return -1;
+    }
+    return 0;
+}
+
 int kl_vtdec_submit(kl_vtdec *d, const uint8_t *annexb, size_t len,
                     int64_t pts_us) {
     if (!d || !annexb || !len) return -1;
@@ -506,9 +549,12 @@ int kl_vtdec_submit(kl_vtdec *d, const uint8_t *annexb, size_t len,
     size_t pos = 0, payload = 0, n_nals = 0;
     const uint8_t *nal;
     size_t nal_len;
+    int keyframe = 0;
     d->sets_changed = 0;
     while ((nal = next_nal(annexb, len, &pos, &nal_len)) != NULL) {
-        int slot = param_slot(d->codec, nal_type(d->codec, nal[0]));
+        int type = nal_type(d->codec, nal[0]);
+        if (d->codec == KLVT_AVC ? type == 5 : type >= 16 && type <= 21) keyframe = 1;
+        int slot = param_slot(d->codec, type);
         if (slot >= 0) {
             d->sets_changed |= klvt_hold(d, slot, nal, nal_len);
             continue;
@@ -517,6 +563,8 @@ int kl_vtdec_submit(kl_vtdec *d, const uint8_t *annexb, size_t len,
         n_nals++;
     }
 
+    int recovered = klvt_recover(d, keyframe);
+    if (recovered) return recovered < 0 ? -1 : 0;
     if (d->sets_changed || (!d->sess && d->set[KLVT_SPS])) {
         if (klvt_rebuild(d) < 0) return -1;
     }
@@ -566,10 +614,14 @@ int kl_vtdec_submit(kl_vtdec *d, const uint8_t *annexb, size_t len,
 
     pthread_mutex_lock(&d->lock);
     d->n_submitted++;
+    unsigned failed = d->n_submit_failed;
+    if (st != noErr) failed = ++d->n_submit_failed;
+    if (klvt_session_failed(st)) d->session_failure = st;
     pthread_mutex_unlock(&d->lock);
 
     if (st != noErr) {
-        fprintf(stderr, "  [vtdec] decode submit failed: OSStatus %d\n", (int)st);
+        if (failed <= 4 || failed % 128 == 0)
+            fprintf(stderr, "  [vtdec] decode submit failed: OSStatus %d\n", (int)st);
         return -1;
     }
     return 0;
@@ -667,6 +719,9 @@ void kl_vtdec_report(FILE *f) {
             d->n_set_change[KLVT_VPS], d->n_set_change[KLVT_SPS],
             d->n_set_change[KLVT_PPS], d->n_fmt_built, d->n_fmt_swapped,
             d->n_sess_created, d->n_sess_created == 1 ? "" : "s");
+    fprintf(f, "  recovery: %u attempts, %u frames skipped awaiting keyframe, "
+               "%u failed submissions, pending OSStatus %d\n",
+            d->n_recoveries,d->n_recovery_skipped,d->n_submit_failed,(int)d->session_failure);
     if (d->dump)
         fprintf(f, "  %u access units dumped to KL_VTDEC_DUMP\n", d->dump_n);
     pthread_mutex_unlock(&d->lock);

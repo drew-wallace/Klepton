@@ -43,6 +43,11 @@ static unsigned         g_alarm = 20;
 static unsigned         g_frames;
 static int              g_gap_only;
 
+const char *kl_driver_unity_arguments(void) {
+    const char *override = getenv("KL_UNITY_ARGS");
+    return override ? override : kl_bigscreen_unity_arguments();
+}
+
 // The Unity guest's handle and its resolved nativeRender, kept between _begin
 // and each _frame. A NULL g_render is how _frame knows _begin has not run.
 static void *g_thiz, *g_render;
@@ -247,11 +252,13 @@ static int boot_unity(FILE *out) {
     phase("initJni");
     P(out, "\n=== UnityPlayer.initJni%s -> %s-arg call ===\n",
       ijsig ? ijsig : "<sig unrecorded>", initJni3 ? "3" : initJni2 ? "2" : "1");
+    if (*kl_driver_unity_arguments())
+        P(out, "  Unity launch arguments: %s\n", kl_driver_unity_arguments());
     void *thiz = kl_jni_new_object("com/unity3d/player/UnityPlayer");
     kl_jni_local_frame_push();
     if (initJni3)
         ((void (*)(void *, void *, void *, int, void *))initJni)(
-            kl_jni_env(), thiz, kl_jni_activity(), 0, kl_jni_new_string(kl_bigscreen_unity_arguments()));
+            kl_jni_env(), thiz, kl_jni_activity(), 0, kl_jni_new_string(kl_driver_unity_arguments()));
     else if (initJni2)
         ((void (*)(void *, void *, void *, int))initJni)(
             kl_jni_env(), thiz, kl_jni_activity(), 0);

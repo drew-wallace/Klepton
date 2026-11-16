@@ -28,6 +28,11 @@
 #include "kl_audio.h"
 
 #define KL_AUDIO_MAX_CH 2
+#if !TARGET_OS_OSX || defined(KL_AUDIO_DUPLEX_TEST)
+#define KL_AUDIO_DUPLEX 1
+#else
+#define KL_AUDIO_DUPLEX 0
+#endif
 
 // ---- state ----
 static AudioUnit    g_unit;
@@ -68,20 +73,35 @@ static _Atomic size_t   g_w, g_r;
 // source is the old behaviour exactly (add into a zeroed slot == a copy). A
 // small lock serialises the producers (never the reader): they run on feeder
 // threads that can afford to block, the reader cannot.
-#define KL_AU_MAX_SRC 4
+#define KL_AU_MAX_SRC 8
 static const void      *g_src_key[KL_AU_MAX_SRC];
 static uint64_t         g_src_pos[KL_AU_MAX_SRC];   // next write frame, per source
 static int              g_src_n;
+static int              g_src_live[KL_AU_MAX_SRC];
+static unsigned         g_src_rate[KL_AU_MAX_SRC], g_src_ch[KL_AU_MAX_SRC];
+static double           g_src_phase[KL_AU_MAX_SRC];
+static float            g_src_prev[KL_AU_MAX_SRC][KL_AUDIO_MAX_CH];
+static unsigned long    g_output_epoch;
 static pthread_mutex_t  g_wlock = PTHREAD_MUTEX_INITIALIZER;
 
 // NULL identifies the OpenSL/default producer and must be registered like any
 // other key. Otherwise Unity's OpenSL output and FMOD's Java output share one
 // cursor, concatenating silent Unity blocks with game audio instead of mixing.
-// Caller holds g_wlock. Overflow folds into slot 0 rather than dropping audio.
+// Caller holds g_wlock. A full table refuses a source instead of reusing a live clock.
 static int src_slot(const void *key) {
-    for (int i = 0; i < g_src_n; i++) if (g_src_key[i] == key) return i;
-    if (g_src_n < KL_AU_MAX_SRC) { g_src_key[g_src_n] = key; g_src_pos[g_src_n] = 0; return g_src_n++; }
-    return 0;
+    for (int i = 0; i < g_src_n; i++)
+        if (g_src_live[i] && g_src_key[i] == key) return i;
+    for (int i = 0; i < KL_AU_MAX_SRC; i++) {
+        if (i < g_src_n && g_src_live[i]) continue;
+        if (i >= g_src_n) g_src_n = i + 1;
+        g_src_live[i] = 1; g_src_key[i] = key;
+        g_src_pos[i] = atomic_load(&g_r);
+        g_src_rate[i] = g_src_ch[i] = 0;
+        g_src_phase[i] = 0;
+        memset(g_src_prev[i], 0, sizeof g_src_prev[i]);
+        return i;
+    }
+    return -1;
 }
 
 // A driver-set floor for the fill target, in ms (0 = none). See kl_audio_open.
@@ -89,8 +109,6 @@ static unsigned         g_latency_override_ms;
 void kl_audio_set_latency_ms(unsigned ms) { g_latency_override_ms = ms; }
 
 // Resampler state, producer-side only.
-static double g_pos;                     // position in the input stream
-static float  g_prev[KL_AUDIO_MAX_CH];   // last input frame of the last chunk
 static float *g_scratch;                 // converted+resampled staging
 static size_t g_scratch_frames;
 
@@ -109,29 +127,26 @@ static unsigned long    g_silent_buffers;
 
 // ---- microphone capture state ----
 //
-// A SECOND, independent RemoteIO unit — capture only — so nothing here can
-// perturb the output unit above. It is armed by the KleptonMic toggle
-// (g_mic_enabled) and only actually built when a guest opens an input stream
-// (kl_audio_mic_open), which is what keeps the hardware — and the visionOS
-// permission prompt — untouched until a person opts in AND a guest asks.
+// Capture stays lazy behind the microphone toggle. On visionOS g_cap_unit
+// aliases g_unit while recording: both directions use one VoiceProcessingIO,
+// with the actual speaker PCM as its echo reference. The macOS test host keeps
+// an independent raw HAL capture unit.
 //
-// The ring is int16 interleaved at the device capture rate, and it is
-// single-producer/single-consumer exactly like the output ring, but the roles
-// are swapped: the real-time INPUT callback is the producer, and the guest's
-// reader thread (kl_aaudio.c) is the consumer. So the callback owns g_mic_w and
-// the reader owns g_mic_r, and neither takes a lock. Resampling and format /
-// channel conversion to the guest's requested shape live on the CONSUMER side
-// (kl_aaudio.c), for the same reason the output path keeps them off the render
-// thread: kl_audio_mic_read_i16 hands back exactly what the hardware gave, at
-// kl_audio_mic_rate() / kl_audio_mic_channels().
+// The input callback writes native-rate interleaved int16 into an SPSC ring.
+// Guest reader threads perform filtered resampling and channel mapping. Neither
+// device callback allocates, locks, logs, or calls guest code.
 static AudioUnit        g_cap_unit;
 static _Atomic int      g_mic_enabled;    // the KleptonMic toggle
-static int              g_mic_open;       // a capture unit exists and is running
+static _Atomic int      g_mic_voice_processing;
+static int              g_mic_open;       // guest capture is open (also during recovery)
 static int              g_mic_host_stopped; // retained capture paused by the host
-static unsigned         g_mic_rate;       // the CLIENT rate the ring holds (== guest rate when the converter took it)
+static unsigned         g_mic_rate;       // stable capture client rate advertised to readers
 static unsigned         g_mic_dev_rate;   // the hardware's own capture rate, for the log / fallback
 static unsigned         g_mic_ch = 1;     // capture channels (1 or 2)
-static pthread_mutex_t  g_mic_lock = PTHREAD_MUTEX_INITIALIZER;   // unit lifecycle
+// Output and input share one lifecycle lock, so route changes cannot dispose
+// a duplex unit underneath a reader, a microphone toggle, or output recovery.
+static int              g_duplex;
+static int              cap_unit_create(unsigned want_rate, unsigned want_ch);
 
 static int16_t         *g_mic_ring;
 static size_t           g_mic_cap;        // frames
@@ -139,17 +154,26 @@ static _Atomic size_t   g_mic_w, g_mic_r;
 
 // The input callback pulls the hardware's frames into this fixed scratch and
 // then copies them into the ring — a real-time callback may not allocate, so the
-// AudioBufferList and its backing buffer are built once at open. g_cap_abl has
-// the single interleaved buffer AudioBufferList's flexible mBuffers[1] provides.
-static AudioBufferList  g_cap_abl;
+// AudioBufferList and its backing buffers are built once at open. The PHASE
+// graph behind visionOS duplex I/O requires canonical float32 planes; convert
+// those to the existing interleaved int16 reader contract before publication.
+static struct { UInt32 mNumberBuffers; AudioBuffer mBuffers[KL_AUDIO_MAX_CH]; } g_cap_abl;
 static int16_t         *g_cap_scratch;
+static float           *g_cap_float_scratch;
 static size_t           g_cap_scratch_frames;
+static void cap_free_scratch(void) {
+    free(g_cap_scratch);g_cap_scratch=NULL;
+    free(g_cap_float_scratch);g_cap_float_scratch=NULL;
+    g_cap_scratch_frames=0;
+}
 
 // Counters for the report. Producer-side (the callback) writes the capture/drop
 // pair with relaxed atomics — no log or malloc on that thread — and g_mic_peak
 // is the capture twin of g_peak: "did the microphone actually hear anything".
 static _Atomic uint64_t g_mic_frames_cap, g_mic_frames_drop, g_mic_frames_read;
 static _Atomic int      g_mic_peak;
+static _Atomic int      g_mic_render_error;
+static const char      *g_mic_unit_name = "?";
 
 static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 
@@ -231,8 +255,15 @@ static OSStatus render_cb(void *ref, AudioUnitRenderActionFlags *flags,
     if (!io || io->mNumberBuffers < 1) return noErr;
     float *dst = (float *)io->mBuffers[0].mData;
     size_t want = nframes;
-    if (!dst || !g_ring) {
-        if (dst) memset(dst, 0, io->mBuffers[0].mDataByteSize);
+    int planar=io->mNumberBuffers>1;
+    int valid=planar?io->mNumberBuffers==g_out_ch:io->mBuffers[0].mNumberChannels==g_out_ch;
+    for(UInt32 ch=0;ch<io->mNumberBuffers;ch++)
+        valid=valid&&io->mBuffers[ch].mData&&
+            (!planar||io->mBuffers[ch].mNumberChannels==1)&&
+            io->mBuffers[ch].mDataByteSize>=nframes*sizeof(float)*(planar?1:g_out_ch);
+    if (!valid || !g_ring) {
+        for(UInt32 ch=0;ch<io->mNumberBuffers;ch++)
+            if(io->mBuffers[ch].mData)memset(io->mBuffers[ch].mData,0,io->mBuffers[ch].mDataByteSize);
         if (flags) *flags |= kAudioUnitRenderAction_OutputIsSilence;
         return noErr;
     }
@@ -246,8 +277,13 @@ static OSStatus render_cb(void *ref, AudioUnitRenderActionFlags *flags,
         size_t off = (r + done) % g_cap;
         size_t run = g_cap - off;
         if (run > take - done) run = take - done;
-        memcpy(dst + done * g_out_ch, g_ring + off * g_out_ch,
-               run * g_out_ch * sizeof(float));
+        if(planar){
+            for(unsigned ch=0;ch<g_out_ch;ch++){
+                float *plane=io->mBuffers[ch].mData;
+                for(size_t i=0;i<run;i++)plane[done+i]=g_ring[(off+i)*g_out_ch+ch];
+            }
+        }else memcpy(dst + done * g_out_ch, g_ring + off * g_out_ch,
+                      run * g_out_ch * sizeof(float));
         // Zero what we just took: the ring is a mix accumulator now, and a slot
         // reused on the next wrap must start from silence so producers can add
         // into it. Harmless for the single-source case (it re-zeros a slot the
@@ -256,7 +292,10 @@ static OSStatus render_cb(void *ref, AudioUnitRenderActionFlags *flags,
         done += run;
     }
     if (take < want) {
-        memset(dst + take * g_out_ch, 0, (want - take) * g_out_ch * sizeof(float));
+        if(planar){
+            for(unsigned ch=0;ch<g_out_ch;ch++)
+                memset((float*)io->mBuffers[ch].mData+take,0,(want-take)*sizeof(float));
+        }else memset(dst + take * g_out_ch, 0, (want - take) * g_out_ch * sizeof(float));
         atomic_fetch_add_explicit(&g_frames_silent, want - take, memory_order_relaxed);
         // An underrun while the guest thinks it is playing is a real dropout;
         // one while it is stopped is just an idle device, and counting those
@@ -304,6 +343,14 @@ static double measure_device_rate(AudioUnit u) {
 }
 
 static int unit_create(void) {
+#if KL_AUDIO_DUPLEX
+    if (g_mic_open) {
+        if (cap_unit_create(0, 0) != 0) return -1;
+        g_unit = g_cap_unit;
+        g_duplex = 1;
+        return 0;
+    }
+#endif
     AudioComponentDescription desc = {0};
     desc.componentType = kAudioUnitType_Output;
 #if TARGET_OS_OSX
@@ -352,6 +399,12 @@ static void unit_destroy(void) {
     g_running = 0;
     AudioUnitUninitialize(g_unit);
     AudioComponentInstanceDispose(g_unit);
+    if (g_duplex) {
+        atomic_store(&g_mic_voice_processing, 0);
+        g_cap_unit = NULL;
+        g_duplex = 0;
+        g_mic_host_stopped = 1;
+    }
     g_unit = NULL;
 }
 
@@ -365,7 +418,29 @@ static int unit_start(void) {
         return -1;
     }
     g_running = 1;
+    if (g_duplex) g_mic_host_stopped = 0;
     atomic_store_explicit(&g_last_render_ns, now_ns(), memory_order_relaxed);
+    return 0;
+}
+
+// Called with lifecycle + writer locks held and device callbacks stopped.
+// A waiting producer carries the previous epoch and abandons that old block.
+static void reset_output_clock(void) {
+    g_output_epoch++;
+    atomic_store(&g_w, 0); atomic_store(&g_r, 0);
+    if (g_ring) memset(g_ring, 0, g_cap * g_out_ch * sizeof(float));
+    memset(g_src_pos, 0, sizeof g_src_pos);
+    memset(g_src_phase, 0, sizeof g_src_phase);
+    memset(g_src_prev, 0, sizeof g_src_prev);
+}
+
+static int resize_output_ring(void) {
+    if (!g_open || g_cap == (size_t)g_out_rate + 1) return 0;
+    size_t capacity = (size_t)g_out_rate + 1;
+    float *ring = calloc(capacity * g_out_ch, sizeof(float));
+    if (!ring) return -1;
+    if (g_cap > 1) g_target = (size_t)((double)g_target * g_out_rate / (double)(g_cap - 1));
+    free(g_ring); g_ring = ring; g_cap = capacity;
     return 0;
 }
 
@@ -385,18 +460,25 @@ int kl_audio_open(unsigned rate, unsigned channels, unsigned bits) {
     }
 
     pthread_mutex_lock(&g_lock);
-    if (g_open && rate == g_in_rate && channels == g_in_ch && bits == g_in_bits) {
+    // One hardware sink. Every producer supplies its own PCM format on write;
+    // opening another stream must not reinterpret or reset existing streams.
+    if (g_open) {
         pthread_mutex_unlock(&g_lock);
         return 0;
     }
-    if (g_open) unit_destroy();
+    pthread_mutex_lock(&g_wlock);
+    // Capture may have opened first. Stop its callback before allocating the
+    // output ring, then rebuild the same duplex unit rather than adding a sink.
+    if (g_unit) unit_destroy();
     g_open = 0;
 
     g_in_rate = rate; g_in_ch = channels; g_in_bits = bits;
-    g_out_ch = channels == 1 ? 1 : 2;
+    g_out_ch = 2;
     g_trace = kl_env_on("KL_AUDIO_TRACE", 0);
 
-    if (unit_create() != 0) { pthread_mutex_unlock(&g_lock); return -1; }
+    if (unit_create() != 0) {
+        pthread_mutex_unlock(&g_wlock); pthread_mutex_unlock(&g_lock); return -1;
+    }
 
     // The ring holds a full second so a scheduling hiccup on either side cannot
     // wrap it; the *fill target* is what sets latency, and it is much smaller.
@@ -419,12 +501,12 @@ int kl_audio_open(unsigned rate, unsigned channels, unsigned bits) {
     free(g_scratch);
     g_scratch_frames = 0;
     g_scratch = NULL;
-    if (!g_ring) { unit_destroy(); pthread_mutex_unlock(&g_lock); return -1; }
+    if (!g_ring) {
+        unit_destroy(); pthread_mutex_unlock(&g_wlock); pthread_mutex_unlock(&g_lock); return -1;
+    }
 
     g_target = (size_t)(g_out_rate * lat_ms / 1000.0);
-    atomic_store(&g_w, 0); atomic_store(&g_r, 0);
-    g_pos = 0.0;
-    memset(g_prev, 0, sizeof g_prev);
+    reset_output_clock();
     g_open = 1;
     if (!g_session_managed) g_interrupted = 0;
     // Once per process, not once per open: FMOD destroys and re-creates the
@@ -448,6 +530,7 @@ int kl_audio_open(unsigned rate, unsigned channels, unsigned bits) {
     // one the OS is free to tear down harder than a running silent one, and the
     // render callback's timestamp is the watchdog's only heartbeat.
     unit_start();
+    pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_lock);
     watchdog_start();
 
@@ -460,6 +543,7 @@ int kl_audio_open(unsigned rate, unsigned channels, unsigned bits) {
 
 void kl_audio_close(void) {
     pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_wlock);
     g_playing = 0;
     unit_destroy();
     // NOT dump_close(): FMOD destroys and re-creates the player during startup,
@@ -469,6 +553,11 @@ void kl_audio_close(void) {
     free(g_ring);   g_ring = NULL;   g_cap = 0;
     free(g_scratch); g_scratch = NULL; g_scratch_frames = 0;
     atomic_store(&g_w, 0); atomic_store(&g_r, 0);
+    reset_output_clock();
+#if KL_AUDIO_DUPLEX
+    if (g_mic_open && unit_create() == 0) unit_start();
+#endif
+    pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -493,12 +582,14 @@ void kl_audio_flush(void) {
     // exclusive ownership of that cursor. Flushes happen on a play-state change,
     // so the cost is not on any hot path.
     pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_wlock);
     int was = g_running;
     if (was && g_unit) { AudioOutputUnitStop(g_unit); g_running = 0; }
-    atomic_store(&g_r, atomic_load(&g_w));
-    g_pos = 0.0;
-    memset(g_prev, 0, sizeof g_prev);
+    reset_output_clock();
+    memset(g_src_phase, 0, sizeof g_src_phase);
+    memset(g_src_prev, 0, sizeof g_src_prev);
     if (was) unit_start();
+    pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -509,7 +600,10 @@ void kl_audio_interrupted(int began) {
     if (began) {
         g_interrupted = 1;
         pthread_mutex_lock(&g_lock);
-        if (g_unit && g_running) { AudioOutputUnitStop(g_unit); g_running = 0; }
+        if (g_unit && g_running) {
+            AudioOutputUnitStop(g_unit); g_running = 0;
+            if (g_duplex) g_mic_host_stopped = 1;
+        }
         pthread_mutex_unlock(&g_lock);
     } else {
         g_interrupted = 0;
@@ -523,28 +617,19 @@ void kl_audio_interrupted(int began) {
 // the unit initialised against a sample rate the hardware no longer has, and
 // that unit will start successfully and never call back.
 int kl_audio_restart(void) {
-    if (!g_open) return -1;
+    if (!g_open && !g_mic_open) return -1;
     pthread_mutex_lock(&g_lock);
     if (g_interrupted || g_host_suspended) { pthread_mutex_unlock(&g_lock); return -1; }
+    pthread_mutex_lock(&g_wlock);
     unit_destroy();
     int rc = unit_create();
+    if (rc == 0) rc = resize_output_ring();
     if (rc == 0) {
-        // A rate change means the ring's contents are at the wrong rate; drop
-        // them rather than play them slow. Latency target scales with the rate.
-        if (g_cap != (size_t)g_out_rate + 1) {
-            size_t frames = (size_t)g_out_rate + 1;
-            float *nr = calloc(frames * g_out_ch, sizeof(float));
-            if (nr) {
-                free(g_ring); g_ring = nr;
-                g_target = (size_t)((double)g_target * g_out_rate / (double)(g_cap - 1));
-                g_cap = frames;
-            }
-        }
-        atomic_store(&g_r, atomic_load(&g_w));
-        g_pos = 0.0;
-        memset(g_prev, 0, sizeof g_prev);
-        unit_start();
+        reset_output_clock();
+        atomic_store(&g_mic_r, atomic_load(&g_mic_w));
+        rc = unit_start();
     }
+    pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_lock);
     g_restarts++;
     fprintf(stderr, "  [au] restart %s (device now %.0f Hz)\n",
@@ -553,13 +638,15 @@ int kl_audio_restart(void) {
 }
 
 void kl_audio_session_ready(double sample_rate) {
+    double previous_rate = g_session_rate;
     g_session_rate = sample_rate;
     fprintf(stderr, "  [au] audio session ready, %.0f Hz\n", sample_rate);
     // If a unit already exists it was built against a guess; rebuild it against
     // the real rate. Before the session is active the hardware format reads as
     // a default, and a unit initialised against the wrong rate is the failure
     // that presents as "everything succeeded and nothing is audible".
-    if (g_open && fabs(sample_rate - g_out_rate) > 1.0) kl_audio_restart();
+    double comparison = g_duplex ? previous_rate : g_out_rate;
+    if ((g_open || g_mic_open) && fabs(sample_rate - comparison) > 1.0) kl_audio_restart();
 }
 
 void kl_audio_set_session_managed(int managed) {
@@ -571,10 +658,10 @@ void kl_audio_set_session_managed(int managed) {
 // int16 interleaved at the guest rate -> float32 interleaved at the device
 // rate, with linear interpolation across the chunk boundary. The virtual input
 // stream is v[-1] = the last frame of the previous chunk, v[0..n-1] = this one,
-// so g_pos carries fractional position between calls and a rate ratio of
+// so each source carries fractional position between calls and a rate ratio of
 // exactly 1.0 degenerates to a straight copy.
-static size_t convert(const int16_t *src, size_t n, float **out) {
-    double ratio = (double)g_in_rate / g_out_rate;
+static size_t convert(int slot, const int16_t *src, size_t n, float **out) {
+    double ratio = (double)g_src_rate[slot] / g_out_rate;
     size_t max_out = (size_t)((double)(n + 2) / ratio) + 2;
     if (max_out > g_scratch_frames) {
         float *p = realloc(g_scratch, max_out * g_out_ch * sizeof(float));
@@ -583,8 +670,8 @@ static size_t convert(const int16_t *src, size_t n, float **out) {
         g_scratch_frames = max_out;
     }
     float *dst = g_scratch;
-    unsigned ich = g_in_ch, och = g_out_ch;
-    double pos = g_pos;
+    unsigned ich = g_src_ch[slot], och = g_out_ch;
+    double pos = g_src_phase[slot];
     size_t produced = 0;
 
     // The frame fetch folds channel mapping in: mono fans out, anything wider
@@ -596,7 +683,7 @@ static size_t convert(const int16_t *src, size_t n, float **out) {
     // interpolation weight there is 0, so the value is discarded — but the read
     // is not, and it is two bytes past the guest's buffer.
     #define FETCH(idx, ch) \
-        ((idx) < 0 ? g_prev[ch] \
+        ((idx) < 0 ? g_src_prev[slot][ch] \
                    : (float)src[(size_t)((idx) < (long)n ? (idx) : (long)n - 1) * ich \
                                 + ((ch) < ich ? (ch) : 0)] * (1.0f / 32768.0f))
 
@@ -614,10 +701,9 @@ static size_t convert(const int16_t *src, size_t n, float **out) {
 
     if (n > 0) {
         for (unsigned c = 0; c < och; c++)
-            g_prev[c] = (float)src[(n - 1) * ich + (c < ich ? c : 0)] * (1.0f / 32768.0f);
+            g_src_prev[slot][c] = (float)src[(n - 1) * ich + (c < ich ? c : 0)] * (1.0f / 32768.0f);
     }
-    g_pos = pos - (double)n;
-    if (g_pos < -1.0) g_pos = -1.0;
+    g_src_phase[slot] = pos - (double)n;
     *out = dst;
     return produced;
 }
@@ -639,7 +725,7 @@ static size_t convert(const int16_t *src, size_t n, float **out) {
 // second for as long as that lasts, which buries the one line that says what
 // actually happened.
 static void watchdog(void) {
-    if (!g_open || g_interrupted || g_host_suspended) return;
+    if ((!g_open && !g_mic_open) || g_interrupted || g_host_suspended) return;
     uint64_t last = atomic_load_explicit(&g_last_render_ns, memory_order_relaxed);
     uint64_t idle = now_ns() - last;
     uint64_t limit = 500ull * 1000000ull;
@@ -655,7 +741,7 @@ static void watchdog(void) {
     if (idle <= limit) { g_wd_streak = 0; return; }
     // The callback has genuinely stopped. Only worth rebuilding if the guest still
     // wants sound; a stopped guest is just an idle device, not a fault to fight.
-    if (!g_playing)    { g_wd_streak = 0; return; }
+    if (!g_playing && !g_mic_open) { g_wd_streak = 0; return; }
     if (g_wd_streak < 4 || (g_wd_streak % 20) == 0)
         fprintf(stderr, "  [au] no render callback for %.2f s — restarting%s\n",
                 (double)idle / 1e9,
@@ -742,15 +828,18 @@ static void watchdog_start(void) {
 void kl_audio_suspend(void) {
     g_host_suspended = 1;
     pthread_mutex_lock(&g_lock);
-    if (g_unit && g_running) { AudioOutputUnitStop(g_unit); g_running = 0; }
+    if (g_unit && g_running) {
+            AudioOutputUnitStop(g_unit); g_running = 0;
+            if (g_duplex) g_mic_host_stopped = 1;
+        }
     pthread_mutex_unlock(&g_lock);
-    pthread_mutex_lock(&g_mic_lock);
-    if (g_cap_unit && g_mic_open && !g_mic_host_stopped) {
+    pthread_mutex_lock(&g_lock);
+    if (g_cap_unit && g_mic_open && !g_mic_host_stopped && !g_duplex) {
         AudioOutputUnitStop(g_cap_unit);
         g_mic_host_stopped = 1;
         atomic_store(&g_mic_r, atomic_load(&g_mic_w));
     }
-    pthread_mutex_unlock(&g_mic_lock);
+    pthread_mutex_unlock(&g_lock);
 }
 
 // The host has reactivated its session. A window closing during immersion can
@@ -762,7 +851,7 @@ void kl_audio_resume(void) {
     int was = atomic_exchange(&g_interrupted, 0);
     g_interrupt_ns = now_ns();
     g_wd_streak = 0;
-    if (g_open) {
+    if (g_open || (KL_AUDIO_DUPLEX && g_mic_open)) {
         pthread_mutex_lock(&g_lock);
         uint64_t last = atomic_load_explicit(&g_last_render_ns, memory_order_relaxed);
         int healthy = g_unit && last && now_ns() - last <= 500ull * 1000000ull;
@@ -772,13 +861,27 @@ void kl_audio_resume(void) {
             kl_audio_restart();
         }
     }
-    pthread_mutex_lock(&g_mic_lock);
-    if (g_cap_unit && g_mic_open && g_mic_host_stopped && g_mic_enabled) {
+    pthread_mutex_lock(&g_lock);
+    if (g_cap_unit && g_mic_open && g_mic_host_stopped && g_mic_enabled && !g_duplex) {
         OSStatus status = AudioOutputUnitStart(g_cap_unit);
         if (status == noErr) g_mic_host_stopped = 0;
         else fprintf(stderr, "  [au] capture resume failed: %d\n", (int)status);
     }
-    pthread_mutex_unlock(&g_mic_lock);
+    pthread_mutex_unlock(&g_lock);
+}
+
+void kl_audio_forget_src(const void *src) {
+    pthread_mutex_lock(&g_wlock);
+    for (int i = 0; i < g_src_n; i++) {
+        if (g_src_live[i] && g_src_key[i] == src) {
+            g_src_live[i] = 0;
+            g_src_phase[i] = 0;
+        }
+    }
+    int live = 0;
+    for (int i = 0; i < g_src_n; i++) live += g_src_live[i];
+    g_playing = live != 0;
+    pthread_mutex_unlock(&g_wlock);
 }
 
 size_t kl_audio_write(const void *pcm, size_t bytes) {
@@ -786,14 +889,20 @@ size_t kl_audio_write(const void *pcm, size_t bytes) {
 }
 
 size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
-    if (!g_open || g_host_suspended || !pcm || !bytes) return 0;
-    unsigned in_frame = g_in_ch * 2;              // 16-bit, checked at open
+    return kl_audio_write_pcm(src, pcm, bytes, g_in_rate, g_in_ch);
+}
+
+size_t kl_audio_write_pcm(const void *src, const void *pcm, size_t bytes,
+                          unsigned rate, unsigned channels) {
+    if (!g_open || g_host_suspended || !pcm || !bytes ||
+        rate < 8000 || rate > 192000 || channels < 1 || channels > 8) return 0;
+    unsigned in_frame = channels * 2;              // 16-bit, checked at open
     size_t n = bytes / in_frame;
     if (!n) return 0;
 
     int peak = 0;
     const int16_t *s16 = (const int16_t *)pcm;
-    for (size_t i = 0; i < n * g_in_ch; i++) {
+    for (size_t i = 0; i < n * channels; i++) {
         int v = s16[i] < 0 ? -s16[i] : s16[i];
         if (v > peak) peak = v;
     }
@@ -801,9 +910,22 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     // converted block while waiting. Holding the writer lock during that wait
     // starves a second source even when it can mix into already queued frames.
     pthread_mutex_lock(&g_wlock);
+    if (!g_open || !g_ring) { pthread_mutex_unlock(&g_wlock); return 0; }
+    unsigned long epoch = g_output_epoch;
+    double output_rate = g_out_rate;
+    int slot = src_slot(src);
+    if (slot < 0) { pthread_mutex_unlock(&g_wlock); return 0; }
+    if (g_src_rate[slot] != rate || g_src_ch[slot] != channels) {
+        g_src_rate[slot] = rate; g_src_ch[slot] = channels;
+        g_src_phase[slot] = 0;
+        memset(g_src_prev[slot], 0, sizeof g_src_prev[slot]);
+    }
     float *scratch = NULL;
-    size_t frames = convert((const int16_t *)pcm, n, &scratch);
-    float *conv = frames ? malloc(frames * g_out_ch * sizeof(float)) : NULL;
+    size_t frames = convert(slot, (const int16_t *)pcm, n, &scratch);
+    // Tiny downsampled chunks can advance the input clock without emitting a
+    // device frame. They were consumed; reporting a short write adds extra sleep.
+    if (!frames) { pthread_mutex_unlock(&g_wlock); return scratch ? bytes : 0; }
+    float *conv = malloc(frames * g_out_ch * sizeof(float));
     if (!conv) { pthread_mutex_unlock(&g_wlock); return 0; }
     memcpy(conv, scratch, frames * g_out_ch * sizeof(float));
     unsigned long write_number = ++g_writes;
@@ -815,13 +937,15 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
         g_target = frames * 2;
         if (g_target > g_cap - 1) g_target = g_cap - 1;
     }
-    int slot = src_slot(src);
     pthread_mutex_unlock(&g_wlock);
 
     uint64_t deadline = now_ns() + 2000ull * 1000000ull;
     size_t written = 0;
     while (written < frames) {
         pthread_mutex_lock(&g_wlock);
+        if (epoch != g_output_epoch || !g_open || !g_ring) {
+            pthread_mutex_unlock(&g_wlock); break;
+        }
         int mixing = g_src_n > 1;
         uint64_t r = atomic_load_explicit(&g_r, memory_order_acquire);
         // One source uses the shared write cursor. Concurrent sources use
@@ -905,7 +1029,7 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     }
     pthread_mutex_unlock(&g_wlock);
     free(conv);
-    return written == frames ? bytes : written * in_frame;
+    return written == frames ? bytes : (size_t)((double)written * rate / output_rate) * in_frame;
 }
 
 unsigned kl_audio_underruns(void) { return atomic_load(&g_underruns); }
@@ -931,28 +1055,25 @@ void kl_audio_report(FILE *f) {
     if (g_mic_enabled || cap) {
         int mpk = atomic_load(&g_mic_peak);
         fprintf(f, "  microphone: %.2f s captured, %.2f s read by guest, %.2f s dropped "
-                   "(ring overrun), peak %d/32767 — %s\n",
+                   "(overrun/stale), peak %d/32767 — %s\n",
                 g_mic_rate ? (double)cap / g_mic_rate : 0.0,
                 g_mic_rate ? (double)atomic_load(&g_mic_frames_read) / g_mic_rate : 0.0,
                 g_mic_rate ? (double)atomic_load(&g_mic_frames_drop) / g_mic_rate : 0.0,
                 mpk, mpk ? "the microphone heard audio" : "THE MICROPHONE HEARD ONLY SILENCE");
+        fprintf(f, "  capture path: %s%s; client %u Hz/%u ch; last render error %d\n",
+                g_mic_unit_name, g_duplex ? " (shared speaker reference)" : "",
+                g_mic_rate, g_mic_ch, atomic_load(&g_mic_render_error));
     }
 }
 
 // ===========================================================================
-// Microphone capture — a second, independent CoreAudio unit.
+// Microphone capture and the duplex voice-processing unit.
 //
-// Everything below is the capture path, deliberately walled off from the output
-// unit: its own component instance (g_cap_unit), its own ring, its own lock. It
-// touches none of the output state, so a guest that opens an input stream cannot
-// change how playback sounds, and a run that never records pays nothing (the
-// unit is not even created).
+// Hardware format discovery determines the initial capture client format.
+// Rebuilds retain the client rate/channels already advertised to guest readers;
+// the voice unit converts from the new hardware route as necessary.
 // ===========================================================================
 
-// The device's capture rate, asked of the unit rather than assumed. On RemoteIO
-// the INPUT scope of element 1 IS the hardware side; there is no sample-rate
-// converter to lean on, so we capture at whatever it reports and resample on the
-// consumer side (kl_aaudio.c), the same bargain the output unit strikes.
 static double measure_input_rate(AudioUnit u) {
     AudioStreamBasicDescription hw;
     UInt32 sz = sizeof hw;
@@ -963,11 +1084,7 @@ static double measure_input_rate(AudioUnit u) {
     return 0.0;
 }
 
-// The mic's NATIVE channel count. RemoteIO's input bus has no channel converter
-// any more than a rate converter (see measure_device_rate): a client format that
-// asks for fewer/more channels than the hardware delivers initialises without
-// error and then renders SILENCE. So capture at the native count and let
-// kl_aaudio.c fold/fan-out to whatever the guest asked for. 0 => unknown.
+// Initial hardware channel count; guest channel mapping runs on the reader.
 static unsigned measure_input_channels(AudioUnit u) {
     AudioStreamBasicDescription hw;
     UInt32 sz = sizeof hw;
@@ -997,18 +1114,32 @@ static OSStatus capture_cb(void *ref, AudioUnitRenderActionFlags *flags,
     // a write past the buffer.
     if (nframes > g_cap_scratch_frames) nframes = (UInt32)g_cap_scratch_frames;
 
+#if KL_AUDIO_DUPLEX
+    g_cap_abl.mNumberBuffers=g_mic_ch;
+    for(unsigned ch=0;ch<g_mic_ch;ch++){
+        g_cap_abl.mBuffers[ch].mNumberChannels=1;
+        g_cap_abl.mBuffers[ch].mDataByteSize=nframes*sizeof(float);
+        g_cap_abl.mBuffers[ch].mData=g_cap_float_scratch+ch*g_cap_scratch_frames;
+    }
+#else
     g_cap_abl.mNumberBuffers = 1;
     g_cap_abl.mBuffers[0].mNumberChannels = g_mic_ch;
     g_cap_abl.mBuffers[0].mDataByteSize   = (UInt32)(nframes * g_mic_ch * sizeof(int16_t));
     g_cap_abl.mBuffers[0].mData           = g_cap_scratch;
-    OSStatus s = AudioUnitRender(u, flags, ts, bus, nframes, &g_cap_abl);
-    if (s != noErr) {               // a dropped render is a gap, not a fault to fight
-        static int lg;              // ...but log the FIRST one: a persistent render
-        if (!lg) { lg = 1; char b[8];   // failure (e.g. a client format the input
-            fprintf(stderr, "  [au] mic AudioUnitRender failed: %s — capture will be "
-                            "silent\n", fourcc(s, b)); }   // bus won't deliver) is silence
+#endif
+    OSStatus s = AudioUnitRender(u, flags, ts, bus, nframes, (AudioBufferList*)&g_cap_abl);
+    if (s != noErr) {
+        atomic_store_explicit(&g_mic_render_error, s, memory_order_relaxed);
         return noErr;
     }
+#if KL_AUDIO_DUPLEX
+    for(size_t frame=0;frame<nframes;frame++)for(unsigned ch=0;ch<g_mic_ch;ch++){
+        float v=g_cap_float_scratch[ch*g_cap_scratch_frames+frame];
+        int sample=!isfinite(v)?0:v>=1?32767:v<=-1?-32768:(int)lrintf(v*32768.f);
+        if(sample>32767)sample=32767;
+        g_cap_scratch[frame*g_mic_ch+ch]=(int16_t)sample;
+    }
+#endif
 
     // A cheap peak — the "did the mic hear anything" verdict the report prints,
     // and pure arithmetic, so it is fine on the real-time thread.
@@ -1020,22 +1151,6 @@ static OSStatus capture_cb(void *ref, AudioUnitRenderActionFlags *flags,
     }
     if (peak > atomic_load_explicit(&g_mic_peak, memory_order_relaxed))
         atomic_store_explicit(&g_mic_peak, peak, memory_order_relaxed);
-
-    // A one-shot verdict for the next log: is the callback actually HEARING
-    // anything, or rendering silence? Fires at most twice over a session, so the
-    // rare fprintf here is a diagnostic cost, not a steady-state one.
-    {
-        static _Atomic uint64_t seen; static _Atomic int said_live, said_quiet;
-        uint64_t n = atomic_fetch_add_explicit(&seen, nframes, memory_order_relaxed) + nframes;
-        if (peak > 200 && !atomic_exchange_explicit(&said_live, 1, memory_order_relaxed))
-            fprintf(stderr, "  [au] mic capture LIVE: peak %d/%d — hearing audio "
-                            "(%u ch @ %u Hz)\n", peak, 32767, g_mic_ch, g_mic_rate);
-        else if (peak <= 2 && n > (uint64_t)g_mic_rate &&
-                 !atomic_exchange_explicit(&said_quiet, 1, memory_order_relaxed))
-            fprintf(stderr, "  [au] mic capture: %llu frames rendered but SILENT "
-                            "(peak 0) — mic muted, no permission, or channel/format "
-                            "mismatch\n", (unsigned long long)n);
-    }
 
     // Append to the ring. The reader owns g_mic_r; we own g_mic_w. If the guest
     // is not draining fast enough the ring fills, and we drop the NEWEST frames
@@ -1062,60 +1177,81 @@ static OSStatus capture_cb(void *ref, AudioUnitRenderActionFlags *flags,
     return noErr;
 }
 
-// The name of the capture unit actually in use (VoiceProcessingIO, or the
-// RemoteIO/HALOutput fallback), for the one-time log.
-static const char *g_mic_unit_name = "?";
-
-// The client format — int16 interleaved at `rate`/`ch`, set on the OUTPUT scope
-// of the input element (element 1). This is FORMAT PACKING ONLY: `rate`/`ch` are
-// the mic's NATIVE values (see cap_build), so the unit converts neither rate nor
-// channels — it just hands us signed 16-bit instead of its canonical float. The
-// device->guest rate/channel conversion is kl_aaudio.c's job (anti-aliased there
-// by its low-pass net on the rare downsample path).
+// The device client format, set on the OUTPUT scope
+// of the input element (element 1). Initial capture uses the native clock;
+// recovery retains that client format. Guest-rate conversion is filtered and
+// performed on the reader thread, outside the real-time callback.
 static OSStatus cap_set_client_format(unsigned rate, unsigned ch) {
     AudioStreamBasicDescription fmt = {0};
     fmt.mSampleRate       = rate;
     fmt.mFormatID         = kAudioFormatLinearPCM;
+#if KL_AUDIO_DUPLEX
+    fmt.mFormatFlags      = kAudioFormatFlagIsFloat|kAudioFormatFlagIsPacked|kAudioFormatFlagIsNonInterleaved;
+    fmt.mBitsPerChannel   = 32;
+    fmt.mBytesPerFrame    = sizeof(float);
+#else
     fmt.mFormatFlags      = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
-    fmt.mChannelsPerFrame = ch;
-    fmt.mFramesPerPacket  = 1;
     fmt.mBitsPerChannel   = 16;
     fmt.mBytesPerFrame    = (UInt32)(sizeof(int16_t) * ch);
+#endif
+    fmt.mChannelsPerFrame = ch;
+    fmt.mFramesPerPacket  = 1;
     fmt.mBytesPerPacket   = fmt.mBytesPerFrame;
     return AudioUnitSetProperty(g_cap_unit, kAudioUnitProperty_StreamFormat,
                                 kAudioUnitScope_Output, 1, &fmt, sizeof fmt);
 }
 
-// Build and initialise the capture unit with a given component subtype. Factored
-// out so the VPIO -> RemoteIO fallback in cap_unit_create is one call each rather
-// than a duplicated body. Captures the hardware's NATIVE rate + channel count —
-// the input bus converts NEITHER, and a client format that disagrees initialises
-// without error and then renders SILENCE (exactly how "capture the guest's 16 kHz
-// mono" regressed Steam Link to no mic at all). kl_aaudio.c resamples and
-// folds/fans-out to the guest's ask instead. Sets g_cap_unit / g_mic_rate /
-// g_mic_ch / g_mic_dev_rate and, on success, g_mic_unit_name.
+// Build a duplex voice unit on visionOS, or raw HAL input on the macOS host.
+// The first open measures native input. Later rebuilds retain the reader's
+// client clock. Refuse a mismatched negotiated format instead of relabelling it.
 static int cap_build(OSType subtype, const char *name, int vpio) {
+    // AUVoiceIO implicitly selects voiceChat. Session recovery must preserve
+    // that mode while this unit is being initialized, without taking g_lock.
+    atomic_store(&g_mic_voice_processing, vpio);
     AudioComponentDescription desc = {0};
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = subtype;
     desc.componentManufacturer = kAudioUnitManufacturer_Apple;
 
     AudioComponent comp = AudioComponentFindNext(NULL, &desc);
-    if (!comp) { fprintf(stderr, "  [au] no %s AudioComponent\n", name); return -1; }
+    if (!comp) {
+        atomic_store(&g_mic_voice_processing, 0);
+        fprintf(stderr, "  [au] no %s AudioComponent\n", name); return -1;
+    }
     CHECK(AudioComponentInstanceNew(comp, &g_cap_unit), "AudioComponentInstanceNew(capture)");
 
-    // Enable input (element 1), disable output (element 0): this instance only
-    // records. VoiceProcessingIO has an output element too — its AEC reference —
-    // but AEC is not the goal here (Steam Link does its own), so capture-only is
-    // fine, and disabling output keeps this unit from also trying to drive the
-    // speaker that our separate output unit (g_unit) owns.
+    // Capture and the real speaker mix use the SAME voice-processing unit.
+    // Its bus 0 is the echo canceller's far-end reference; a separate output
+    // unit (or a silent reference) leaves the speaker signal in the microphone.
     UInt32 one = 1, zero = 0;
     CHECK(AudioUnitSetProperty(g_cap_unit, kAudioOutputUnitProperty_EnableIO,
                                kAudioUnitScope_Input, 1, &one, sizeof one),
           "EnableIO(input,bus1)");
+    UInt32 output_enabled = KL_AUDIO_DUPLEX ? one : zero;
     CHECK(AudioUnitSetProperty(g_cap_unit, kAudioOutputUnitProperty_EnableIO,
-                               kAudioUnitScope_Output, 0, &zero, sizeof zero),
-          "DisableIO(output,bus0)");
+                               kAudioUnitScope_Output, 0, &output_enabled, sizeof output_enabled),
+          "EnableIO(output,bus0)");
+#if KL_AUDIO_DUPLEX
+    double output_rate = measure_device_rate(g_cap_unit);
+    // Keep the existing mix/capture client clocks stable across route changes.
+    // VPIO performs hardware conversion; guests must never see relabelled PCM.
+    if (g_out_rate <= 0) g_out_rate = output_rate > 0 ? output_rate : 48000;
+    AudioStreamBasicDescription output = {0};
+    output.mSampleRate = g_out_rate;
+    output.mFormatID = kAudioFormatLinearPCM;
+    output.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved;
+    output.mChannelsPerFrame = g_out_ch;
+    output.mFramesPerPacket = 1;
+    output.mBitsPerChannel = 32;
+    output.mBytesPerFrame = output.mBytesPerPacket = sizeof(float);
+    CHECK(AudioUnitSetProperty(g_cap_unit, kAudioUnitProperty_StreamFormat,
+                               kAudioUnitScope_Input, 0, &output, sizeof output),
+          "SetProperty(duplex output format)");
+    AURenderCallbackStruct speaker = {render_cb, NULL};
+    CHECK(AudioUnitSetProperty(g_cap_unit, kAudioUnitProperty_SetRenderCallback,
+                               kAudioUnitScope_Input, 0, &speaker, sizeof speaker),
+          "SetProperty(duplex speaker reference)");
+#endif
 
 #if TARGET_OS_OSX
     // HALOutput records from no device until told which; point it at the system
@@ -1168,8 +1304,10 @@ static int cap_build(OSType subtype, const char *name, int vpio) {
     if (hw <= 0.0) hw = g_session_rate > 0.0 ? g_session_rate : 48000.0;
     g_mic_dev_rate = (unsigned)hw;
     unsigned hw_ch = measure_input_channels(g_cap_unit);
-    g_mic_ch = hw_ch < 1 ? 1 : (hw_ch > 2 ? 2 : hw_ch);
-    g_mic_rate = g_mic_dev_rate;
+    if (!g_mic_open || !g_mic_rate) {
+        g_mic_ch = hw_ch < 1 ? 1 : (hw_ch > 2 ? 2 : hw_ch);
+        g_mic_rate = g_mic_dev_rate;
+    }
 
     // The input callback is registered on the global scope; the element it names
     // is the input bus the callback then renders from.
@@ -1179,38 +1317,71 @@ static int cap_build(OSType subtype, const char *name, int vpio) {
           "SetProperty(SetInputCallback)");
 
     // Scratch big enough for any plausible burst; the callback clips to it.
-    free(g_cap_scratch);
+    cap_free_scratch();
     g_cap_scratch_frames = 4096;
     g_cap_scratch = calloc(g_cap_scratch_frames * g_mic_ch, sizeof(int16_t));
     if (!g_cap_scratch) { fprintf(stderr, "  [au] capture scratch OOM\n"); goto fail; }
+#if KL_AUDIO_DUPLEX
+    g_cap_float_scratch=calloc(g_cap_scratch_frames*g_mic_ch,sizeof(float));
+    if(!g_cap_float_scratch){fprintf(stderr,"  [au] float capture scratch OOM\n");goto fail;}
+#endif
 
-    // Native format — format packing only (int16 interleaved at the device rate
-    // and native channel count); no rate or channel conversion in the unit.
+    // Native on first open; stable client format across route recovery.
     CHECK(cap_set_client_format(g_mic_rate, g_mic_ch), "SetProperty(StreamFormat,capture)");
+    fprintf(stderr,"  [au] initializing capture: %s, %u Hz/%u ch %s, speaker %.0f Hz/%u ch\n",
+            name,g_mic_rate,g_mic_ch,KL_AUDIO_DUPLEX?"float32 planar":"int16 interleaved",g_out_rate,g_out_ch);
     CHECK(AudioUnitInitialize(g_cap_unit), "AudioUnitInitialize(capture)");
+    if (vpio) {
+        // Report effective settings after initialization, rather than treating
+        // a successful pre-initialize request as proof of active processing.
+        UInt32 bypass = UINT32_MAX, agc = UINT32_MAX, size = sizeof bypass;
+        OSStatus bp = AudioUnitGetProperty(g_cap_unit, kAUVoiceIOProperty_BypassVoiceProcessing,
+                                           kAudioUnitScope_Global, 0, &bypass, &size);
+        size = sizeof agc;
+        OSStatus ap = AudioUnitGetProperty(g_cap_unit, kAUVoiceIOProperty_VoiceProcessingEnableAGC,
+                                           kAudioUnitScope_Global, 0, &agc, &size);
+        fprintf(stderr, "  [au] voice processing effective: bypass=%s (status %d), AGC=%s (status %d)\n",
+                bp == noErr ? (bypass ? "ON" : "off") : "unknown", (int)bp,
+                ap == noErr ? (agc ? "on" : "OFF") : "unknown", (int)ap);
+    }
+    AudioStreamBasicDescription actual = {0};
+    UInt32 actual_size = sizeof actual;
+    CHECK(AudioUnitGetProperty(g_cap_unit, kAudioUnitProperty_StreamFormat,
+                               kAudioUnitScope_Output, 1, &actual, &actual_size),
+          "GetProperty(capture client format)");
+    if (fabs(actual.mSampleRate - g_mic_rate) > 0.5 || actual.mChannelsPerFrame != g_mic_ch) {
+        fprintf(stderr, "  [au] capture client format changed unexpectedly: %.0f Hz/%u ch\n",
+                actual.mSampleRate, (unsigned)actual.mChannelsPerFrame);
+        goto fail;
+    }
+#if KL_AUDIO_DUPLEX
+    UInt32 required=kAudioFormatFlagIsFloat|kAudioFormatFlagIsNonInterleaved;
+    if((actual.mFormatFlags&required)!=required||actual.mBitsPerChannel!=32||actual.mBytesPerFrame!=sizeof(float)){
+        fprintf(stderr,"  [au] capture did not retain canonical float32 planes\n");goto fail;
+    }
+#endif
 
     g_mic_unit_name = name;
     return 0;
 fail:
+    atomic_store(&g_mic_voice_processing, 0);
     if (g_cap_unit) { AudioComponentInstanceDispose(g_cap_unit); g_cap_unit = NULL; }
-    free(g_cap_scratch); g_cap_scratch = NULL; g_cap_scratch_frames = 0;
+    cap_free_scratch();
     return -1;
 }
 
 // ---- the capture unit ----
 static int cap_unit_create(unsigned want_rate, unsigned want_ch) {
     (void)want_rate; (void)want_ch;   // captured native; kl_aaudio.c converts to the guest's ask
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && !defined(KL_AUDIO_DUPLEX_TEST)
     // macOS is the `make check` host, not the target: HALOutput records raw, which
     // is enough to verify the plumbing. No VPIO fallback dance here.
     if (cap_build(kAudioUnitSubType_HALOutput, "HALOutput", 0) != 0) return -1;
 #else
-    // VoiceProcessingIO is Apple's mic-capture unit: it noise-suppresses + AGCs
-    // the raw beamformed Vision Pro array (which sounds metallic/tunnelly and
-    // captured low, ~759/32767, through a plain RemoteIO) and it OWNS the mic, so
-    // it coexists with the .voiceChat session instead of being starved by it. If
-    // VPIO will not initialise, fall back to plain RemoteIO — "works but raw"
-    // rather than silent.
+    // VoiceProcessingIO supplies noise suppression, AGC, and echo cancellation.
+    // Its output callback receives the actual game mix as the far-end reference.
+    // If unavailable, a raw duplex RemoteIO fallback keeps capture working,
+    // without claiming echo cancellation or noise processing.
     if (kl_env_on("KL_MIC_RAW", 0)) {
         // Isolate VPIO's cross-app ducking from microphone/route competition.
         // Diagnostic only: this sacrifices noise suppression and automatic gain.
@@ -1223,8 +1394,9 @@ static int cap_unit_create(unsigned want_rate, unsigned want_ch) {
 #endif
 
     // The one-time verdict the next steamlink log is read against.
-    fprintf(stderr, "  [au] microphone capture: %s, native %u Hz/%u ch int16 (device %u Hz)\n",
-            g_mic_unit_name, g_mic_rate, g_mic_ch, g_mic_dev_rate);
+    fprintf(stderr, "  [au] microphone capture: %s, reader %u Hz/%u ch int16 (device %u Hz; host %s)\n",
+            g_mic_unit_name, g_mic_rate, g_mic_ch, g_mic_dev_rate,
+            KL_AUDIO_DUPLEX?"float32 planar":"int16 interleaved");
     return 0;
 }
 
@@ -1240,77 +1412,87 @@ void kl_audio_mic_set_enabled(int on) {
 }
 
 int kl_audio_mic_enabled(void) { return g_mic_enabled; }
+int kl_audio_mic_voice_processing(void) { return atomic_load(&g_mic_voice_processing); }
 
 int kl_audio_mic_open(unsigned want_rate, unsigned want_channels) {
-    if (!g_mic_enabled) return -1;   // gated: no capture while the toggle is off
-    if (!kl_env_on("KL_AUDIO", 1)) {
-        static int said;
-        if (!said++) fprintf(stderr, "  [au] KL_AUDIO=0 — no capture device\n");
-        return -1;
+    if (!g_mic_enabled || !kl_env_on("KL_AUDIO", 1)) return -1;
+    pthread_mutex_lock(&g_lock);
+    if (g_host_suspended || g_interrupted || !g_mic_enabled) {
+        pthread_mutex_unlock(&g_lock); return -1;
     }
-    pthread_mutex_lock(&g_mic_lock);
-    // Idempotent: a second input stream reuses the unit already open. Steam Link
-    // opens ONE input stream, so this is the common path; a later stream at a
-    // different rate does not re-open the unit — it captures at the first rate and
-    // lets kl_aaudio.c resample the difference (see klaa_capture_into).
-    if (g_host_suspended) { pthread_mutex_unlock(&g_mic_lock); return -1; }
-    if (g_mic_open) { pthread_mutex_unlock(&g_mic_lock); return 0; }
-
-    if (cap_unit_create(want_rate, want_channels) != 0) {
-        pthread_mutex_unlock(&g_mic_lock);
-        return -1;
-    }
-
-    // A one-second ring, like the output side, so a scheduling hiccup on either
-    // side cannot wrap it. Latency here is set by how promptly the guest reads,
-    // not by a fill target — a capture stream wants the freshest frames.
+    if (g_mic_open) { pthread_mutex_unlock(&g_lock); return 0; }
+    pthread_mutex_lock(&g_wlock);
+#if KL_AUDIO_DUPLEX
+    unit_destroy();
+#endif
+    // First open measures the input format. Rebuilds retain that client format
+    // so an already-open Android stream keeps its sample rate and channel count.
+    g_mic_rate = 0;
+    if (!g_open) g_out_rate = 0;
+    if (cap_unit_create(want_rate, want_channels) != 0) goto fail;
     free(g_mic_ring);
     g_mic_cap = (size_t)g_mic_rate + 1;
     g_mic_ring = calloc(g_mic_cap * g_mic_ch, sizeof(int16_t));
-    if (!g_mic_ring) {
-        if (g_cap_unit) { AudioComponentInstanceDispose(g_cap_unit); g_cap_unit = NULL; }
-        free(g_cap_scratch); g_cap_scratch = NULL; g_cap_scratch_frames = 0;
-        pthread_mutex_unlock(&g_mic_lock);
-        return -1;
-    }
+    if (!g_mic_ring) goto fail;
     atomic_store(&g_mic_w, 0); atomic_store(&g_mic_r, 0);
-
-    OSStatus s = AudioOutputUnitStart(g_cap_unit);
-    if (s != noErr) {
-        char b[8];
-        fprintf(stderr, "  [au] AudioOutputUnitStart(capture) failed: %s\n", fourcc(s, b));
-        AudioUnitUninitialize(g_cap_unit);
-        AudioComponentInstanceDispose(g_cap_unit); g_cap_unit = NULL;
-        free(g_mic_ring); g_mic_ring = NULL; g_mic_cap = 0;
-        free(g_cap_scratch); g_cap_scratch = NULL; g_cap_scratch_frames = 0;
-        pthread_mutex_unlock(&g_mic_lock);
-        return -1;
-    }
     g_mic_open = 1;
-    pthread_mutex_unlock(&g_mic_lock);
-
+#if KL_AUDIO_DUPLEX
+    g_unit = g_cap_unit;
+    g_duplex = 1;
+    if (unit_start() != 0) goto fail;
+#else
+    if (AudioOutputUnitStart(g_cap_unit) != noErr) goto fail;
+#endif
+    pthread_mutex_unlock(&g_wlock);
+    pthread_mutex_unlock(&g_lock);
+    watchdog_start();
     fprintf(stderr, "  [au] CoreAudio in: guest wants %u Hz/%u ch -> capturing %u Hz/%u ch%s\n",
             want_rate, want_channels, g_mic_rate, g_mic_ch,
-            want_rate && want_rate != g_mic_rate ? " (guest resamples on read)" : "");
+            g_duplex ? " (shared capture/playback)" : "");
     return 0;
+fail:
+    atomic_store(&g_mic_voice_processing, 0);
+    if (g_duplex) unit_destroy();
+    if (g_cap_unit) {
+        AudioOutputUnitStop(g_cap_unit);
+        AudioUnitUninitialize(g_cap_unit);
+        AudioComponentInstanceDispose(g_cap_unit); g_cap_unit = NULL;
+    }
+    g_mic_open = 0;
+    free(g_mic_ring); g_mic_ring = NULL; g_mic_cap = 0;
+    cap_free_scratch();
+#if KL_AUDIO_DUPLEX
+    // A refused microphone must not take existing game playback away.
+    if (g_open && unit_create() == 0 && resize_output_ring() == 0) {
+        reset_output_clock(); unit_start();
+    }
+#endif
+    pthread_mutex_unlock(&g_wlock);
+    pthread_mutex_unlock(&g_lock);
+    return -1;
 }
 
 void kl_audio_mic_close(void) {
-    pthread_mutex_lock(&g_mic_lock);
+    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_wlock);
+    int was_duplex = g_duplex;
+    if (was_duplex) unit_destroy();
     if (g_cap_unit) {
-        // Stop first: AudioOutputUnitStop blocks until the input callback has
-        // returned, so freeing the ring/scratch afterward cannot race it.
         AudioOutputUnitStop(g_cap_unit);
         AudioUnitUninitialize(g_cap_unit);
-        AudioComponentInstanceDispose(g_cap_unit);
-        g_cap_unit = NULL;
+        AudioComponentInstanceDispose(g_cap_unit); g_cap_unit = NULL;
     }
     g_mic_open = 0;
     g_mic_host_stopped = 0;
-    free(g_mic_ring);    g_mic_ring = NULL;    g_mic_cap = 0;
-    free(g_cap_scratch); g_cap_scratch = NULL; g_cap_scratch_frames = 0;
+    atomic_store(&g_mic_voice_processing, 0);
+    free(g_mic_ring); g_mic_ring = NULL; g_mic_cap = 0;
+    cap_free_scratch();
     atomic_store(&g_mic_w, 0); atomic_store(&g_mic_r, 0);
-    pthread_mutex_unlock(&g_mic_lock);
+    if (was_duplex && g_open && unit_create() == 0 && resize_output_ring() == 0) {
+        reset_output_clock(); unit_start();
+    }
+    pthread_mutex_unlock(&g_wlock);
+    pthread_mutex_unlock(&g_lock);
 }
 
 unsigned kl_audio_mic_rate(void)     { return g_mic_rate; }
@@ -1320,13 +1502,20 @@ int kl_audio_mic_read_i16(int16_t *buf, int frames) {
     if (!buf || frames <= 0) return 0;
     // Consumers run off the render thread. Serialize ring access with disable /
     // close so a live Photon worker cannot read storage being freed by the UI.
-    pthread_mutex_lock(&g_mic_lock);
+    pthread_mutex_lock(&g_lock);
     if (!g_mic_open || !g_mic_enabled || !g_mic_ring || g_host_suspended) {
-        pthread_mutex_unlock(&g_mic_lock); return 0;
+        pthread_mutex_unlock(&g_lock); return 0;
     }
     size_t r = atomic_load_explicit(&g_mic_r, memory_order_relaxed);
     size_t w = atomic_load_explicit(&g_mic_w, memory_order_acquire);
     size_t have = w - r;
+    size_t fresh = g_mic_rate / 10; // At most 100 ms of queued voice after a stall.
+    if (fresh < (size_t)frames) fresh = (size_t)frames;
+    if (have > fresh) {
+        size_t stale = have - fresh;
+        r += stale; have -= stale;
+        atomic_fetch_add_explicit(&g_mic_frames_drop, stale, memory_order_relaxed);
+    }
     size_t take = have < (size_t)frames ? have : (size_t)frames;
     for (size_t done = 0; done < take; ) {
         size_t off = (r + done) % g_mic_cap;
@@ -1338,6 +1527,6 @@ int kl_audio_mic_read_i16(int16_t *buf, int frames) {
     }
     atomic_store_explicit(&g_mic_r, r + take, memory_order_release);
     atomic_fetch_add_explicit(&g_mic_frames_read, take, memory_order_relaxed);
-    pthread_mutex_unlock(&g_mic_lock);
+    pthread_mutex_unlock(&g_lock);
     return (int)take;
 }

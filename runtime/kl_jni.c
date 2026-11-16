@@ -1468,6 +1468,24 @@ KLJ_PRIM_ARRAY(Float,   'F') KLJ_PRIM_ARRAY(Double,'D')
 
 static const klj_field g_fields[];
 
+static void *g_supported_abis[3];
+static pthread_once_t g_supported_abis_once=PTHREAD_ONCE_INIT;
+static void init_supported_abis(void) {
+    const char *items[]={"arm64-v8a"};
+    for(int i=0;i<3;i++) {
+        g_supported_abis[i]=kl_jni_new_string_array(items,i==2?0:1);
+        kl_jni_pin_object(g_supported_abis[i]);
+        if(i!=2)kl_jni_pin_object(((void **)klj_arr(g_supported_abis[i])->data)[0]);
+    }
+}
+static klj_val supported_abis(unsigned index) {
+    pthread_once(&g_supported_abis_once,init_supported_abis);
+    return (klj_val){.l=g_supported_abis[index]};
+}
+static klj_val klj_Build_abis(void) {return supported_abis(0);}
+static klj_val klj_Build_abis64(void) {return supported_abis(1);}
+static klj_val klj_Build_abis32(void) {return supported_abis(2);}
+
 // The device identity is single-sourced ON PURPOSE: Build.MANUFACTURER/MODEL
 // read over JNI and ro.product.* read through __system_property_get are the
 // same strings, because Steam Link asks both ways and a disagreement between
@@ -1687,6 +1705,12 @@ static const klj_field g_fields[] = {
     KLJ_FINT("android/content/DialogInterface", "BUTTON_NEUTRAL",  -3),
     KLJ_FINT("android/media/AudioManager", "GET_DEVICES_OUTPUTS", 2),
     KLJ_FINT("android/media/AudioManager", "STREAM_MUSIC", 3),
+    KLJ_FINT("android/media/AudioManager", "AUDIOFOCUS_GAIN", 1),
+    KLJ_FINT("android/media/AudioManager", "AUDIOFOCUS_REQUEST_GRANTED", 1),
+    KLJ_FINT("android/media/AudioManager", "AUDIOFOCUS_REQUEST_FAILED", 0),
+    KLJ_FINT("android/media/AudioManager", "AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK", -3),
+    KLJ_FINT("android/media/AudioAttributes", "USAGE_GAME", 14),
+    KLJ_FINT("android/media/AudioAttributes", "CONTENT_TYPE_MUSIC", 2),
     // MediaFormat colour constants — Unity's AndroidVideoMedia reads these off
     // the decoded video format to set up the output colour conversion. Values
     // are the AOSP MediaFormat definitions.
@@ -1887,6 +1911,9 @@ static const klj_field g_fields[] = {
     KLJ_FSTR("android/os/Build", "MANUFACTURER", "Oculus"),
     KLJ_FSTR("android/os/Build", "BRAND",        "oculus"),
     KLJ_FSTR("android/os/Build", "MODEL",        "Quest 2"),
+    KLJ_FFN("android/os/Build", "SUPPORTED_ABIS", "[Ljava/lang/String;", klj_Build_abis),
+    KLJ_FFN("android/os/Build", "SUPPORTED_64_BIT_ABIS", "[Ljava/lang/String;", klj_Build_abis64),
+    KLJ_FFN("android/os/Build", "SUPPORTED_32_BIT_ABIS", "[Ljava/lang/String;", klj_Build_abis32),
     // The device codename, and it is "hollywood" rather than the "delmar" this
     // used to say. "delmar" came from Beat Saber's own manifest
     // (com.oculus.supportedDevices = quest|delmar), which was the only evidence

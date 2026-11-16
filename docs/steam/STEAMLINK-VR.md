@@ -19,6 +19,72 @@ The current local APK reports version 2.0.24, version code 5002389. When changin
 APKs, replace both the symlink and the extracted tree, rebuild guest frameworks,
 and force staging with `--stage` so the app receives the matching APK and assets.
 
+The newer 2.0.24 APK with version code **5002527** changes the HDR capability
+probe from `canDisplayHDRVideo(ZZ)Z` to `canDisplayHDRVideo(ZZZ)Z`. Headset logs
+from November 5 show Klepton aborting on the new JNI signature after Connect,
+before the VR handoff. Both signatures now return the existing SDR capability
+answer. `make slinkcheck` covers both signatures and every Boolean option
+combination. Rebuild Klepton when installing this APK; changing SteamVR add-ons
+does not supply the missing JNI method.
+
+The fix passed `make slinkcheck`, both visionOS runtime builds, and signed
+device/simulator app builds. With build 5002527, a simulator Connect test passed
+the new probe, completed the VR handoff, and published decoded 1152x4608 video.
+The simulator was then stopped to release the host connection. The signed fix
+was installed on the physical headset with writable data backed up/restored
+and matching APK/assets/Qt plugins restaged; all three streaming capabilities
+remain signed. The user subsequently confirmed that physical Connect works.
+
+## Sharp-center flicker with build 5002527
+
+The November 5 headset session submits four OpenXR quad layers for streaming:
+one peripheral image per eye, followed by one alpha-blended sharp-center image
+per eye. All four occupy the same plane approximately two metres away. The
+quad-only compositor used a strict reverse-Z depth test with depth writes, so
+the peripheral image could reject its later sharp-center image at equal depth.
+Small depth differences could switch the sharp detail on and off. The user
+reported flickering or jumping detail confined to the clear area.
+
+Quad composition now always passes the depth test and follows submission
+order. Quad-only frames still write finite depth in both eyes for visionOS
+reprojection; overlays above an existing eye image preserve that image's depth.
+The host Metal regression reproduces rejected center detail with the old rule,
+then checks equal and slightly different depths, both eyes, alpha blending,
+unchanged peripheral pixels, and retained reprojection depth with the new rule:
+
+```sh
+xcrun swiftc visionos/Sources/KleptonLayerDepth.swift tests/visionos/LayerDepthTests.swift -o /tmp/klepton-layer-depth-tests
+/tmp/klepton-layer-depth-tests
+make reproject
+```
+
+These GPU checks, existing reprojection tests, visionOS Swift typechecking, and
+device/simulator app builds pass. The signed `KleptonSteamLinkFovea` build was
+installed on the physical headset after backing up and restoring writable
+data and restaging the matching APK/assets/Qt plugins. All three streaming
+capabilities remain signed. The comparison build uses the same runtime archive
+as the working HDR-check fix, with the compositor depth change isolated from
+concurrent runtime edits. Simulator shell startup with build 5002527 succeeds.
+The user confirmed that the update fixed the graphical issues on the headset.
+
+The subsequent report concerns a small, stationary sharp region in games while
+the area/detail slider changes the menu. Valve's November 2 SteamVR 2.19.1
+[release notes](https://steamcommunity.com/app/250820/announcements/?snr=2_groupannouncements_detail_)
+identify Preferred Foveated Sharpness (System UI) as an interface-only setting.
+Game foveation also depends on render resolution and encoded video size; the
+[Steam Link FAQ](https://help.steampowered.com/en/faqs/view/0E2C-406B-9135-38A4)
+warns that increasing render resolution can shrink the sharp region.
+
+The new headset log shows unchanged 1152x1152 stream-layer textures with sharp
+quad dimensions changing between 2.80x2.80 m and 0.89x0.68 m during the session.
+These sizes are supplied by the APK and preserved by the compositor; matching
+each interval to the menu/game is inferred from the user's report. Both gaze
+extensions remain unsupported in that run, so the region cannot follow eye
+movement. A settings comparison should start with global and per-game render
+resolution at 100%, encoded video size on Auto, then a supported manual encode
+size such as 1280 if needed. This is a diagnostic starting point, not a measured
+optimal configuration or a fix for missing eye tracking.
+
 Build and run on a booted visionOS Simulator:
 
 ```sh

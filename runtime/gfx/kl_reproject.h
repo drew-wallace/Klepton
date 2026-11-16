@@ -208,6 +208,7 @@ typedef struct {
     // already happening and is at least honest.
     uint32_t      visible;
     uint32_t      opaque;    // KL_OVERLAY_OPAQUE: force sampled alpha to 1
+    simd_float4   color_scale,color_bias;
 } kl_overlay_uniforms;
 
 // The overlay shader — `kl_ov_v` / `kl_ov_f`, a 4-vertex triangle strip with no

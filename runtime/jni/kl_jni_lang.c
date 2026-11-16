@@ -1,4 +1,4 @@
-// java.lang: Class, ClassLoader, StringBuilder
+// java.lang: Class, ClassLoader, String, StringBuilder
 //
 // One family of the synthetic JNIEnv's Java classes. The mechanism (registries,
 // dispatch, id interning) is kl_jni.c; this file owns implementations and the
@@ -79,6 +79,12 @@ static klj_val klj_ClassLoader_findClass(void *env, void *self, const klj_val *a
     return klj_class_by_dotted_name(a, n);
 }
 
+// Java String.toString returns the original immutable String. Unity's generic
+// AndroidJavaProxy unboxing calls it for WebView JavaScript result callbacks.
+static klj_val klj_String_toString(void *env, void *self, const klj_val *a, int n) {
+    return (klj_val){.l = self};
+}
+
 // StringBuilder. Unity uses it to assemble strings it then hands back to us, so
 // it needs real accumulate-and-read behaviour, not a stub. The semantics are
 // fully determined by the Java API, so there is nothing invented here.
@@ -148,6 +154,8 @@ const klj_binding klj_bind_lang[] = {
     {"java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;", klj_Class_getClassLoader},
     {"java/lang/Class", "forName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;", klj_Class_forName},
     {"java/lang/ClassLoader", "findClass", "(Ljava/lang/String;)Ljava/lang/Class;", klj_ClassLoader_findClass},
+
+    {"java/lang/String", "toString", "()Ljava/lang/String;", klj_String_toString},
 
     {"java/lang/StringBuilder", "<init>",   "()V",                  klj_SB_init},
     {"java/lang/StringBuilder", "toString", "()Ljava/lang/String;", klj_SB_toString},

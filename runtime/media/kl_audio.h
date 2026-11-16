@@ -27,7 +27,7 @@
 // Open the device for a guest stream of `rate` Hz, `channels` channels,
 // `bits` bits per sample (16 is the only width FMOD produces and the only one
 // implemented). Returns 0 on success; on failure the caller must keep its own
-// clock. Idempotent for an identical format, reopens for a different one.
+// clock. The first stream opens the sink; later streams share it.
 int  kl_audio_open(unsigned rate, unsigned channels, unsigned bits);
 void kl_audio_close(void);
 
@@ -52,6 +52,14 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes);
 
 // True once a device is open and running, i.e. kl_audio_write is the clock.
 int  kl_audio_active(void);
+
+// Per-producer PCM format. Independent conversion history prevents another
+// stream's rate/channels or chunk boundaries from changing this source's clock.
+size_t kl_audio_write_pcm(const void *src, const void *pcm, size_t bytes,
+                         unsigned rate, unsigned channels);
+// Release conversion/cursor state after a producer has stopped. The shared
+// hardware sink remains available to other APIs and microphone echo processing.
+void kl_audio_forget_src(const void *src);
 
 // visionOS: the OS takes the stream away — interruptions, route changes, the
 // app being backgrounded out of an immersive space — and does not always give
@@ -105,11 +113,14 @@ void kl_audio_set_latency_ms(unsigned ms);
 // kl_audio_mic_open/read/close and gets real samples.
 void     kl_audio_mic_set_enabled(int on);
 int      kl_audio_mic_enabled(void);
+// Lock-free session-policy hint: a native voice-processing unit is selected
+// (including initialization). Raw capture must keep the default session mode.
+int      kl_audio_mic_voice_processing(void);
 
 // Open the capture device (idempotent). Returns 0 on success; negative if the
 // mic is disabled, unavailable, or permission was refused. want_rate/want_channels
 // are hints; delivered samples are interleaved int16 at kl_audio_mic_rate() /
-// kl_audio_mic_channels().
+// kl_audio_mic_channels(). That client format stays stable across route recovery.
 int      kl_audio_mic_open(unsigned want_rate, unsigned want_channels);
 void     kl_audio_mic_close(void);
 unsigned kl_audio_mic_rate(void);

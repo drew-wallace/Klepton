@@ -272,7 +272,7 @@ static klj_val klj_UnityPermissions_hasUserAuthorized(void *env, void *self,
     (void)env; (void)self;
     const char *p = n > 1 ? klj_str(a[1].l) : "", *why = "";
     int granted = klj_permission_state(p, &why);
-    KLJ_LOG("UnityPermissions.hasUserAuthorizedPermission(\"%s\") -> %s%s", p,
+    KLJ_TRACE("UnityPermissions.hasUserAuthorizedPermission(\"%s\") -> %s%s", p,
             granted ? "true" : "false", why);
     return (klj_val){.j = granted ? 1u : 0u};
 }

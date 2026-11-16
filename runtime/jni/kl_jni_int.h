@@ -14,10 +14,19 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include "kl_jni.h"
 #include "kl_va.h"
+#include "kl_env.h"
 
 #define KLJ_LOG(...) do { fprintf(stderr, "[jni] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+static inline int klj_trace_enabled(void) {
+    static atomic_int enabled=ATOMIC_VAR_INIT(-1);
+    int value=atomic_load_explicit(&enabled,memory_order_relaxed);
+    if(value<0) {value=kl_env_on("KL_TRACE_JNI",0);atomic_store_explicit(&enabled,value,memory_order_relaxed);}
+    return value;
+}
+#define KLJ_TRACE(...) do { if(klj_trace_enabled()) KLJ_LOG(__VA_ARGS__); } while(0)
 // Hot-path variant: logs only the first time a given call site is reached.
 // For handlers that fire every frame with a constant answer (NetworkInfo,
 // connectivity), unconditional KLJ_LOG is thousands of synchronous stderr

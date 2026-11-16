@@ -248,6 +248,8 @@ final class KleptonCompositor {
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
     private var depthPassState: MTLDepthStencilState?
+    /// Submission-ordered layers that also supply the frame's reprojection depth.
+    private var overlayDepthWriteState: MTLDepthStencilState?
     private var sampler: MTLSamplerState!
     /// Views this GPU can draw in one amplified pass. 2 everywhere real; 1
     /// forces the old per-view passes, and forces foveation off with them
@@ -831,6 +833,7 @@ final class KleptonCompositor {
     /// Must run before the guest asks for eye storage, because the provider is
     /// what answers that question.
     func installProvider() {
+        NSLog("[cp] startup: acquiring graphics device")
         // ANGLE's own MTLDevice, not MTLCreateSystemDefaultDevice(). The
         // EGL_ANGLE_metal_texture_client_buffer extension requires the texture
         // to belong to the display's device; a texture from another device
@@ -838,6 +841,7 @@ final class KleptonCompositor {
         // the two happen to be the same object, so testing on the host would
         // not catch getting this wrong.
         let angle = kl_glfb_mtl_device()
+        NSLog("[cp] startup: graphics device query complete (ANGLE \(angle != nil))")
         if let d = angle {
             device = Unmanaged<MTLDevice>.fromOpaque(d).takeUnretainedValue() as MTLDevice
         } else {
@@ -855,7 +859,9 @@ final class KleptonCompositor {
             device = d
         }
         queue = device.makeCommandQueue()
+        NSLog("[cp] startup: building compositor pipelines")
         buildPipeline()
+        NSLog("[cp] startup: compositor pipelines complete")
 
         guard angle != nil else {
             // Not necessarily a run without a picture: a VULKAN guest never
@@ -971,10 +977,13 @@ final class KleptonCompositor {
             // returns, and the display shows the backdrop. Measured on device
             // as a lower-detail, shimmering picture, shimmering because WHICH
             // layer is first changes while the guest runs.
-            let dsdAlways = MTLDepthStencilDescriptor()
-            dsdAlways.depthCompareFunction = .always
-            dsdAlways.isDepthWriteEnabled = false
-            depthPassState = device.makeDepthStencilState(descriptor: dsdAlways)
+            depthPassState = device.makeDepthStencilState(
+                descriptor: KLLayerDepth.descriptor(writeDepth: false))
+            // Steam Link 5002527 submits coplanar peripheral and foveal quads.
+            // A strict depth test rejects the sharp layer at equal depth and
+            // makes small rounding changes appear as flickering detail.
+            overlayDepthWriteState = device.makeDepthStencilState(
+                descriptor: KLLayerDepth.descriptor(writeDepth: true))
 
             // The overlay pass — the guest's non-eye layers, which are the whole
             // of an Unreal title's UI. See encodeOverlays.
@@ -1461,7 +1470,9 @@ final class KleptonCompositor {
                 }
                 self.renderLoop(resuming: self.guestStarted)
                 KleptonAudio.suspend()
-                kl_app_guest_suspend()
+                // A renderer can be invalidated before Unity's first frame.
+                // nativePause must not run before its lifecycle has started.
+                if self.guestStarted { kl_app_guest_suspend() }
                 self.rendererCondition.lock()
                 let stoppedRenderer = self.layerRenderer!
                 DispatchQueue.main.async { stoppedRenderer.onSpatialEvent = { _ in } }
@@ -1535,8 +1546,12 @@ final class KleptonCompositor {
     }
 
     private func renderLoop(resuming: Bool) {
+        NSLog("[cp] startup: waiting for renderer (state=\(String(describing: layerRenderer.state)), resuming=\(resuming))")
         layerRenderer.waitUntilRunning()
+        NSLog("[cp] startup: renderer wait complete (state=\(String(describing: layerRenderer.state)))")
         guard layerRenderer.state != .invalidated else { return }
+        let runningRendererID = ObjectIdentifier(layerRenderer!)
+        DispatchQueue.main.async { KleptonSession.shared.rendererRunning(runningRendererID) }
         if probe == 9 {
             // The system default device, exactly as Apple's template uses —
             // not ANGLE's. Nothing here samples a guest texture, so there is no
@@ -2023,8 +2038,9 @@ final class KleptonCompositor {
         let originFromHead = Self.headFrom(originFromDevice, midpoint: eyeMidpointInDevice)
         if Self.pendingRecenter {
             Self.pendingRecenter = false
-            // Yaw + horizontal position only, exactly Quest's recenter: height
-            // and pitch/roll stay physical. Build the head's yaw-XZ frame and
+            kl_ovrp_reset_eye_level_height()
+            // Floor/Stage height and pitch/roll stay physical; EyeLevel also
+            // recalibrates its vertical reference. Build the head's yaw-XZ frame and
             // fold its inverse into the origin, so from the NEXT frame the
             // current gaze direction is the world's -Z at the world's origin.
             let c2 = originFromHead.columns.2
@@ -2249,8 +2265,9 @@ final class KleptonCompositor {
         let root = path.hasPrefix("/") ? URL(fileURLWithPath: path)
             : FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(path)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        eyesLock.lock(); let allocation = eyes[Self.key(0, stage)]; eyesLock.unlock()
-        guard let allocation else { return }
+        // Use the same authority as rendering: Vulkan publishes its own Metal
+        // texture and never allocates an entry in the ANGLE provider's cache.
+        guard let allocation = eyeSource(0, stage) else { return }
         let texture = allocation.texture
         let bytesPerPixel: Int
         switch texture.pixelFormat {
@@ -2854,8 +2871,8 @@ final class KleptonCompositor {
     /// studio splash, the loading screens and the menus while the world
     /// composited perfectly.
     ///
-    /// No depth ordering is needed: the eye quad sits at `KL_REPROJECT_DEPTH`
-    /// (500 m) and an overlay is a few metres away, so it is in front by geometry.
+    /// Composition follows layer submission order. Depth is retained for
+    /// visionOS reprojection, without testing later layers against earlier ones.
     /// `KL_GUEST_OVERLAYS=0` is the A/B. Deliberately not `KL_OVERLAYS`, which is
     /// already the SYSTEM overlays (the Home indicator, KleptonApp.swift) — two
     /// knobs one letter apart, fighting over one name, is a bug with no error
@@ -2890,13 +2907,11 @@ final class KleptonCompositor {
                                 originFromHead: simd_float4x4,
                                 writeDepth: Bool, underlays: Bool? = nil) -> Int {
         guard overlaysEnabled, let pipe = overlayPipeline else { return 0 }
-        // .greater against that same clear, and the shader's own projected
-        // position carries the quad's real distance, so what lands in the
-        // buffer is where the panel actually is.
-        if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
-        if underlays == true, !writeDepth, let depthPassState {
-            enc.setDepthStencilState(depthPassState)
-        }
+        // Preserve the guest's submission order even for coplanar layers.
+        // Writing the shader's finite depth still gives visionOS reprojection
+        // geometry when there is no eye image underneath these layers.
+        let quadDepth = writeDepth ? overlayDepthWriteState : depthPassState
+        if let quadDepth { enc.setDepthStencilState(quadDepth) }
         let n = Int(kl_ovrp_overlay_count())
         if n == 0 { return 0 }
         var drawn = 0
@@ -2938,7 +2953,7 @@ final class KleptonCompositor {
                                   drawable: drawable, originFromHead: originFromHead) {
                     drewEquirect = true
                 }
-                if drewEquirect, let depthState { enc.setDepthStencilState(depthState) }
+                if drewEquirect, let quadDepth { enc.setDepthStencilState(quadDepth) }
                 continue
             }
             // KL_OVERLAY_SKIP_HEADLOCKED=1: drop head-locked overlays. In AC Nexus
@@ -2963,6 +2978,7 @@ final class KleptonCompositor {
             // because with amplification there is one draw for both.
             var uniforms: [kl_overlay_uniforms] = []
             var texture: MTLTexture? = nil
+            var rightTexture: MTLTexture? = nil
             for vi in viewIndices {
                 var w: Int32 = 0, h: Int32 = 0
                 // Two producers, one consumer, asked in the order they can
@@ -2976,11 +2992,15 @@ final class KleptonCompositor {
                 // image we handed out — so that handle, resolved to its MTLTexture,
                 // is where the panel pixels actually are. Falls back to the layer
                 // image (RE4's path) then kl_glfb when texL carries nothing.
-                let t = kl_vulkan_mtl_for_handle(ov.tex)
+                let stereoRight = vi == 1 && ov.tex_right != 0 && ov.tex_right != ov.tex
+                let handle = stereoRight ? ov.tex_right : ov.tex
+                let imageLayer = kl_ovrp_overlay_texture_layer(ov.layer_id, stereoRight ? 1 : 0)
+                let t = kl_vulkan_mtl_for_handle(handle)
                     ?? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, Int32(vi), &w, &h)
-                    ?? kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h)
+                    ?? kl_glfb_layer_mtl_texture(imageLayer, ov.stage, &w, &h)
                 if texture == nil, let t { texture = Unmanaged<MTLTexture>
                     .fromOpaque(t).takeUnretainedValue() }
+                if vi == 1, let t { rightTexture = Unmanaged<MTLTexture>.fromOpaque(t).takeUnretainedValue() }
                 var u = kl_overlay_build(&ov, Int32(vi), originFromHead,
                                          Self.headFromView(drawable.views[vi].transform,
                                                            midpoint: eyeMidpointInDevice),
@@ -3001,9 +3021,10 @@ final class KleptonCompositor {
             }
             // The equirect branch above may have swapped the depth state for
             // its behind-everything compare; restore the quad's before drawing.
-            if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+            if let quadDepth { enc.setDepthStencilState(quadDepth) }
             enc.setRenderPipelineState(pipe)
             enc.setFragmentTexture(texture, index: 0)
+            enc.setFragmentTexture(rightTexture ?? texture, index: 1)
             enc.setFragmentSamplerState(sampler, index: 0)
             uniforms.withUnsafeBytes { buf in
                 enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
@@ -3703,6 +3724,7 @@ final class KleptonCompositor {
         // Apply it to both guest sampling and composite/headAt math.
         head.columns.3.y += simHeadHeight
         #endif
+        head.columns.3.y = kl_ovrp_tracking_head_y(head.columns.3.y)
         return head
     }
 

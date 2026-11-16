@@ -19,6 +19,8 @@
 #include <sys/stat.h>
 #include "klepton.h"
 #include "kl_mediaplayer.h"
+#include "kl_audio.h"
+#include "kl_vivox.h"
 #include "kl_jni.h"
 #include "kl_fault.h"
 #include "kl_target.h"
@@ -1864,7 +1866,171 @@ static klj_val klj_UnityPlayer_UnitySendMessage(void *env,void *self,const klj_v
     return (klj_val){0};
 }
 
+// Backtrace's Java helper stores a Unity GameObject/method pair and forwards
+// explicit reports as message + newline + stack. There is no Java Thread
+// exception dispatcher here; native faults remain with Klepton's crash logger.
+typedef struct {char *target,*method;int stopped;} klj_backtrace_handler;
+static void backtrace_handler_free(void *data) {
+    klj_backtrace_handler *h=data;if(!h)return;free(h->target);free(h->method);free(h);
+}
+static klj_val backtrace_handler_init(void *env,void *clazz,const klj_val *a,int n) {
+    void *object=kl_jni_new_object(klj_class_name(clazz));
+    klj_backtrace_handler *h=calloc(1,sizeof *h);
+    if(h){h->target=strdup(n>0&&klj_str(a[0].l)?klj_str(a[0].l):"");h->method=strdup(n>1&&klj_str(a[1].l)?klj_str(a[1].l):"");}
+    klj_as_object(object)->data=h;klj_own(object,backtrace_handler_free);
+    KLJ_LOG("Backtrace Android handler: explicit Unity reports supported; Java thread monitoring unavailable");
+    return (klj_val){.l=object};
+}
+static klj_val backtrace_handler_report(void *env,void *self,const klj_val *a,int n) {
+    klj_object *o=klj_as_object(self);klj_backtrace_handler *h=o?o->data:NULL;
+    const char *message=n>0?klj_str(a[0].l):NULL,*stack=n>1?klj_str(a[1].l):NULL;
+    char *text=NULL;
+    if(!h||!h->target||!h->method||asprintf(&text,"%s\n%s",message?message:"",stack?stack:"")<0)return (klj_val){0};
+    klj_val args[]={{.l=kl_jni_new_string(h->target)},{.l=kl_jni_new_string(h->method)},{.l=kl_jni_new_string(text)}};
+    klj_UnityPlayer_UnitySendMessage(env,NULL,args,3);free(text);
+    return (klj_val){0};
+}
+static klj_val backtrace_handler_stop(void *env,void *self,const klj_val *a,int n) {
+    klj_object *o=klj_as_object(self);if(o&&o->data)((klj_backtrace_handler *)o->data)->stopped=1;
+    return (klj_val){0};
+}
+static klj_val backtrace_handler_finish(void *env,void *self,const klj_val *a,int n) {
+    KLJ_LOG("Backtrace finish: no pending Android Thread exception on this host");
+    return (klj_val){0};
+}
+
+// Unity 6 builds immutable Android audio attributes/focus requests at startup.
+// Preserve their configuration and ownership. Android focus arbitration is not
+// provided by this host: requestAudioFocus reports REQUEST_FAILED, never a
+// fabricated grant or a delayed grant whose callback cannot be delivered.
+typedef struct {
+    int usage, content, gain, delayed;
+    void *attributes, *listener;
+} klj_audio_config;
+static void audio_config_free(void *data) {
+    klj_audio_config *c=data;
+    if(!c)return;
+    // Payload destruction runs while the JNI allocator already holds g_lock.
+    // Drop these owned references without recursively acquiring that mutex.
+    klj_object *attributes=klj_as_object(c->attributes),*listener=klj_as_object(c->listener);
+    if(attributes&&attributes->pinned)attributes->pinned--;
+    if(listener&&listener->pinned)listener->pinned--;
+    free(c);
+}
+static klj_audio_config *audio_config(void *object) {
+    klj_object *o=klj_as_object(object);
+    if(!o)return NULL;
+    if(!o->data){o->data=calloc(1,sizeof(klj_audio_config));klj_own(object,audio_config_free);}
+    return o->data;
+}
+#define AUDIO_INT(name,field) \
+static klj_val audio_set_##name(void *env,void *self,const klj_val *a,int n) { \
+    klj_audio_config *c=audio_config(self);if(c&&n)c->field=(int)a[0].j;return (klj_val){.l=self};} \
+static klj_val audio_get_##name(void *env,void *self,const klj_val *a,int n) { \
+    klj_audio_config *c=audio_config(self);return (klj_val){.j=c?c->field:0};}
+AUDIO_INT(usage,usage) AUDIO_INT(content,content) AUDIO_INT(gain,gain) AUDIO_INT(delayed,delayed)
+#undef AUDIO_INT
+#define AUDIO_REF(name,field) \
+static klj_val audio_set_##name(void *env,void *self,const klj_val *a,int n) { \
+    klj_audio_config *c=audio_config(self);if(c&&n){void *value=a[0].l; \
+    if(value)kl_jni_pin_object(value);if(c->field)kl_jni_unpin_object(c->field);c->field=value;}return (klj_val){.l=self};} \
+static klj_val audio_get_##name(void *env,void *self,const klj_val *a,int n) { \
+    klj_audio_config *c=audio_config(self);return (klj_val){.l=c?c->field:NULL};}
+AUDIO_REF(attributes,attributes) AUDIO_REF(listener,listener)
+#undef AUDIO_REF
+static klj_val audio_build(void *self,const char *cls) {
+    klj_audio_config *source=audio_config(self);
+    void *object=kl_jni_new_object(cls);
+    klj_audio_config *copy=audio_config(object);
+    if(source&&copy){*copy=*source;if(copy->attributes)kl_jni_pin_object(copy->attributes);if(copy->listener)kl_jni_pin_object(copy->listener);}
+    return (klj_val){.l=object};
+}
+static klj_val audio_build_attributes(void *env,void *self,const klj_val *a,int n) {return audio_build(self,"android/media/AudioAttributes");}
+static klj_val audio_build_focus(void *env,void *self,const klj_val *a,int n) {return audio_build(self,"android/media/AudioFocusRequest");}
+static klj_val audio_focus_init(void *env,void *clazz,const klj_val *a,int n) {
+    // NewObject supplies the class to constructor bindings. Return a new
+    // instance, rather than storing builder state into the class object.
+    void *object=kl_jni_new_object(klj_class_name(clazz));
+    audio_set_gain(env,object,a,n);
+    return (klj_val){.l=object};
+}
+static klj_val audio_focus_denied(void *env,void *self,const klj_val *a,int n) {
+    KLJ_LOG_ONCE("Android audio-focus arbitration is unavailable; requestAudioFocus returns REQUEST_FAILED");
+    return (klj_val){.j=0};
+}
+static klj_val audio_focus_abandon(void *env,void *self,const klj_val *a,int n) {return (klj_val){.j=1};}
+
+// Transcribed from Vegas's AndroidAudioManagerHelper v2.1.0. Its receivers
+// only reconfigure speaker/SCO routing and synchronize Android's separate
+// media/call volumes; they never call back into Unity. Swift's native audio
+// session already observes route changes, and all producers share one host
+// output/volume. Delegate routing/recovery there rather than force a phone
+// speaker or manufacture Android Bluetooth devices on Vision Pro.
+static klj_val vegas_audio_route(void *env,void *self,const klj_val *a,int n) {
+    kl_audio_resume();
+    KLJ_LOG("Vegas audio routing uses the native audio session and its route-change observer");
+    return (klj_val){0};
+}
+static klj_val vegas_audio_volume(void *env,void *self,const klj_val *a,int n) {
+    KLJ_LOG("Vegas media/call volume uses the shared native output; no separate Android streams");
+    return (klj_val){0};
+}
+static klj_val vegas_audio_stop(void *env,void *self,const klj_val *a,int n) {
+    KLJ_LOG("Vegas Android audio listener released; native session owns output recovery");
+    return (klj_val){0};
+}
+
+// In the supplied DEX, VivoxNative.init calls JniHelpers.init and discards
+// its boolean result. That helper can fail and leave JavaServices uninitialized.
+// The Android crypto/network/audio Java adapters are not available here; keep
+// that state rather than aborting merely because this void wrapper was called.
+// The native SDK's subsequent initialization must report its own real result.
+static klj_val klj_VivoxNative_init(void *env, void *self, const klj_val *a, int n) {
+    if (kl_vivox_native_active()) {
+        fprintf(stderr,"[jni] VivoxNative.init: using actual visionOS SDK; Android Java adapters are not required\n");
+        return (klj_val){0};
+    }
+    // JniHelpers first loads vivox-sdk through Java, including JNI_OnLoad.
+    // Its DT_NEEDED load alone does not perform that Java lifecycle step.
+    klj_val library={.l=kl_jni_new_string("vivox-sdk")};
+    klj_UnityPlayer_loadLibrary(env,self,&library,1);
+    fprintf(stderr,"[jni] VivoxNative.init: Android Java services unavailable; native services remain uninitialized\n");
+    return (klj_val){0};
+}
+
 const klj_binding klj_bind_services[] = {
+    {"com/vivox/vivoxnative/VivoxNative", "init", "(Landroid/content/Context;)V", klj_VivoxNative_init},
+    {"backtraceio/unity/BacktraceAndroidBackgroundUnhandledExceptionHandler","<init>","(Ljava/lang/String;Ljava/lang/String;)V",backtrace_handler_init},
+    {"backtraceio/unity/BacktraceAndroidBackgroundUnhandledExceptionHandler","ReportThreadException","(Ljava/lang/String;Ljava/lang/String;)V",backtrace_handler_report},
+    {"backtraceio/unity/BacktraceAndroidBackgroundUnhandledExceptionHandler","stopMonitoring","()V",backtrace_handler_stop},
+    {"backtraceio/unity/BacktraceAndroidBackgroundUnhandledExceptionHandler","finish","()V",backtrace_handler_finish},
+#define VEGAS_AUDIO(method,fn) \
+    {"com/luckyvr/audiohelper/AndroidAudioManagerHelper",#method,"(Landroid/content/Context;)V",fn}, \
+    {"com/luckyvr/audiohelper/AndroidAudioManagerHelper",#method,"(Lcom/unity3d/player/UnityPlayerActivity;)V",fn},
+    VEGAS_AUDIO(startListeningForOutputDeviceChanges,vegas_audio_route)
+    VEGAS_AUDIO(configureOutputByAvailableDevices,vegas_audio_route)
+    VEGAS_AUDIO(forceSpeakerphoneOn,vegas_audio_route)
+    VEGAS_AUDIO(forceSpeakerphoneOff,vegas_audio_route)
+    VEGAS_AUDIO(stopListeningForDeviceChanges,vegas_audio_stop)
+    VEGAS_AUDIO(registerVolumeSync,vegas_audio_volume)
+    VEGAS_AUDIO(unregisterVolumeSync,vegas_audio_stop)
+#undef VEGAS_AUDIO
+    {"android/media/AudioAttributes$Builder","setUsage","(I)Landroid/media/AudioAttributes$Builder;",audio_set_usage},
+    {"android/media/AudioAttributes$Builder","setContentType","(I)Landroid/media/AudioAttributes$Builder;",audio_set_content},
+    {"android/media/AudioAttributes$Builder","build","()Landroid/media/AudioAttributes;",audio_build_attributes},
+    {"android/media/AudioAttributes","getUsage","()I",audio_get_usage},
+    {"android/media/AudioAttributes","getContentType","()I",audio_get_content},
+    {"android/media/AudioFocusRequest$Builder","<init>","(I)V",audio_focus_init},
+    {"android/media/AudioFocusRequest$Builder","setAudioAttributes","(Landroid/media/AudioAttributes;)Landroid/media/AudioFocusRequest$Builder;",audio_set_attributes},
+    {"android/media/AudioFocusRequest$Builder","setAcceptsDelayedFocusGain","(Z)Landroid/media/AudioFocusRequest$Builder;",audio_set_delayed},
+    {"android/media/AudioFocusRequest$Builder","setOnAudioFocusChangeListener","(Landroid/media/AudioManager$OnAudioFocusChangeListener;)Landroid/media/AudioFocusRequest$Builder;",audio_set_listener},
+    {"android/media/AudioFocusRequest$Builder","build","()Landroid/media/AudioFocusRequest;",audio_build_focus},
+    {"android/media/AudioFocusRequest","getFocusGain","()I",audio_get_gain},
+    {"android/media/AudioFocusRequest","getAudioAttributes","()Landroid/media/AudioAttributes;",audio_get_attributes},
+    {"android/media/AudioFocusRequest","getOnAudioFocusChangeListener","()Landroid/media/AudioManager$OnAudioFocusChangeListener;",audio_get_listener},
+    {"android/media/AudioFocusRequest","acceptsDelayedFocusGain","()Z",audio_get_delayed},
+    {"android/media/AudioManager","requestAudioFocus","(Landroid/media/AudioFocusRequest;)I",audio_focus_denied},
+    {"android/media/AudioManager","abandonAudioFocusRequest","(Landroid/media/AudioFocusRequest;)I",audio_focus_abandon},
     {"com/unity3d/player/UnityPlayer", "UnitySendMessage", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", klj_UnityPlayer_UnitySendMessage},
     {"java/io/File", "<init>", "(Ljava/io/File;Ljava/lang/String;)V", klj_File_init_parent},
     {"java/io/File", "mkdirs", "()Z", klj_File_mkdirs},

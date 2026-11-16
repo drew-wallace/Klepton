@@ -23,6 +23,7 @@ KL_TARGET_ROW("intotheradius", "intotheradius", "intotheradius.apk", "intotherad
 KL_TARGET_ROW("jkxr_ja", "jkxr", "jkxr.apk", "jkxr/assets", "jkxr/lib/arm64-v8a", "libopenjk_ja", "jkxr_ja", "obb", KL_GUEST_JKXR)
 KL_TARGET_ROW("jkxr_jo", "jkxr", "jkxr.apk", "jkxr/assets", "jkxr/lib/arm64-v8a", "libopenjk_jo", "jkxr_jo", "obb", KL_GUEST_JKXR)
 KL_TARGET_ROW("openbrush", "openbrush", "openbrush.apk", "openbrush/assets", "openbrush/lib/arm64-v8a", "libmain", "openbrush", "obb", KL_GUEST_UNITY)
+KL_TARGET_ROW("pistolwhip-12", "pistolwhip", "pistolwhip.apk", "pistolwhip/assets", "pistolwhip/lib/arm64-v8a", "libmain", "pistolwhip-12", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("portal", "portal", "portal.apk", "portal/assets", "portal/lib/arm64-v8a", "liblauncher", "portal", "obb", KL_GUEST_SDL2)
 KL_TARGET_ROW("re4", "re4", "re4.apk", "re4/assets", "re4/lib/arm64-v8a", "libUE4", "re4", "Android/obb/com.Armature.VR4", KL_GUEST_UE4)
 KL_TARGET_ROW("redmatter2", "redmatter2", "redmatter2.apk", "redmatter2/assets", "redmatter2/lib/arm64-v8a", "libUE4", "redmatter2", "Android/obb/com.VerticalRobot.RedMatter2", KL_GUEST_UE4)

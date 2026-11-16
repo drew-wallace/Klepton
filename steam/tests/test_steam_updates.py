@@ -83,6 +83,30 @@ class SteamUpdateTests(unittest.TestCase):
         self.publish('stable', '20261022.1', '0.4.5')
         with self.assertRaisesRegex(ValueError, 'not installed'): updates.resolve('beta')
 
+    def test_new_bridge_rechecks_previously_incompatible_download_without_replacing_receipt(self):
+        client = self.publish('beta', '20261113.6134720', '0.5.9')
+        receipt_path = client.parents[2]/'receipt.json'
+        receipt = json.loads(receipt_path.read_text())
+        receipt.update(compatible=False, compatibility_error='Missing ABI profile')
+        updates.write_json(receipt_path, receipt)
+        before = receipt_path.read_bytes()
+        with patch.object(updates, 'compatibility', return_value=(True, '')) as check:
+            root, checked = updates.resolve('beta')
+            self.assertEqual(root/'androidarm64/libsteamclient.so', client)
+            self.assertTrue(checked['compatible'])
+            self.assertEqual(checked['compatibility_error'], '')
+            self.assertTrue(updates.status(remote=False)['beta']['current']['compatible'])
+            self.assertEqual(check.call_count, 2)
+        self.assertEqual(receipt_path.read_bytes(), before)
+        with patch.object(updates, 'compatibility', return_value=(False, 'Still unsupported')):
+            with self.assertRaisesRegex(ValueError, 'Still unsupported'):
+                updates.resolve('beta')
+        client.write_bytes(b'tampered')
+        with patch.object(updates, 'compatibility') as check:
+            with self.assertRaisesRegex(ValueError, 'Missing or changed'):
+                updates.resolve('beta')
+            check.assert_not_called()
+
     def test_status_keeps_local_versions_when_one_remote_feed_fails(self):
         self.publish('stable', '20261022.1', '0.4.5')
         def latest(channel):
@@ -138,6 +162,10 @@ class SteamUpdateTests(unittest.TestCase):
         self.assertIn('case 0x10d5704: return 0x10cb954;', header)
         self.assertIn('default: return SIZE_MAX;', header)
         with self.assertRaisesRegex(ValueError, 'ABI profile'): updates.login_header('0'*64)
+        beta = updates.login_header('807b50fe4bb34bd7de76180ed4a9ac305185ada8a51be354e93371aeff8a9786')
+        self.assertIn('case 0x1286858: return 0x12c0d94;', beta)
+        self.assertIn('case 0x10d5704: return 0x110c6d4;', beta)
+        self.assertIn('default: return SIZE_MAX;', beta)
 
     def test_staging_verification_rejects_channel_switch_even_with_identical_client_bytes(self):
         spec = importlib.util.spec_from_file_location('channel_mksteam', TOOLS.parent/'visionos/mksteam.py')
@@ -219,6 +247,18 @@ class SteamUpdateTests(unittest.TestCase):
         self.assertNotIn('chunk~2dcc5aaf7', (output/'index.html').read_text())
         (source/'sp.js').write_text('changed')
         with self.assertRaisesRegex(ValueError, 'pin'): steam_auth_ui.package(source, self.root/'bad', records=records)
+
+
+    def test_beta_ui_exposes_supported_loader_and_rejects_ambiguous_bootstraps(self):
+        source = '// prefix\n' + steam_auth_ui.BETA_ENTRY + '\n// suffix'
+        exposed = steam_auth_ui.expose_loader(source)
+        self.assertNotIn(steam_auth_ui.BETA_ENTRY, exposed)
+        self.assertIn(steam_auth_ui.BETA_LOADER, exposed)
+        self.assertTrue(exposed.startswith('// prefix\n'))
+        self.assertTrue(exposed.endswith('\n// suffix'))
+        for main in ['unknown', source + steam_auth_ui.BETA_ENTRY, source + steam_auth_ui.ENTRY]:
+            with self.assertRaisesRegex(ValueError, 'bootstrap'):
+                steam_auth_ui.expose_loader(main)
 
 
 if __name__ == '__main__':

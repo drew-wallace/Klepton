@@ -7,6 +7,7 @@
 //   3. local statics    — small bionic-isms defined right here
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <errno.h>
 #include "kl_eventfd.h"
 #include <stdarg.h>
@@ -2028,6 +2029,13 @@ typedef struct { const char *name; void *fn; } kl_entry;
 
 static const kl_entry g_shim[] = {
 #include "kl_libc_table.h"
+
+    // intmax_t, long and long long are signed 64-bit on bionic and Darwin
+    // arm64. Keep these forwards even when locally available guests omit
+    // them from the generated table; Pistol Whip calls llabs during startup.
+    E("imaxabs", imaxabs),
+    E("labs", labs),
+    E("llabs", llabs),
 
     // stdio needing guest-FILE translation
     E("__sF", g_sF),

@@ -77,6 +77,10 @@ struct MicView: View {
 
             Toggle("Allow microphone", isOn: $mic.settings.enabled)
 
+            Text("Enable this before starting the game and allow recording when asked. "
+                 + "If voice capture has already failed, reopen the game after enabling it.")
+                .font(.caption).foregroundStyle(.secondary)
+
             Text(KleptonMic.describe(mic.settings))
                 .font(.system(.caption2, design: .monospaced))
                 .textSelection(.enabled)

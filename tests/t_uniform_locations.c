@@ -39,5 +39,40 @@ int main(void){
     glTexParameteri(0x0DE1,0x2801,0x2600);glTexParameteri(0x0DE1,0x2800,0x2600);
     glDrawArrays(4,0,3);uint8_t pixel[4];glReadPixels(16,16,1,1,0x1908,0x1401,pixel);
     assert(abs(pixel[0]-191)<3&&abs(pixel[1]-191)<3&&abs(pixel[2]-191)<3&&pixel[3]==255);assert(!glGetError());
-    puts("Uniform locations: mixed baked/named writes, compact sampler units, 360-element arrays, getter round trips and actual GPU color pass");
+    // Room changes load additional shader variants. Previously the first 64
+    // shaders/programs consumed a fixed mapping table and later UI/video
+    // programs silently lost their baked sampler locations.
+    GL(void,glDeleteProgram,(uint32_t));GL(void,glDeleteShader,(uint32_t));
+    uint32_t rooms[96];
+    for(int round=0;round<3;round++){
+    for(unsigned i=0;i<sizeof rooms/sizeof rooms[0];i++){
+        rooms[i]=glCreateProgram();
+        uint32_t shaders[2];
+        for(int stage=0;stage<2;stage++){
+            uint32_t shader=shaders[stage]=glCreateShader(stage?0x8B30:0x8B31);
+            glShaderSource(shader,1,sources+stage,NULL);glCompileShader(shader);
+            glGetShaderiv(shader,0x8B81,&ok);assert(ok);
+            glAttachShader(rooms[i],shader);
+            if(i%2)glDeleteShader(shader); // Attached deleted shaders remain linkable.
+        }
+        glLinkProgram(rooms[i]);glGetProgramiv(rooms[i],0x8B82,&ok);assert(ok);
+        if(!(i%2))for(int stage=0;stage<2;stage++)glDeleteShader(shaders[stage]);
+        int sampler=glGetUniformLocation(rooms[i],"image");
+        if(sampler!=0)fprintf(stderr,"room shader %u lost baked sampler zero: got %d\n",i,sampler);
+        assert(sampler==0);
+        glUseProgram(rooms[i]);glUniform1i(0,0);
+        glUniform1fv(glGetUniformLocation(rooms[i],"values"),360,data);
+        glUniform1f(glGetUniformLocation(rooms[i],"tone"),.5f);
+        glDrawArrays(4,0,3);glReadPixels(16,16,1,1,0x1908,0x1401,pixel);
+        assert(abs(pixel[0]-191)<3&&pixel[3]==255&&!glGetError());
+    }
+    for(unsigned i=0;i<sizeof rooms/sizeof rooms[0];i++)glDeleteProgram(rooms[i]);
+    // Deletion is deferred while this program is current; its mapping must
+    // survive until it is unbound, just like the real GL program.
+    assert(glGetUniformLocation(rooms[95],"image")==0);
+    glUniform1i(0,0);glDrawArrays(4,0,3);glReadPixels(16,16,1,1,0x1908,0x1401,pixel);
+    assert(abs(pixel[0]-191)<3&&pixel[3]==255&&!glGetError());
+    glUseProgram(p);assert(glGetUniformLocation(p,"image")==0);
+    }
+    puts("Uniform locations: mixed baked/named writes, 360-element arrays, 96 live programs, room reload/deletion and actual GPU color pass");
 }

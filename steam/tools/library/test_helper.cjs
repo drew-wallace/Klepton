@@ -45,6 +45,7 @@ test('downloads manifest files, empty files, OBBs and SHA-256 receipt inventory'
 
 for (const [scenario, code] of [['unsafe','unsafe_path'], ['no_license','no_license'], ['missing_apk','missing_apk'],
   ['collision','file_collision'], ['checksum','checksum'], ['connection','steam_failed'], ['manifest','steam_failed'],
+  ['background_error', 'steam_failed'],
   ['cdn_timeout', 'steam_failed'], ['cdn_http', 'steam_failed'], ['cdn_private_error', 'steam_failed']]) {
   test(`fails safely on ${scenario} without publishing success or logging library exceptions`, async () => {
     const result = await run(scenario);
@@ -56,6 +57,11 @@ for (const [scenario, code] of [['unsafe','unsafe_path'], ['no_license','no_lice
       assert.equal(JSON.stringify(result.events).includes('sensitive-'), false);
       if (scenario === 'cdn_timeout') assert.equal(result.events.find(e => e.event === 'error').reason, 'CDN request timed out');
       if (scenario === 'cdn_http') assert.equal(result.events.find(e => e.event === 'error').reason, 'HTTP 503');
+      if (scenario === 'connection') {
+        assert.equal(result.events.find(e => e.event === 'error').eresult, 5);
+        assert.equal(result.events.find(e => e.event === 'error').phase, 'connect');
+      }
+      if (scenario === 'background_error') assert.equal(result.events.find(e => e.event === 'error').phase, 'metadata');
     } finally { await result.cleanup(); }
   });
 }
@@ -90,6 +96,19 @@ test('flushes a large library result before helper exit', async () => {
     assert.equal(result.events.find(e => e.event === 'result').games.length, 1500);
   } finally { await result.cleanup(); }
 });
+
+for (const action of ['login', 'refresh']) {
+  test(`${action} returns only accessible Android bundles, including non-VR games`, async () => {
+    const result = await run('mixed', action);
+    try {
+      assert.equal(result.code, 0);
+      const output = result.events.find(e => e.event === 'result');
+      assert.deepEqual(output.games.map(g => g.app_id), ['10', '12']);
+      assert.equal(output.games.find(g => g.app_id === '12').vr, false);
+      assert.deepEqual(output.owned_app_ids, ['10', '11', '12', '13', '14']);
+    } finally { await result.cleanup(); }
+  });
+}
 
 test('scoped refresh requests matching and newly owned apps only', async () => {
   const result = await run('scoped', 'refresh', {steam_id: '76561198000000001',

@@ -31,6 +31,9 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door);
 // Why the last call that returned non-zero did. Never NULL.
 const char *kl_driver_error(void);
 
+// The same Unity command line is supplied to initJni and the launch Intent.
+const char *kl_driver_unity_arguments(void);
+
 // Whether the guest brought its own render thread, and therefore whether there
 // is any such thing as an inline frame. Three of the four doors do: Steam Link
 // spawns one inside onCreate, an Unreal guest inside android_main, an OpenJK

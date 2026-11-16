@@ -12,6 +12,7 @@ const {gameInfo, safePath} = require('./catalog.cjs');
 const {downloadFile} = require('./download.cjs');
 const {createTransport} = require('./transport.cjs');
 const {CDNPool} = require('./cdn_pool.cjs');
+const {installProductInfoTransport} = require('./product_info.cjs');
 
 let lastProgress = 0;
 const send = (event, data = {}) => {
@@ -27,15 +28,22 @@ const input = readline.createInterface({input: process.stdin, terminal: false});
 let session, client;
 let started = false;
 let finishing = false;
+let phase = 'sign_in';
+function reportError(error) {
+  const code = ['unsafe_path', 'no_android', 'no_license', 'file_collision', 'missing_apk', 'checksum', 'expired', 'disk_space'].includes(error.message)
+    ? error.message : 'steam_failed';
+  // Only structured, bounded fields cross the pipe; exception text may contain credentials.
+  send('error', {code, reason: error.safeReason || '', phase,
+    ...(Number.isInteger(error.eresult) && error.eresult > 0 && error.eresult < 200 ? {eresult: error.eresult} : {}),
+    ...(['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED', 'EHOSTUNREACH'].includes(error.code) ? {network_code: error.code} : {})});
+}
 input.on('line', line => {
   let command;
   try { command = JSON.parse(line); } catch { return; }
   if (!started) {
     started = true;
     main(command).then(() => finish(0), error => {
-      const code = ['unsafe_path', 'no_android', 'no_license', 'file_collision', 'missing_apk', 'checksum', 'expired', 'disk_space'].includes(error.message)
-        ? error.message : 'steam_failed';
-      send('error', {code, reason: error.safeReason || ''});
+      reportError(error);
       finish(1);
     });
   } else if (command.guard_code && session) {
@@ -55,6 +63,10 @@ function finish(code) {
 }
 process.on('SIGTERM', () => finish(130));
 process.on('SIGINT', () => finish(130));
+// steam-user can reject from background login work outside main's promise.
+// Keep those failures on the private protocol instead of losing them on stderr.
+process.on('uncaughtException', error => { reportError(error); finish(1); });
+process.on('unhandledRejection', error => { reportError(error || {}); finish(1); });
 
 async function authenticate(request) {
   if (request.refresh_token) return request.refresh_token;
@@ -79,10 +91,12 @@ async function authenticate(request) {
 
 async function connect(request) {
   const refreshToken = await authenticate(request);
+  phase = 'connect';
   // Null disables all steam-user on-disk caches, including machine auth material.
   // PICS caching eagerly requests every licensed app before ownershipCached.
   // Read package ownership ourselves so a scoped refresh stays scoped.
   client = new SteamUser({enablePicsCache: false, dataDirectory: null, autoRelogin: false, renewRefreshTokens: true});
+  installProductInfoTransport(client);
   let latestToken = refreshToken;
   client.on('refreshToken', token => {
     latestToken = token;
@@ -101,7 +115,7 @@ async function connect(request) {
   credential();
   await owned;
   // A disconnect must fail pending content requests, not leave the UI waiting indefinitely.
-  const disconnected = () => { if (!finishing) { send('error', {code: 'steam_failed'}); finish(1); } };
+  const disconnected = error => { if (!finishing) { reportError(typeof error === 'number' ? {eresult: error} : error || {}); finish(1); } };
   client.on('error', disconnected);
   client.on('disconnected', disconnected);
   return client.steamID.getSteamID64();
@@ -143,10 +157,12 @@ async function resolveShared(info) {
 
 async function main(request) {
   const steamID = await connect(request);
+  phase = 'ownership';
   const {apps: owned, depots: ownedDepots} = await ownership();
+  phase = 'metadata';
   if (request.action === 'refresh' || request.action === 'login') {
     const games = [];
-    // Unknown titles still need discovery so newly purchased VR games appear.
+    // Unknown titles still need discovery so newly purchased Android games appear.
     // Account matching prevents an old account's shortlist affecting a new login.
     const scoped = request.steam_id === steamID && Array.isArray(request.app_ids) && Array.isArray(request.known_app_ids);
     const candidates = new Set((request.app_ids || []).map(Number));
@@ -157,7 +173,8 @@ async function main(request) {
       for (const [id, record] of Object.entries(apps)) {
         const info = record.appinfo;
         if (!info || !['game', 'demo', 'application'].includes(String(info.common?.type || '').toLowerCase())) continue;
-        games.push(gameInfo(id, await resolveShared(info), ownedDepots));
+        const game = gameInfo(id, await resolveShared(info), ownedDepots);
+        if (game.android_available) games.push(game);
       }
       send('progress', {completed: Math.min(i + 50, ids.length), total: ids.length, kind: 'library'});
     }
@@ -177,6 +194,7 @@ async function main(request) {
   // Download paths are assigned by the Python owner, never Steam or UI metadata.
   const destination = path.resolve(request.destination);
   const inventory = new Map();
+  phase = 'manifest';
   for (const depot of branch.depots) {
     const {manifest} = await client.getManifest(Number(depot.app_id), Number(depot.depot_id), depot.manifest_id, request.branch);
     for (const file of manifest.files) {
@@ -190,6 +208,7 @@ async function main(request) {
   }
   if (!inventory.has(launch.executable.toLowerCase())) throw new Error('missing_apk');
   const files = [];
+  phase = 'download';
   const total = [...inventory.values()].reduce((n, e) => n + Number(e.file.size), 0);
   send('progress', {kind: 'download', completed: 0, total});
   const space = await fs.statfs(destination);

@@ -279,6 +279,49 @@ answers GL and kl_glfb never initializes.
   the guest over the Simulator's ETC2 fault.
 - `KL_GLFB_LOG_UNITS=1` — log texture-unit traffic (the "Invalid texture
   unit!" neighbourhood — see `KL_POKE_CAP` under Viewer).
+- `KL_WEBVIEW_TRACE=1` — bounded menu/browser diagnostics without pausing the
+  process or reading GPU textures. For each browser, logs CPU snapshot pixel
+  statistics at approximately frames 1, 10, 50, 100, 600 and 1800 after each
+  navigation (up to eight navigations per view), plus DOM readiness,
+  visibility, element-count, viewport and numeric video/canvas summaries at
+  frames 50 and later thresholds, including open shadow roots. Main-frame HTTP
+  status, script/rejection counts and coarse page-error categories distinguish
+  failed loading from failed capture without recording error text. Also identifies immutable
+  storage on the first BGRA texture upload. No page text, credentials, URLs,
+  screenshots or audio samples are included in these diagnostic summaries.
+  Capture cadence (completed FPS, target, mean capture latency) is measured in
+  up to three five-second windows per navigation.
+- `KL_WEBVIEW_VIDEO_CANVAS=1` — experimental workaround for WebKit snapshots
+  omitting hardware-backed HTML video. Paints up to four visible inline videos
+  into pointer-transparent canvas siblings, including players in nested open
+  shadow roots, capped at 1280×720 each, only when
+  taking a snapshot. Playback and audio remain in WebKit. Defaults OFF pending
+  physical Twitch validation. Skips native controls and protected media; does
+  not capture video inside cross-origin frames. Canvas siblings are removed
+  when their video disappears or leaves the viewport.
+  When the native host window is hidden, a playing, opaque, full-page
+  MediaStream can supply frames directly from its origin-clean canvas as
+  bounded JPEG data (1280×720, at most 4 MiB), avoiding transparent native
+  snapshots. Ordinary HTML player pages keep native page capture. This does
+  not extract stream URLs, bypass canvas origin restrictions or capture
+  protected video; frame data is never written to logs or disk.
+  Full-page shadow hosts may contain centered or letterboxed video; positive
+  axis-aligned CSS scale/translation is supported. A wholly transparent native
+  snapshot from a hidden host while video plays is discarded. Numeric rejection
+  categories distinguish export errors (2), oversize frames (3), a non-MediaStream
+  source (4), stopped playback (5), protected/native-control video (6), opacity
+  (7), unsupported transforms (8) and a non-full-page player (9). Bounded numeric
+  geometry and native playback-state diagnostics accompany rejected captures.
+- `KL_WEBVIEW_VIDEO_FPS=30` — capture target while the canvas workaround paints
+  a playing video (clamped to 10–60). Static pages and paused video remain at
+  10 FPS. A single capture is allowed in flight, and the next is scheduled from
+  its predecessor's start time; slower captures do not create a backlog.
+- `KL_OVRP_OVERLAY_TRACE=1` — numeric layer metadata at submits 1, 120 and 600
+  for each of up to 128 layer IDs. Logs layer shape, size, underlay status,
+  submission index, pose, per-eye crop rectangles and colour/alpha overrides.
+  Legacy SetOverlayQuad3 also logs a bounded presence/absence of source textures,
+  without dereferencing its version-sensitive pose arguments. No GPU readback, image
+  dumps or debugger attachment.
 
 ## Networking (`runtime/libc/kl_shim.c`)
 
@@ -1067,6 +1110,15 @@ puts the camera on the ground with its hands underneath it.
   head+hands once per frame at `ovrp_Update2` (the guest's real per-step latch
   point). The A/B if the pinning is ever suspected of costing latency;
   controller *buttons* stay live either way.
+- `KL_OVRP_FRAME_SAMPLES=0|1` — use frame-indexed render tracking snapshots.
+  Default on only for Vegas Infinite CP178.7, package version 1102036; off for
+  other packages/versions. Repeated `Update3` calls for one render frame reuse
+  its head/hands snapshot, indexed pose queries read the requested frame, and
+  `BeginFrame` records that same pose for reprojection. A 64-entry history
+  tolerates lookahead from the other thread and resets on a frame-counter
+  restart. Physics and negative-index queries retain latest-sample behavior.
+  Explicit `0` is the diagnostic rollback. Physical testing confirmed smooth
+  suite head turns at the original resolution with this enabled.
 - `KL_OVRP_EYE_CANT=0` — ignore the per-eye rotation the frontend pushes
   (`kl_ovrp_set_eye_rotation`) and restore the dropped-cant behaviour as the
   A/B. Identity by default, so host and headless runs are unchanged.
@@ -1081,7 +1133,13 @@ puts the camera on the ground with its hands underneath it.
   Pairs with `KL_VIEW_EYE=1`. Read on the same path as the union below, so it
   overrides the compositor on device too.
 - `KL_OVRP_UNIFY_FRUSTUM=1` — tell **both** eyes the union of the two cones.
-  **Default 0 as of 2026-08-13**; it used to default to on for a multiview
+  Default 0 except for Into The Radius and Vegas Infinite CP178.7 (package
+  `com.LuckyVR.PokerStarsVR`, version 1102036). Vegas renders both eyes with
+  nearly identical framing and submits full-width viewports, so applying the
+  display's different per-eye cones separates the two images. The shared cone
+  keeps its guest and compositor projections consistent. An explicit `0`
+  restores the asymmetric cones for comparison.
+  It used to default to on for a multiview
   guest, which was the stopgap for BONELAB's warped right eye. That is now
   understood — it is Oculus symmetric projection, the plugin computes the same
   union itself and submits a per-eye `ViewportRect` saying where each eye's
@@ -1785,8 +1843,9 @@ reads no knobs).
 - `KL_MIC_RAW=1` — visionOS diagnostic capture only. Use plain RemoteIO rather
   than VoiceProcessingIO to isolate voice-processing ducking from microphone
   ownership and route changes. Requires the guest microphone to be enabled and
-  a guest input stream. Sacrifices noise suppression and automatic gain; the
-  normal VPIO path requests minimum other-audio ducking.
+  a guest input stream. Sacrifices echo cancellation, noise suppression and
+  automatic gain. Normal capture uses a duplex VPIO unit with the actual game
+  playback as its speaker reference and requests minimum other-audio ducking.
 - `KL_AUDIO_SPATIAL=1` — visionOS only. Leave the system's spatialiser in the
   default configuration instead of requesting an unanchored, non-head-tracked
   `.fixed(soundStageSize: .small)` experience. The normal fixed experience keeps
@@ -2514,6 +2573,11 @@ except its own control vars (next section).
   guest on cold boot and re-entry. **Default on for all guests, including Steam
   Link:** settings and Quit stay available after pairing hands off to VR.
   `=0` closes it when the immersive space opens.
+- `KL_RENDERER_STARTUP_RETRY=1` — diagnostic opt-in for one automatic reopen
+  after the renderer has stayed paused for eight seconds, while both app and
+  control window are active. Default OFF: paused may indicate a pending system
+  immersion confirmation. The Reopen VR button remains available without this
+  flag, and a timed-out startup explains the wait in the control window.
 - `KL_SIM_HEAD_HEIGHT` — simulator-only standing camera lift in metres.
   **Default `1.6`:** a Home launch has the same standing view as a scripted
   launch. `0` disables the lift; physical-headset tracking is unaffected.
@@ -2810,6 +2874,9 @@ Read by the scripts themselves, never forwarded to the app.
   are forwarded to the app, so tearing the bridge down would quit the thing you
   are looking at the moment the script stops watching it. The next run's
   `--terminate-existing` ends both, so at most one bridge is ever outstanding.
+- `KL_TRACE_JNI=1` — restore per-call reflection-method and permission-poll
+  diagnostics. These routine hot-path messages are off by default; lookup
+  failures and other JNI diagnostics remain available.
 - `KL_LOG_FILE=0` — the app does **not** redirect stdout/stderr into
   `Documents/klepton-boot.log` (visionOS, `kl_app.c`). The only way anything
   outside the process can read them live; the in-window boot report and the
@@ -2828,6 +2895,69 @@ Not knobs — the shim reads these to answer the guest with host truth.
 
 
 ### GLES compatibility descriptions
+
+`KL_UNITY_ARGS="<arguments>"` supplies the same Unity launch arguments to
+`initJni` and the Android launch Intent. An explicitly empty value suppresses
+title-specific arguments; unset preserves them. This is a diagnostic override,
+not a way to add graphics backends or shader variants absent from an APK.
+
+`KL_OVRP_ADAPTER_ID=none` returns no preferred XR graphics adapter, letting Unity
+select an enumerated Vulkan GPU. Vegas Infinite package
+`com.LuckyVR.PokerStarsVR`, version 1102036, uses this automatically: its Unity
+6000.3.9f1 compares the XR value directly to `VkPhysicalDevice` handles, so the
+legacy LUID buffer prevents device selection. Other packages/versions retain
+the existing behavior. `KL_OVRP_ADAPTER_ID=legacy` overrides that default for
+comparison. GLES 3.0 is unavailable in this Vegas build because it ships only
+Vulkan shaders.
+
+Vegas Infinite package/version 1102036 automatically mirrors its Vulkan quad
+overlays vertically. The title logo uses a quad overlay while its eye image
+remains black; flipping eye textures does not fix it. This correction was
+confirmed on device. `KL_OVERLAY_FLIP_Y=0` restores the uncorrected orientation;
+an explicit `1` applies the shader override once. Other packages and versions
+retain the existing default, and eye-texture orientation is unchanged.
+
+`KL_VEGAS_SPACEWARP=1` restores Vegas CP178.7's original Application SpaceWarp
+setting for diagnosis. By default, the runtime clears that setting before the
+audited Oculus XR plugin's `SetUserDefinedSettings` call: its unsupported
+motion/depth texture request otherwise aborts XR display startup, leaving
+audio playing over a black eye image. This is scoped to package version
+1102036 and the inspected plugin export; all other settings pass through.
+With the correction, device logs show a running display, one render pass,
+SinglePassMultiview, and continuing guest eye submissions.
+
+For Vegas CP178.7, `tools/vivox_native.py` builds Unity's public Vivox 16.12.1
+visionOS libraries into `KleptonVivox.xcframework`. The archive and native inputs
+are hash-pinned in `tools/vivox_native.lock.json`; the framework retains the SDK
+license and privacy manifest. The installer prepares it automatically for this
+package/version. The wrapper covers all 4,596 exports used by the Android
+wrapper, and the runtime routes that library handle to the actual native SDK.
+Device validation confirms Vivox manager initialization, login tasks,
+audio-streaming setup, and visible suite entry. Communication with another
+player has not been exercised.
+Other games and versions retain their existing library handling. The current
+framework contains the physical visionOS slice only.
+
+`KL_VEGAS_NATIVE_VIVOX=0` selects the original Android libraries for diagnosis.
+Their Java crypto, TLS, and audio adapters are not ported, and the SDK aborts
+in `JavaServices::GetAndroidAudioBridge` when they are uninitialized. In that
+path, the default returns the documented `VxErrorNotSupported` (5018) from this
+exact plugin's `vx_initialize3` export instead. Vegas treats that initialization
+error as a bootstrap failure; it does not provide a playable voice-free mode.
+`KL_VEGAS_VIVOX=1` restores the original Android initializer as well. Neither
+diagnostic override supplies a successful voice connection. Reference:
+https://docs.unity.com/en-us/vivox-core/reference-manual/core/_vxc_errors_8h.
+
+`KL_VEGAS_VIEW_MIPS=0` disables the CP178.7 resident-mip view correction for
+diagnosis. Opening the watch menu requests nine mip levels on an allocated
+64×64 texture with seven levels, which causes a Metal texture-view assertion.
+For this package/version's sampled 2D textures, the runtime limits an excessive
+explicit count to the remaining allocated levels. Valid ranges, Vulkan's
+remaining-level sentinel, attachment views, and other games retain their
+existing behavior. Allocation metadata is refreshed when a handle is reused
+and records a single-mip allocation if the image fallback selected one.
+On device, the guard corrected the nine-level request to seven; the menu opened
+and stayed open (user-confirmed).
 
 `KL_GLES_VERSION=3.0` or `3.1` selects matching GLES version strings and numeric
 queries. Unset values preserve the target default. The original Bigscreen
@@ -2848,14 +2978,43 @@ metadata; it does not record buffer contents or profile values.
 
 ### Meta account-service diagnostics
 
-Klepton currently has no authenticated Meta account provider. Missing user,
-organization ID, proof and online access-token requests complete with typed
-service-unavailable errors. The `[plat] account service unavailable:` marker
-means no Meta HTTP request was made; it is not a password rejection or an
-internet connectivity diagnosis. Bigscreen's automatic login needs genuine
-platform identity and a fresh proof nonce.
+Without a linked session, user, organization ID, proof and online access-token
+requests complete with typed service-unavailable errors. The `[plat] account
+service unavailable:` marker means no Meta HTTP request was made; it is not a
+password rejection or an internet connectivity diagnosis.
 
-`KL_NET_OFFLINE=1` retains the pre-existing synthetic access-token completion
+The experimental native provider accepts a game-scoped session through
+`Documents/klepton-meta-session.json` (`app_id` and `access_token` only), consumes
+it into the app's device-only Keychain, and removes the import after storing it.
+`tools/meta_login.swift` performs interactive Meta SSO on the Mac and can export
+that game's token into a private transfer file. Credentials are not launch
+arguments, environment variables, or log payloads. User snapshots survive until
+the SDK frees their message; changing game/session cancels stale requests.
+
+Live Meta calls verified the profile fields `id`, `alias`, `display_name`,
+`profile_url`, and `profile_url_small`, plus `POST /user_nonce_generate`.
+The game server validates each fresh proof using its own application credential;
+the client does not possess that credential. Friends are currently an explicit
+service-unavailable completion. This does not establish gameplay compatibility
+or certify any other game's automatic login.
+
+`ovr_DeviceApplicationIntegrity_GetIntegrityToken` completes with a typed
+service-unavailable error (`0x3271ABDA`) rather than terminating the guest.
+Device/app attestation is separate from user proof and Meta account sign-in;
+the native provider cannot issue it. Meta documents the attestation service
+as Android-only on supported Quest devices:
+https://developers.meta.com/vr/documentation/unity/ps-attestation-api/.
+Vegas CP178.7 requests it after account login. On device, its analytics handler
+logs that it continues without attestation; sign-in, player-account retrieval,
+and Photon lobby authentication succeed. That does not establish support for
+every subsequent game/server operation.
+
+`ovr_IAP_GetViewerPurchases` also completes with a typed service-unavailable
+error (`0x3A0F8419`). A bare request ID zero leaves some SDK callbacks awaiting
+a message that never arrives. This completion supplies no purchase array or
+ownership result; checkout, consumption, and content delivery remain unsupported.
+
+`KL_NET_OFFLINE=1` disables native Meta requests and retains the pre-existing synthetic access-token completion
 for explicitly offline diagnostics; the socket layer prevents exchange with a
 server. `KL_PLAT_USER=1` is the existing synthetic local-profile diagnostic for
 titles that otherwise quit or wait. It is not Meta sign-in and cannot supply

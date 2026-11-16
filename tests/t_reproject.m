@@ -1257,6 +1257,18 @@ static void check_overlay_math(void) {
        "reflected overlay axes mirror UVs without rejecting or changing quad geometry");
     ov.mirror_x=0;ov.mirror_y=0;
 
+    ov.has_uv_rect=1;
+    ov.uv_rect[0][2]=.5f;ov.uv_rect[0][3]=1;
+    ov.uv_rect[1][0]=.5f;ov.uv_rect[1][2]=.5f;ov.uv_rect[1][3]=1;
+    kl_overlay_uniforms croppedLeft=kl_overlay_build(&ov,0,matrix_identity_float4x4,
+        matrix_identity_float4x4,P);
+    kl_overlay_uniforms croppedRight=kl_overlay_build(&ov,1,matrix_identity_float4x4,
+        matrix_identity_float4x4,P);
+    ok(croppedLeft.uv_rect.x==0 && croppedLeft.uv_rect.z==.5f &&
+       croppedRight.uv_rect.x==.5f && croppedRight.uv_rect.z==.5f,
+       "side-by-side stereo crops preserve the guest's left and right regions");
+    ov.has_uv_rect=0;
+
     // A shape this pass cannot draw is REFUSED rather than drawn as a flat
     // rectangle — see kl_overlay_build. Cylinder is the one a guest is most
     // likely to submit next.
@@ -1344,8 +1356,9 @@ static void check_overlay_pixels(void) {
     memcpy(want,     s0 + 8, 8);        // picture top    -> output row 0
     memcpy(want + 8, s0,     8);        // picture bottom -> output row 1
 
-    for (int pass = 0; pass < 2; pass++) {
-        ov.origin_top_left = pass;      // GL first, then Vulkan
+    for (int pass = 0; pass < 4; pass++) {
+        ov.origin_top_left = pass & 1;  // GL first, then Vulkan
+        ov.mirror_y = pass >= 2;        // Content correction, independent of API.
         kl_overlay_uniforms u = kl_overlay_build(&ov, 0, matrix_identity_float4x4,
                                                  matrix_identity_float4x4, P);
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1357,6 +1370,7 @@ static void check_overlay_pixels(void) {
         id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:rp];
         [enc setRenderPipelineState:ps];
         [enc setFragmentTexture:src atIndex:0];
+        [enc setFragmentTexture:src atIndex:1];
         [enc setFragmentSamplerState:samp atIndex:0];
         [enc setVertexBytes:&u length:sizeof u atIndex:0];
         [enc setFragmentBytes:&u length:sizeof u atIndex:0];
@@ -1369,10 +1383,43 @@ static void check_overlay_pixels(void) {
         // The panel covers the viewport exactly (proved above), so the output IS
         // the picture: rows reversed for a GL source, memory order for a Vulkan
         // one. Identical to the eye pass's two answers, which is the point.
-        ok(memcmp(out, pass ? s0 : want, 16) == 0,
-           pass ? "the overlay reads a top-left-origin (Vulkan) layer the right way up"
-                : "the overlay reads a GL layer the right way up");
+        ok(memcmp(out, ((pass & 1) ^ (pass >= 2)) ? s0 : want, 16) == 0,
+           pass >= 2 ? "vertical panel correction reverses rows while preserving columns"
+             : pass ? "the overlay reads a top-left-origin (Vulkan) layer the right way up"
+                    : "the overlay reads a GL layer the right way up");
     }
+    ov.mirror_y = 0;
+
+    // A distinct right-eye image and an alpha/colour override must survive all
+    // the way through the actual fragment shader, not just its C uniforms.
+    id<MTLTexture> right = [dev newTextureWithDescriptor:td];
+    uint8_t green[16]={0,255,0,255,0,255,0,255,0,255,0,255,0,255,0,255};
+    [right replaceRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0 withBytes:green bytesPerRow:8];
+    ov.tex=1;ov.tex_right=2;ov.has_color_scale_bias=1;
+    ov.color_scale[0]=ov.color_scale[1]=ov.color_scale[2]=ov.color_scale[3]=.5f;
+    kl_overlay_uniforms stereo=kl_overlay_build(&ov,1,matrix_identity_float4x4,
+        matrix_identity_float4x4,P);
+    MTLRenderPassDescriptor *stereoPass=[MTLRenderPassDescriptor renderPassDescriptor];
+    stereoPass.colorAttachments[0].texture=dst;
+    stereoPass.colorAttachments[0].loadAction=MTLLoadActionClear;
+    stereoPass.colorAttachments[0].storeAction=MTLStoreActionStore;
+    id<MTLCommandBuffer> stereoCommand=[q commandBuffer];
+    id<MTLRenderCommandEncoder> stereoEncoder=[stereoCommand renderCommandEncoderWithDescriptor:stereoPass];
+    [stereoEncoder setRenderPipelineState:ps];
+    [stereoEncoder setFragmentTexture:src atIndex:0];
+    [stereoEncoder setFragmentTexture:right atIndex:1];
+    [stereoEncoder setFragmentSamplerState:samp atIndex:0];
+    [stereoEncoder setVertexBytes:&stereo length:sizeof stereo atIndex:0];
+    [stereoEncoder setFragmentBytes:&stereo length:sizeof stereo atIndex:0];
+    [stereoEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [stereoEncoder endEncoding];[stereoCommand commit];[stereoCommand waitUntilCompleted];
+    uint8_t stereoPixels[16]={0};
+    [dst getBytes:stereoPixels bytesPerRow:8 fromRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0];
+    int stereoOK=stereoCommand.status==MTLCommandBufferStatusCompleted;
+    for(int i=0;i<4;i++) stereoOK &= stereoPixels[i*4]==0 && abs(stereoPixels[i*4+1]-128)<=1 &&
+        stereoPixels[i*4+2]==0 && abs(stereoPixels[i*4+3]-128)<=1;
+    ok(stereoOK,"right-eye texture and guest colour/alpha scale reach the GPU output");
+    ov.tex=ov.tex_right=0;ov.has_color_scale_bias=0;
 
     // A real browser underlay followed by an eye containing a laser, an alpha
     // hole and an antialiased edge. The eye must retain authored alpha and use
@@ -1415,6 +1462,7 @@ static void check_overlay_pixels(void) {
         id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:rp];
         [enc setRenderPipelineState:ps];
         [enc setFragmentTexture:src atIndex:0];
+        [enc setFragmentTexture:src atIndex:1];
         [enc setFragmentSamplerState:samp atIndex:0];
         [enc setVertexBytes:&ou length:sizeof ou atIndex:0];
         [enc setFragmentBytes:&ou length:sizeof ou atIndex:0];

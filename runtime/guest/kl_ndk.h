@@ -1,8 +1,7 @@
 // Android NDK surface. The base set is what libunity.so imports:
 // ALooper_*, ANativeWindow_*, ASensor*. The Steam Link target (SDL3) adds
-// ANativeWindow_lock/unlockAndPost and the AAssetManager_*/AAsset_* subset —
-// Unity never imported those (its assets arrive over JNI), which is why they
-// were absent from the original measured surface rather than refused.
+// ANativeWindow_lock/unlockAndPost and the AAssetManager_*/AAsset_* subset.
+// Unity plugins such as Wwise also read assets through this NDK surface.
 // Still absent: AConfiguration_* and the whole ANativeActivity lifecycle —
 // neither target has an ANativeActivity_onCreate anywhere in the chain.
 #ifndef KL_NDK_H

@@ -116,8 +116,7 @@ static int plat_is_absent_ok(const char *name) {
 // the same answer ovr_User_GetLoggedInUser gives. This is the IAP twin of the
 // ovr_AssetFile_GetList carve-out: a pure enumeration is strictly MORE
 // restrictive than the truth. The OWNERSHIP half of the family is untouched and
-// still refuses — ovr_IAP_GetViewerPurchases (what the user bought),
-// ovr_IAP_ConsumePurchase, ovr_IAP_LaunchCheckoutFlow and every delivery call
+// still refuses — ovr_IAP_ConsumePurchase, ovr_IAP_LaunchCheckoutFlow and every delivery call
 // keep matching the "IAP"/"Purchase" markers below, because this list is exact
 // names checked first, not a substring. GetNextProductArrayPage walks the same
 // catalog array, so it carves out for the same reason.
@@ -128,10 +127,11 @@ static int plat_is_iap_catalog(const char *name) {
 
 // The read side of the OWNED half: "which IAPs has this viewer already bought?"
 // This looks like an ownership query, and it is — but answering it truthfully on
-// a host with no Oculus platform is "the request could not be made" (request id
-// 0), exactly what ovr_User_GetLoggedInUser and the IAP catalog return. That is
+// a host with no Oculus purchase service is an error completion. That is
 // the OPPOSITE of circumvention: the guest is handed no purchase message, so it
-// learns of no entitlement it did not already have. Fabrication would be
+// learns of no entitlement it did not already have. A nonzero request id with
+// an error lets SDK callbacks finish; a bare zero can strand their await.
+// Fabrication would be
 // DELIVERING a PurchaseArray that names something as owned, or answering the
 // WRITE side — ovr_IAP_ConsumePurchase / ovr_IAP_LaunchCheckoutFlow and the
 // AssetFile delivery calls — all of which stay in plat_is_drm and keep aborting.
@@ -240,10 +240,13 @@ static uint64_t klplat_called(const char *name) {
 #define KLPLAT_MSG_ACCESS_TOKEN     0x06A85ABEu  // .User_GetAccessToken (Message<string>)
 #define KLPLAT_MSG_ACHIEVEMENT_DEFS 0x03D3458Du  // .Achievements_GetAllDefinitions (empty array)
 #define KLPLAT_MSG_LOGGED_IN_USER  0x436F345Du  // .User_GetLoggedInUser (Message<User>)
+#define KLPLAT_MSG_FRIENDS         0x587C2A8Du  // .User_GetLoggedInUserFriends (Message<UserArray>)
 #define KLPLAT_MSG_ORG_SCOPED_ID   0x18F0B01Bu  // .User_GetOrgScopedID (Message<OrgScopedID>)
 #define KLPLAT_MSG_USER_PROOF      0x22810483u  // .User_GetUserProof (Message<UserProof>);
                                                 //   confirmed as a movz/movk pair in
                                                 //   Ancient Dungeon's libil2cpp
+#define KLPLAT_MSG_INTEGRITY_TOKEN 0x3271ABDAu  // .DeviceApplicationIntegrity_GetIntegrityToken
+#define KLPLAT_MSG_VIEWER_PURCHASES 0x3A0F8419u // .IAP_GetViewerPurchases (Message<PurchaseArray>)
 #define KLPLAT_INIT_SUCCESS        0            // PlatformInitializeResult.Success
 #define KLPLAT_AGE_ADULT           3            // AccountAgeCategory.Ad
 
@@ -256,12 +259,125 @@ static uint64_t klplat_called(const char *name) {
 typedef struct {
     uint32_t type; uint64_t request; int32_t payload; const char *str;
     int error;
+    int account_kind;
+    uint64_t user_id;
+    char *owned_string, *oculus_id, *display_name;
+    char *image_url, *small_image_url;
+    int32_t error_code, http_code;
 } klplat_msg;
 static klplat_msg     *g_msgq[KLPLAT_MSGQ];
 static unsigned        g_msg_head, g_msg_tail;
 static uint64_t        g_next_request = 1;
 static int             g_platform_up;
 static pthread_mutex_t g_msg_mu = PTHREAD_MUTEX_INITIALIZER;
+static klplat_msg *g_account_pending[KLPLAT_MSGQ];
+static unsigned g_account_count;
+static kl_ovrplat_account_provider g_account_provider;
+static void *g_account_context;
+static char g_account_app[64];
+static uint64_t g_account_user;
+
+static int klplat_account_connected(void) {
+    pthread_mutex_lock(&g_msg_mu);
+    int connected=g_account_provider!=NULL;
+    pthread_mutex_unlock(&g_msg_mu);
+    return connected;
+}
+
+static void klplat_forget_string(char *s) {
+    if (!s) return;
+    volatile char *p = (volatile char *)s;
+    for (size_t n = strlen(s); n; n--) *p++ = 0;
+    free(s);
+}
+
+// Reservations count against the same bounded queue as immediate messages, so
+// a late HTTP response cannot overwrite an unread completion. Never call a
+// frontend while holding the queue lock: it may complete synchronously.
+static uint64_t klplat_account_request(int kind, uint32_t type, uint64_t user_id) {
+    pthread_mutex_lock(&g_msg_mu);
+    kl_ovrplat_account_provider provider = g_account_provider;
+    void *context = g_account_context;
+    klplat_msg *m = NULL;
+    char app[sizeof g_account_app]; memcpy(app, g_account_app, sizeof app);
+    if (provider && app[0] && g_msg_tail-g_msg_head+g_account_count < KLPLAT_MSGQ) {
+        m = calloc(1, sizeof *m);
+        if (m) {
+            m->request = g_next_request++; m->type = type; m->account_kind = kind;
+            for (unsigned i=0;i<KLPLAT_MSGQ;i++) if (!g_account_pending[i]) {
+                g_account_pending[i]=m; g_account_count++; break;
+            }
+        }
+    }
+    uint64_t id = m ? m->request : 0;
+    pthread_mutex_unlock(&g_msg_mu);
+    if (id) provider(id, kind, app, user_id, context);
+    return id;
+}
+
+static void klplat_cancel_accounts_locked(void) {
+    for (unsigned i=0;i<KLPLAT_MSGQ;i++) if (g_account_pending[i]) {
+        klplat_msg *m=g_account_pending[i]; g_account_pending[i]=NULL;
+        m->error=1; m->error_code=-1; m->str="Meta account connection changed; retry the request.";
+        g_msgq[g_msg_tail++ % KLPLAT_MSGQ]=m; g_account_count--;
+    }
+    g_account_user=0;
+}
+
+void kl_ovrplat_set_account_provider(kl_ovrplat_account_provider provider, void *context) {
+    pthread_mutex_lock(&g_msg_mu);
+    klplat_cancel_accounts_locked();
+    g_account_provider=provider; g_account_context=context;
+    pthread_mutex_unlock(&g_msg_mu);
+}
+
+static void klplat_account_app(const char *app_id) {
+    if (!app_id || !app_id[0] || strlen(app_id)>=sizeof g_account_app) return;
+    for (const char *p=app_id;*p;p++) if (*p<'0' || *p>'9') return;
+    pthread_mutex_lock(&g_msg_mu);
+    if (strcmp(g_account_app,app_id)) {
+        klplat_cancel_accounts_locked();
+        snprintf(g_account_app,sizeof g_account_app,"%s",app_id);
+    }
+    pthread_mutex_unlock(&g_msg_mu);
+}
+
+int kl_ovrplat_complete_account(uint64_t request, const kl_ovrplat_account_result *r) {
+    if (!r) return 0;
+    pthread_mutex_lock(&g_msg_mu);
+    klplat_msg *m=NULL;
+    for (unsigned i=0;i<KLPLAT_MSGQ;i++) if (g_account_pending[i] && g_account_pending[i]->request==request) {
+        m=g_account_pending[i]; g_account_pending[i]=NULL; g_account_count--; break;
+    }
+    if (!m) { pthread_mutex_unlock(&g_msg_mu); return 0; }
+    m->error = r->error_code || r->http_code>=400 || (r->error && *r->error);
+    m->error_code=r->error_code; m->http_code=r->http_code;
+    if (!m->error) {
+        if (m->account_kind==KL_OVRPLAT_ACCOUNT_USER || m->account_kind==KL_OVRPLAT_ACCOUNT_ORG_ID) {
+            m->user_id=r->user_id; m->error=!r->user_id;
+        } else {
+            m->error=!r->string || !*r->string;
+        }
+    }
+    const char *s=m->error ? (r->error && *r->error ? r->error : "Meta account request failed.") : r->string;
+    m->owned_string=s ? strdup(s) : NULL; m->str=m->owned_string;
+    if (!m->error && m->account_kind==KL_OVRPLAT_ACCOUNT_USER) {
+        m->oculus_id=strdup(r->oculus_id ? r->oculus_id : "");
+        m->display_name=strdup(r->display_name ? r->display_name : "");
+        m->image_url=strdup(r->image_url ? r->image_url : "");
+        m->small_image_url=strdup(r->small_image_url ? r->small_image_url : "");
+    }
+    if ((s && !m->owned_string) || (!m->error && m->account_kind==KL_OVRPLAT_ACCOUNT_USER && (!m->oculus_id || !m->display_name || !m->image_url || !m->small_image_url))) {
+        klplat_forget_string(m->owned_string); m->owned_string=NULL;
+        m->str="Unable to allocate the Meta account response."; m->error=1;
+    }
+    if (m->error && !m->error_code) m->error_code=-1;
+    if (!m->error && m->account_kind==KL_OVRPLAT_ACCOUNT_USER) g_account_user=m->user_id;
+    if (m->error && m->account_kind==KL_OVRPLAT_ACCOUNT_USER) g_account_user=0;
+    g_msgq[g_msg_tail++ % KLPLAT_MSGQ]=m;
+    pthread_mutex_unlock(&g_msg_mu);
+    return 1;
+}
 
 // Issue a request and queue its completion. Returns the ovrRequest the guest
 // will wait on — non-zero, and matched by the message, which together are the
@@ -270,7 +386,7 @@ static uint64_t klplat_request_message(const char *what, uint32_t type,
                                    int32_t payload, const char *str, int error) {
     pthread_mutex_lock(&g_msg_mu);
     uint64_t id = 0;
-    if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
+    if (g_msg_tail - g_msg_head + g_account_count < KLPLAT_MSGQ) {
         klplat_msg *m = calloc(1, sizeof *m);
         if (m) {
             id = g_next_request++;
@@ -306,6 +422,25 @@ static uint64_t klplat_account_unavailable(const char *what, uint32_t type) {
                     "Meta account provider is connected (no HTTP request made)\n", what);
     return klplat_request_message(what, type, 0,
             "Meta account services are unavailable on this host.", 1);
+}
+
+// Meta device/app attestation is a separate Quest service, not an account
+// proof or access token. Complete the documented Request<string> with an
+// error so the game's callback can handle the unsupported platform. Neither
+// a linked account nor offline profile diagnostics can mint an attestation.
+static uint64_t klplat_DeviceApplicationIntegrity_GetIntegrityToken(const char *challenge_nonce) {
+    (void)challenge_nonce; // Server challenges are never logged or retained.
+    plat_hit("ovr_DeviceApplicationIntegrity_GetIntegrityToken");
+    return klplat_request_message("ovr_DeviceApplicationIntegrity_GetIntegrityToken",
+            KLPLAT_MSG_INTEGRITY_TOKEN, 0,
+            "Meta device/application attestation is unavailable on this host.", 1);
+}
+
+static uint64_t klplat_IAP_GetViewerPurchases(void) {
+    plat_hit("ovr_IAP_GetViewerPurchases");
+    return klplat_request_message("ovr_IAP_GetViewerPurchases",
+            KLPLAT_MSG_VIEWER_PURCHASES, 0,
+            "Meta purchase services are unavailable on this host.", 1);
 }
 
 // The message pump. NULL still means "no messages queued", which is the
@@ -348,11 +483,11 @@ static const char *klplat_Error_GetMessage(const klplat_msg *m) {
 }
 static int32_t klplat_Error_GetCode(const klplat_msg *m) {
     plat_hit("ovr_Error_GetCode");
-    return m && m->error ? -1 : 0;
+    return m && m->error ? (m->error_code ? m->error_code : -1) : 0;
 }
 static int32_t klplat_Error_GetHttpCode(const klplat_msg *m) {
     plat_hit("ovr_Error_GetHttpCode");
-    (void)m; return 0; // No HTTP request was made.
+    return m ? m->http_code : 0;
 }
 static uint64_t klplat_Message_GetRequestID(const klplat_msg *m) {
     plat_hit("ovr_Message_GetRequestID");
@@ -380,7 +515,14 @@ static uint64_t klplat_FreeMessage(klplat_msg *m) {
     plat_hit("ovr_FreeMessage");
     if(m && m->error && m->type==KLPLAT_MSG_LOGGED_IN_USER)
         kl_bigscreen_account_unavailable();
-    free(m);
+    if (m) {
+        klplat_forget_string(m->owned_string);
+        klplat_forget_string(m->oculus_id);
+        klplat_forget_string(m->display_name);
+        klplat_forget_string(m->image_url);
+        klplat_forget_string(m->small_image_url);
+        free(m);
+    }
     return 0;
 }
 
@@ -441,6 +583,7 @@ static uint64_t klplat_IsPlatformInitialized(void) {
 // an `ovrPlatformInitializeResult` (a THIRD convention, whose Success is 0).
 static uint64_t klplat_UnityInitWrapper(const char *app_id) {
     plat_hit("ovr_UnityInitWrapper");
+    klplat_account_app(app_id);
     g_platform_up = 1;
     static int said;
     if (!said) {
@@ -491,7 +634,9 @@ static uint64_t klplat_AssetFile_GetList(void) {
 // credential; complete with an error until an authenticated provider exists.
 static uint64_t klplat_User_GetAccessToken(void) {
     plat_hit("ovr_User_GetAccessToken");
-    if (!kl_env_on("KL_NET_OFFLINE", 0))
+    uint64_t request=klplat_account_request(KL_OVRPLAT_ACCOUNT_TOKEN,KLPLAT_MSG_ACCESS_TOKEN,0);
+    if (request) return request;
+    if (klplat_account_connected() || !kl_env_on("KL_NET_OFFLINE", 0))
         return klplat_account_unavailable("ovr_User_GetAccessToken", KLPLAT_MSG_ACCESS_TOKEN);
     static const char tok[] = "OCACkleptonOfflineAccessToken000000000000";
     return klplat_request_str("ovr_User_GetAccessToken",
@@ -555,7 +700,9 @@ static int klplat_user_default(void) {
 }
 static uint64_t klplat_User_GetLoggedInUser(void) {
     plat_hit("ovr_User_GetLoggedInUser");
-    if (!kl_env_on("KL_PLAT_USER", klplat_user_default())) {
+    uint64_t request=klplat_account_request(KL_OVRPLAT_ACCOUNT_USER,KLPLAT_MSG_LOGGED_IN_USER,0);
+    if (request) return request;
+    if (klplat_account_connected() || !kl_env_on("KL_PLAT_USER", klplat_user_default())) {
         // A request id of zero does not complete Request<User> in older
         // Oculus Unity SDKs: its awaiter remains registered forever. Deliver
         // a real error completion so the app can run its own failure path.
@@ -573,16 +720,52 @@ static uint64_t klplat_User_GetLoggedInUser(void) {
 // KL_PLAT_USER handed out the user above.
 static uint64_t klplat_User_GetID(const void *h) {
     plat_hit("ovr_User_GetID"); (void)h;
+    const klplat_msg *m=h;
+    if (m && m->account_kind) return m->error ? 0 : m->user_id;
     return 1000000000000042ull;          // fixed, non-zero synthetic ovrID
 }
 static const char *klplat_User_GetOculusID(const void *h) {
     plat_hit("ovr_User_GetOculusID"); (void)h;
+    const klplat_msg *m=h;
+    if (m && m->account_kind) return !m->error && m->oculus_id ? m->oculus_id : "";
     return "kleptonplayer";
 }
 static const char *klplat_User_GetDisplayName(const void *h) {
     plat_hit("ovr_User_GetDisplayName"); (void)h;
+    const klplat_msg *m=h;
+    if (m && m->account_kind) return !m->error && m->display_name ? m->display_name : "";
     return "Klepton Player";
 }
+
+static const char *klplat_User_GetImageUrl(const klplat_msg *m) {
+    plat_hit("ovr_User_GetImageUrl");return m && !m->error && m->image_url ? m->image_url : "";
+}
+static const char *klplat_User_GetSmallImageUrl(const klplat_msg *m) {
+    plat_hit("ovr_User_GetSmallImageUrl");return m && !m->error && m->small_image_url ? m->small_image_url : "";
+}
+// These optional social fields were not requested from Meta. Report their
+// absence rather than inventing presence, sessions, or managed-account data.
+#define KLPLAT_USER_ABSENT_STRING(name) static const char *klplat_##name(const void *h) { plat_hit("ovr_" #name);return ""; }
+KLPLAT_USER_ABSENT_STRING(User_GetPresence)
+KLPLAT_USER_ABSENT_STRING(User_GetPresenceDeeplinkMessage)
+KLPLAT_USER_ABSENT_STRING(User_GetPresenceDestinationApiName)
+KLPLAT_USER_ABSENT_STRING(User_GetPresenceLobbySessionId)
+KLPLAT_USER_ABSENT_STRING(User_GetPresenceMatchSessionId)
+// Older Unity wrappers construct ManagedInfo even from a null optional handle.
+// Its documented fields are strings; no managed-account information was loaded.
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetDepartment)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetEmail)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetEmployeeNumber)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetExternalId)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetLocation)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetManager)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetName)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetOrganizationId)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetOrganizationName)
+KLPLAT_USER_ABSENT_STRING(ManagedInfo_GetPosition)
+#undef KLPLAT_USER_ABSENT_STRING
+static uint64_t klplat_User_GetPresenceStatus(const void *h) { plat_hit("ovr_User_GetPresenceStatus");return 0; }
+static const void *klplat_User_GetManagedInfo(const void *h) { plat_hit("ovr_User_GetManagedInfo");return NULL; }
 
 // The user PROOF — a nonce the game forwards to its own online services (Unity
 // Authentication's SignInWithOculus, Photon Fusion's custom auth) so THEY can
@@ -597,7 +780,9 @@ static const char *klplat_User_GetDisplayName(const void *h) {
 // Ancient Dungeon's "Waiting for Oculus Nonce generation..." — moves on.
 static uint64_t klplat_User_GetUserProof(void) {
     plat_hit("ovr_User_GetUserProof");
-    if (!kl_env_on("KL_PLAT_USER", klplat_user_default())) {
+    uint64_t request=klplat_account_request(KL_OVRPLAT_ACCOUNT_PROOF,KLPLAT_MSG_USER_PROOF,0);
+    if (request) return request;
+    if (klplat_account_connected() || !kl_env_on("KL_PLAT_USER", klplat_user_default())) {
         return klplat_account_unavailable("ovr_User_GetUserProof", KLPLAT_MSG_USER_PROOF);
     }
     static const char nonce[] = "kleptonOfflineNonce00000000000000000000000000000";
@@ -606,10 +791,18 @@ static uint64_t klplat_User_GetUserProof(void) {
 
 static uint64_t klplat_User_GetOrgScopedID(uint64_t user_id) {
     plat_hit("ovr_User_GetOrgScopedID");
+    uint64_t request=klplat_account_request(KL_OVRPLAT_ACCOUNT_ORG_ID,KLPLAT_MSG_ORG_SCOPED_ID,user_id);
+    if (request) return request;
     (void)user_id;
     // A local/synthetic user ID cannot establish the organization's real Meta
     // identity. Bigscreen awaits this before asking for a proof nonce.
     return klplat_account_unavailable("ovr_User_GetOrgScopedID", KLPLAT_MSG_ORG_SCOPED_ID);
+}
+
+static uint64_t klplat_User_GetLoggedInUserFriends(void) {
+    plat_hit("ovr_User_GetLoggedInUserFriends");
+    return klplat_request_message("ovr_User_GetLoggedInUserFriends",KLPLAT_MSG_FRIENDS,0,
+                                  "The Meta friends service is unavailable on this host.",1);
 }
 // The UserProof handle IS the message (one payload per message, as with User);
 // its single field is the nonce string the request above carried.
@@ -736,6 +929,11 @@ static uint64_t klplat_init_async(const char *name) {
     return klplat_request(name, KLPLAT_MSG_PLATFORM_INIT, KLPLAT_INIT_SUCCESS);
 }
 
+static uint64_t klplat_UnityInitWrapperAsynchronous(const char *app_id) {
+    klplat_account_app(app_id);
+    return klplat_init_async("ovr_UnityInitWrapperAsynchronous");
+}
+
 static const char *const g_plat_init_async[] = {
     "ovr_UnityInitWrapperAsynchronous",
     "ovr_PlatformInitializeAndroidAsynchronous",
@@ -828,11 +1026,11 @@ static int plat_is_init(const char *name) {
 // ovr_PopMessage for a completion that cannot come.
 static const char *const g_plat_request[] = {
     // The IAP catalog (see plat_is_iap_catalog): a store query with no store to
-    // ask, so 0 = "request could not be made", the honest failure. Ownership IAP
-    // calls never reach here — plat_is_drm refuses them first.
+    // ask, so 0 = "request could not be made". The viewer-purchase request
+    // has an explicit error completion above; write/delivery calls are refused.
     "ovr_IAP_GetProductsBySKU", "ovr_IAP_GetNextProductArrayPage",
     // Owned-inventory query: honest failure, grants nothing (see plat_is_iap_owned_query).
-    "ovr_IAP_GetViewerPurchases", "ovr_IAP_GetViewerPurchasesDeltaAsync",
+    "ovr_IAP_GetViewerPurchasesDeltaAsync",
     "ovr_RichPresence_Clear", "ovr_RichPresence_Set",
     "ovr_RichPresence_SetDestination", "ovr_RichPresence_SetIsJoinable",
     // Asking who is logged in is not an ownership question; with no platform
@@ -1048,6 +1246,11 @@ static int plat_is_request(const char *name) {
 // on the spot. RE4 asks during engine init.
 static uint64_t klplat_GetLoggedInUserID(void) {
     plat_hit("ovr_GetLoggedInUserID");
+    pthread_mutex_lock(&g_msg_mu);
+    int connected=g_account_provider!=NULL;
+    uint64_t authenticated=g_account_user;
+    pthread_mutex_unlock(&g_msg_mu);
+    if (connected) return authenticated;
     // KL_PLAT_USER opts a title into a synthetic OFFLINE user, the same switch
     // klplat_User_GetLoggedInUser reads for the async form. Some titles gate boot
     // on "is anyone signed in?" and ForceQuit when this returns 0 — Asgard's
@@ -1119,6 +1322,7 @@ static uint64_t klplat_JNI_OnLoad(void *vm, void *reserved) {
 static const struct { const char *name; void *fn; } g_plat_impl[] = {
     {"JNI_OnLoad",                (void *)klplat_JNI_OnLoad},
     {"ovr_IsPlatformInitialized", (void *)klplat_IsPlatformInitialized},
+    {"ovr_UnityInitWrapperAsynchronous", (void *)klplat_UnityInitWrapperAsynchronous},
     {"ovr_GetLoggedInUserID",     (void *)klplat_GetLoggedInUserID},
     {"ovr_GetLoggedInUserLocale", (void *)klplat_GetLoggedInUserLocale},
     {"ovr_UnityInitWrapper",      (void *)klplat_UnityInitWrapper},
@@ -1150,14 +1354,38 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     // user was handed out. The exact-match binding overrides ovr_User_GetLoggedInUser's
     // entry in g_plat_request.
     {"ovr_User_GetLoggedInUser",               (void *)klplat_User_GetLoggedInUser},
+    {"ovr_User_GetLoggedInUserFriends",        (void *)klplat_User_GetLoggedInUserFriends},
     {"ovr_User_GetOrgScopedID",                (void *)klplat_User_GetOrgScopedID},
+    {"ovr_Message_GetOrgScopedID",             (void *)klplat_Message_GetPayload},
+    {"ovr_OrgScopedID_GetID",                  (void *)klplat_User_GetID},
     {"ovr_Message_GetUser",                    (void *)klplat_Message_GetPayload},
     {"ovr_User_GetID",                         (void *)klplat_User_GetID},
     {"ovr_User_GetOculusID",                   (void *)klplat_User_GetOculusID},
     {"ovr_User_GetDisplayName",                (void *)klplat_User_GetDisplayName},
+    {"ovr_User_GetImageUrl",                   (void *)klplat_User_GetImageUrl},
+    {"ovr_User_GetSmallImageUrl",              (void *)klplat_User_GetSmallImageUrl},
+    {"ovr_User_GetPresence",                   (void *)klplat_User_GetPresence},
+    {"ovr_User_GetPresenceStatus",             (void *)klplat_User_GetPresenceStatus},
+    {"ovr_User_GetPresenceDeeplinkMessage",     (void *)klplat_User_GetPresenceDeeplinkMessage},
+    {"ovr_User_GetPresenceDestinationApiName",  (void *)klplat_User_GetPresenceDestinationApiName},
+    {"ovr_User_GetPresenceLobbySessionId",      (void *)klplat_User_GetPresenceLobbySessionId},
+    {"ovr_User_GetPresenceMatchSessionId",      (void *)klplat_User_GetPresenceMatchSessionId},
+    {"ovr_User_GetManagedInfo",                (void *)klplat_User_GetManagedInfo},
+    {"ovr_ManagedInfo_GetDepartment",          (void *)klplat_ManagedInfo_GetDepartment},
+    {"ovr_ManagedInfo_GetEmail",               (void *)klplat_ManagedInfo_GetEmail},
+    {"ovr_ManagedInfo_GetEmployeeNumber",      (void *)klplat_ManagedInfo_GetEmployeeNumber},
+    {"ovr_ManagedInfo_GetExternalId",          (void *)klplat_ManagedInfo_GetExternalId},
+    {"ovr_ManagedInfo_GetLocation",            (void *)klplat_ManagedInfo_GetLocation},
+    {"ovr_ManagedInfo_GetManager",             (void *)klplat_ManagedInfo_GetManager},
+    {"ovr_ManagedInfo_GetName",                (void *)klplat_ManagedInfo_GetName},
+    {"ovr_ManagedInfo_GetOrganizationId",      (void *)klplat_ManagedInfo_GetOrganizationId},
+    {"ovr_ManagedInfo_GetOrganizationName",    (void *)klplat_ManagedInfo_GetOrganizationName},
+    {"ovr_ManagedInfo_GetPosition",            (void *)klplat_ManagedInfo_GetPosition},
     // The user proof (nonce) and its accessor; gated by KL_PLAT_USER in the
     // handler, same as the user it proves.
     {"ovr_User_GetUserProof",                  (void *)klplat_User_GetUserProof},
+    {"ovr_DeviceApplicationIntegrity_GetIntegrityToken", (void *)klplat_DeviceApplicationIntegrity_GetIntegrityToken},
+    {"ovr_IAP_GetViewerPurchases", (void *)klplat_IAP_GetViewerPurchases},
     {"ovr_Message_GetUserProof",               (void *)klplat_Message_GetPayload},
     {"ovr_UserProof_GetNonce",                 (void *)klplat_UserProof_GetNonce},
     {"ovr_ApplicationVersion_GetCurrentCode",  (void *)klplat_AppVersion_code},

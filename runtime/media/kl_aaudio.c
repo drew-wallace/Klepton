@@ -30,6 +30,7 @@
 
 #include "klepton.h"
 #include "kl_audio.h"
+#include "kl_pcm_filter.h"
 
 // ---------------------------------------------------------------------------
 // The ABI's own numbers, transcribed from <aaudio/AAudio.h>. The guest tests
@@ -126,11 +127,7 @@ typedef struct klaa_stream {
     size_t   in_have;            // valid mic frames currently in in_hold
     double   in_pos;             // fractional read position within in_hold
     unsigned mic_rate, mic_ch;   // the capture format this stream resamples FROM
-    // Anti-alias safety net for the fallback path only (mic_rate > rate, i.e. a
-    // real downsample this code has to do because RemoteIO would not capture at
-    // the guest rate). One-pole low-pass state per channel; unused when the
-    // capture already arrives at the guest rate (ratio == 1, the normal case).
-    float    in_lp[8];
+    kl_pcm_filter filter;
 
     unsigned long callbacks, frames;   // for the report
 } klaa_stream;
@@ -217,7 +214,7 @@ static void *klaa_feeder(void *arg) {
         // Tagged with this stream's pointer: the VR client runs two output
         // streams at once, and kl_audio mixes them per-source instead of letting
         // their feeder threads corrupt one ring.
-        size_t played = kl_audio_write_src(s, pcm, bytes);
+        size_t played = kl_audio_write_pcm(s, pcm, bytes, (unsigned)s->rate, (unsigned)s->channels);
         if (played < bytes) {
             // No device, KL_AUDIO=0, or one that stopped draining: pace the
             // remainder ourselves, which is byte-for-byte what this loop would
@@ -277,24 +274,6 @@ static void klaa_stop_join(klaa_stream *s) {
 // the output conversion lives on the feeder: it keeps arithmetic off the
 // real-time callback in kl_audio.c.
 
-// A one-pole low-pass over mic frames [from, to), in place, per channel — the
-// anti-alias pre-filter for the rare FALLBACK where the capture unit would not
-// take the guest's rate and we must decimate in software (mic_rate > guest rate).
-// The coefficient tracks the decimation depth (a ~= 1/ratio: a bigger ratio wants
-// a lower cutoff); it is a gentle roll-off, not a brick wall, but it turns raw
-// aliasing into something far less harsh. Never runs on the normal path, where
-// the capture already arrives at the guest rate (ratio == 1).
-static void klaa_lowpass(klaa_stream *s, size_t from, size_t to, unsigned mch, double ratio) {
-    float a = (float)(1.0 / ratio);
-    if (a <= 0.0f) a = 0.001f; else if (a > 1.0f) a = 1.0f;
-    for (size_t i = from; i < to; i++)
-        for (unsigned c = 0; c < mch; c++) {
-            float x = (float)s->in_hold[i * mch + c];
-            s->in_lp[c] += a * (x - s->in_lp[c]);
-            s->in_hold[i * mch + c] = (int16_t)lrintf(s->in_lp[c]);
-        }
-}
-
 // Produce up to `req` guest frames into `dst`, in the stream's format, from the
 // microphone. Non-blocking when timeout_ns == 0; otherwise it sleep-polls until
 // `req` frames are available or the deadline passes — the same bounded pacing
@@ -341,7 +320,8 @@ static int32_t klaa_capture_into(klaa_stream *s, void *dst, int32_t req, int64_t
                 // Filter ONLY the newly-pulled frames, exactly once, so the carried
                 // leftover from a previous call is never double-filtered. No-op
                 // unless this is the downsample fallback (ratio > 1).
-                if (ratio > 1.0) klaa_lowpass(s, prev, s->in_have, mch, ratio);
+                kl_pcm_filter_apply(&s->filter, s->in_hold + prev * mch,
+                                    (size_t)got, mch, s->mic_rate, (unsigned)s->rate);
             }
         }
 
@@ -769,7 +749,7 @@ static aaudio_result_t klaa_write(klaa_stream *s, const void *buffer,
             pcm = src;
         }
         size_t bytes = (size_t)chunk * (size_t)frame_out;
-        size_t played = kl_audio_write_src(s, pcm, bytes);
+        size_t played = kl_audio_write_pcm(s, pcm, bytes, (unsigned)s->rate, (unsigned)s->channels);
         if (played < bytes) {                 // no device / not draining — pace it
             g_short_writes++;
             uint64_t rem = ((uint64_t)bytes - played) / (uint64_t)frame_out;
@@ -794,7 +774,8 @@ static aaudio_result_t klaa_close(klaa_stream *s) {
         if (--g_input_streams <= 0) { g_input_streams = 0; kl_audio_mic_close(); }
         free(s->in_hold);
     } else {
-        if (--g_open_streams <= 0) { g_open_streams = 0; kl_audio_close(); }
+        if (g_open_streams > 0) g_open_streams--;
+        kl_audio_forget_src(s);
     }
     pthread_mutex_destroy(&s->lock);
     free(s->scratch); free(s->staging); free(s);

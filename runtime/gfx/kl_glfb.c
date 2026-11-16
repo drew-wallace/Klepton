@@ -270,6 +270,7 @@ int kl_glfb_init(void) {
     }
 
     const char *dir = kl_angle_dir();
+    fprintf(stderr,"  [glfb] startup: loading ANGLE libraries\n");
     g_egl_lib  = angle_dlopen(dir, "libEGL");
     g_gles_lib = angle_dlopen(dir, "libGLESv2");
     if (!g_egl_lib || !g_gles_lib) {
@@ -303,9 +304,11 @@ int kl_glfb_init(void) {
         EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
         EGL_NONE,
     };
+    fprintf(stderr,"  [glfb] startup: acquiring Metal EGL display\n");
     g_dpy = eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY,
                                      dpy_attrs);
     int32_t major = 0, minor = 0;
+    fprintf(stderr,"  [glfb] startup: initializing EGL display\n");
     if (!g_dpy || !eglInitialize(g_dpy, &major, &minor)) {
         fprintf(stderr, "  [glfb] eglInitialize failed\n");
         return 0;
@@ -325,6 +328,7 @@ int kl_glfb_init(void) {
         return 0;
     }
     g_cfg = cfg;
+    fprintf(stderr,"  [glfb] startup: creating ES3 pbuffer/context\n");
     const int32_t surf_attrs[] = { EGL_WIDTH, g_w, EGL_HEIGHT, g_h, EGL_NONE };
     // The flat door's surface first, when asked for: a pbuffer over an
     // IOSurface we allocate. Every failure falls through to the plain pbuffer
@@ -387,7 +391,9 @@ int kl_glfb_init(void) {
     }
     if (!g_surf) g_surf = a_eglCreatePbufferSurface(g_dpy, cfg, surf_attrs);
     const int32_t ctx_attrs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+    fprintf(stderr,"  [glfb] startup: creating ES3 context\n");
     g_ctx  = a_eglCreateContext(g_dpy, cfg, EGL_NO_CONTEXT, ctx_attrs);
+    fprintf(stderr,"  [glfb] startup: making ES3 context current\n");
     if (g_surf && g_ctx && g_flat_ios && !a_eglMakeCurrent(g_dpy, g_surf, g_surf, g_ctx)) {
         // The IOSurface surface created but cannot go current: retire it and
         // retry on an ordinary pbuffer before declaring the renderer down.
@@ -756,15 +762,31 @@ static unsigned g_fb_nshaders;
 // numbering throughout and never learns ours.
 #define KLFB_PIN_SHADERS 64
 #define KLFB_PINS        32
-static struct { uint32_t shader; unsigned n;
-                struct { int32_t at; char name[40]; } p[KLFB_PINS]; }
-    g_shader_pins[KLFB_PIN_SHADERS];
-static unsigned g_shader_pins_n;
+typedef struct { uint32_t shader; unsigned n;
+                 struct { int32_t at; char name[40]; } p[KLFB_PINS]; }
+    klfb_shader_pins;
+static klfb_shader_pins *g_shader_pins;
+static unsigned g_shader_pins_n,g_shader_pins_cap;
+// Shared contexts can link on a worker while another thread sets uniforms.
+// Protect both registries, including any realloc or collection of dead names.
+static pthread_mutex_t g_pins_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int klfb_pin_slot(uint32_t shader) {
     for (unsigned i = 0; i < g_shader_pins_n; i++)
         if (g_shader_pins[i].shader == shader) return (int)i;
-    if (g_shader_pins_n >= KLFB_PIN_SHADERS) return -1;
+    if (g_shader_pins_n == g_shader_pins_cap) {
+        uint8_t (*is_shader)(uint32_t)=asym("glIsShader");
+        unsigned live=0;
+        for(unsigned i=0;i<g_shader_pins_n;i++)
+            if(!is_shader||is_shader(g_shader_pins[i].shader))g_shader_pins[live++]=g_shader_pins[i];
+        g_shader_pins_n=live;
+        if(live==g_shader_pins_cap){
+            unsigned cap=g_shader_pins_cap?g_shader_pins_cap*2:KLFB_PIN_SHADERS;
+            klfb_shader_pins *grown=realloc(g_shader_pins,(size_t)cap*sizeof *grown);
+            if(!grown){fprintf(stderr,"  [glfb] shader pin registry allocation failed\n");return -1;}
+            g_shader_pins=grown;g_shader_pins_cap=cap;
+        }
+    }
     int i = (int)g_shader_pins_n++;
     g_shader_pins[i].shader = shader;
     g_shader_pins[i].n = 0;
@@ -775,17 +797,21 @@ static int klfb_pin_slot(uint32_t shader) {
 // glShaderSource — so the second source must replace the first's pins, not
 // append to them.
 static void klfb_pin_reset(uint32_t shader) {
+    pthread_mutex_lock(&g_pins_lock);
     for (unsigned i = 0; i < g_shader_pins_n; i++)
         if (g_shader_pins[i].shader == shader) g_shader_pins[i].n = 0;
+    pthread_mutex_unlock(&g_pins_lock);
 }
 
 static void klfb_pin_note(uint32_t shader, int32_t at, const char *name) {
+    pthread_mutex_lock(&g_pins_lock);
     int i = klfb_pin_slot(shader);
-    if (i < 0 || g_shader_pins[i].n >= KLFB_PINS) return;
+    if (i < 0 || g_shader_pins[i].n >= KLFB_PINS) {pthread_mutex_unlock(&g_pins_lock);return;}
     unsigned k = g_shader_pins[i].n++;
     g_shader_pins[i].p[k].at = at;
     snprintf(g_shader_pins[i].p[k].name, sizeof g_shader_pins[i].p[k].name,
              "%s", name);
+    pthread_mutex_unlock(&g_pins_lock);
 }
 
 // If the layout qualifier starting at `p` ("layout(...)") directly precedes a
@@ -870,10 +896,10 @@ static const struct { const char *from, *to; } g_glsl_builtin_vars[] = {
 // (glGetProgramResourceLocation), which is emulated further down this file and
 // resolves to exactly the same driver call. Both doors set the flag now.
 #define KLFB_PIN_PROGS 64
-static struct { uint32_t prog; unsigned n; int byname,virtualized;
-                struct { int32_t pinned, actual; } m[2048]; }
-    g_prog_pins[KLFB_PIN_PROGS];
-static unsigned g_prog_pins_n;
+typedef struct { uint32_t prog; unsigned n; int byname,virtualized;
+                 struct { int32_t pinned, actual; } m[2048]; } klfb_program_pins;
+static klfb_program_pins *g_prog_pins;
+static unsigned g_prog_pins_n,g_prog_pins_cap;
 
 // Counted so the choice is visible in the end-of-run report rather than
 // inferred from a picture: a pin table that never fires and one that re-points
@@ -883,14 +909,16 @@ static unsigned g_pin_byname_progs, g_pin_remap_hits, g_pin_remap_changed;
 // The guest asked the driver where `program`'s uniforms are. Its pins are a
 // statement about the shader text, not about what it is going to write to.
 static void klfb_pins_byname(uint32_t program) {
+    pthread_mutex_lock(&g_pins_lock);
     for (unsigned i = 0; i < g_prog_pins_n; i++)
         if (g_prog_pins[i].prog == program) {
             if (!g_prog_pins[i].byname) {
                 g_prog_pins[i].byname = 1;
                 g_pin_byname_progs++;
             }
-            return;
+            break;
         }
+    pthread_mutex_unlock(&g_pins_lock);
 }
 
 static int32_t (*g_real_GetUniformLocation)(uint32_t, const char *);
@@ -934,18 +962,21 @@ static void klfb_virtualize_locations(unsigned slot) {
 }
 static int32_t klfb_guest_location(uint32_t prog,int32_t actual){
     if(actual<0)return actual;
+    pthread_mutex_lock(&g_pins_lock);
+    int32_t result=actual;
     for(unsigned i=0;i<g_prog_pins_n;i++)if(g_prog_pins[i].prog==prog&&g_prog_pins[i].virtualized)
-        for(unsigned j=0;j<g_prog_pins[i].n;j++)if(g_prog_pins[i].m[j].actual==actual)return g_prog_pins[i].m[j].pinned;
-    return actual;
+        for(unsigned j=0;j<g_prog_pins[i].n;j++)if(g_prog_pins[i].m[j].actual==actual){result=g_prog_pins[i].m[j].pinned;break;}
+    pthread_mutex_unlock(&g_pins_lock);return result;
 }
 static int32_t klfb_getter_location(uint32_t prog,int32_t location){
+    pthread_mutex_lock(&g_pins_lock);
+    int32_t result=location;
     for(unsigned i=0;i<g_prog_pins_n;i++)if(g_prog_pins[i].prog==prog&&g_prog_pins[i].virtualized)
-        for(unsigned j=0;j<g_prog_pins[i].n;j++)if(g_prog_pins[i].m[j].pinned==location)return g_prog_pins[i].m[j].actual;
-    return location;
+        for(unsigned j=0;j<g_prog_pins[i].n;j++)if(g_prog_pins[i].m[j].pinned==location){result=g_prog_pins[i].m[j].actual;break;}
+    pthread_mutex_unlock(&g_pins_lock);return result;
 }
 
 static void klfb_pins_link(uint32_t program) {
-    if (!g_shader_pins_n) return;
     static void (*r_GetAttachedShaders)(uint32_t, int32_t, int32_t *, uint32_t *);
     if (!r_GetAttachedShaders) r_GetAttachedShaders = asym("glGetAttachedShaders");
     // The guest may never resolve glGetUniformLocation — this one does not —
@@ -958,11 +989,26 @@ static void klfb_pins_link(uint32_t program) {
     r_GetAttachedShaders(program, 8, &ns, sh);
     if (ns <= 0) return;
 
+    pthread_mutex_lock(&g_pins_lock);
+    if(!g_shader_pins_n){pthread_mutex_unlock(&g_pins_lock);return;}
     unsigned slot = 0;
     for (; slot < g_prog_pins_n; slot++)
         if (g_prog_pins[slot].prog == program) break;
     if (slot == g_prog_pins_n) {
-        if (g_prog_pins_n >= KLFB_PIN_PROGS) return;
+        if(g_prog_pins_n==g_prog_pins_cap){
+            uint8_t (*is_program)(uint32_t)=asym("glIsProgram");
+            unsigned live=0;
+            for(unsigned i=0;i<g_prog_pins_n;i++)
+                if(!is_program||is_program(g_prog_pins[i].prog))g_prog_pins[live++]=g_prog_pins[i];
+            g_prog_pins_n=live;
+            if(live==g_prog_pins_cap){
+                unsigned cap=g_prog_pins_cap?g_prog_pins_cap*2:KLFB_PIN_PROGS;
+                klfb_program_pins *grown=realloc(g_prog_pins,(size_t)cap*sizeof *grown);
+                if(!grown){fprintf(stderr,"  [glfb] program pin registry allocation failed\n");pthread_mutex_unlock(&g_pins_lock);return;}
+                g_prog_pins=grown;g_prog_pins_cap=cap;
+            }
+            slot=g_prog_pins_n;
+        }
         g_prog_pins_n++;
     }
     g_prog_pins[slot].prog = program;
@@ -1006,6 +1052,7 @@ static void klfb_pins_link(uint32_t program) {
                         "explicitly%s — honoured\n", program,
                 g_prog_pins[slot].n, g_prog_pins[slot].n == 1 ? "" : "s",
                 lost ? " (plus some the linker optimised away)" : "");
+    pthread_mutex_unlock(&g_pins_lock);
 }
 
 // Which program is current, per thread — glUniform* writes into it, and the
@@ -1018,19 +1065,22 @@ static __thread uint32_t g_cur_prog;
 // guest that pins some uniforms and looks up others is asking about ours in
 // the second case, and rewriting those would be the same bug in the mirror.
 static int32_t klfb_remap_loc(int32_t loc) {
-    if (!g_prog_pins_n || loc < 0 || !g_cur_prog) return loc;
+    if (loc < 0 || !g_cur_prog) return loc;
+    pthread_mutex_lock(&g_pins_lock);
+    int32_t result=loc;
     for (unsigned i = 0; i < g_prog_pins_n; i++) {
         if (g_prog_pins[i].prog != g_cur_prog) continue;
-        if (g_prog_pins[i].byname&&!g_prog_pins[i].virtualized) return loc;
+        if (g_prog_pins[i].byname&&!g_prog_pins[i].virtualized) break;
         for (unsigned j = 0; j < g_prog_pins[i].n; j++)
             if (g_prog_pins[i].m[j].pinned == loc) {
                 g_pin_remap_hits++;
                 if (g_prog_pins[i].m[j].actual != loc) g_pin_remap_changed++;
-                return g_prog_pins[i].m[j].actual;
+                result=g_prog_pins[i].m[j].actual;
+                break;
             }
-        return loc;
+        break;
     }
-    return loc;
+    pthread_mutex_unlock(&g_pins_lock);return result;
 }
 
 // Returns buf rewritten in place (it only ever shrinks), or NULL if no rule
@@ -1259,6 +1309,33 @@ static int klfb_rename_varying(char *buf, char *p, int is_frag) {
 static char *klfb_rewrite_glsl(char *buf, size_t cap, uint32_t shader) {
     int changed = 0;
     klfb_pin_reset(shader);
+    // Some Unity GLSL video shaders require multiview unconditionally even in
+    // their separately compiled multipass variant. ANGLE rejects that variant
+    // before preprocessing its inactive multiview body. Make this one extension
+    // optional only when the source contains Unity's stereo branch but does not
+    // define its keyword. Real multiview variants retain their requirement and
+    // view IDs; never turn them into a fake single-eye shader.
+    if (strstr(buf,"#if defined(STEREO_MULTIVIEW_ON)")) {
+        int multiview = 0;
+        for (const char *line=buf;line&&*line;line=strchr(line,'\n')) {
+            if (*line=='\n') line++;
+            char name[64]={0};
+            if (sscanf(line," # define %63s",name)==1 && !strcmp(name,"STEREO_MULTIVIEW_ON")) {
+                multiview=1;break;
+            }
+        }
+        if (!multiview) {
+            for(char *line=buf;line&&*line;line=strchr(line,'\n')) {
+                if (*line=='\n') line++;
+                char name[64]={0},mode[16]={0};int at=0;
+                if(sscanf(line," # extension %63s : %n%15s",name,&at,mode)==2 &&
+                   !strcmp(name,"GL_OVR_multiview2") && !strcmp(mode,"require")) {
+                    memcpy(line+at,"enable ",7);
+                    changed=1;
+                }
+            }
+        }
+    }
     if (strncmp(buf, "#version 3", 10) == 0 &&
         buf[10] >= '0' && buf[10] <= '9' && buf[11] >= '0' && buf[11] <= '9' &&
         (buf[10] > '0' || buf[11] > '0') && strncmp(buf + 12, " es", 3) == 0) {
@@ -4147,8 +4224,11 @@ static int klfb_bind_layer_mtl_texture(int layer, int stage, uint32_t gl_tex,
 // provider storage by the call above — so the layer table, the compositors and
 // the readback all see what they would have seen from a re-point, and the
 // guest's own texture is never touched.
-static struct { int layer, stage; uint32_t tex; int w, h; uint32_t fmt; }
+static struct { int layer, stage; uint32_t tex; int w, h; uint32_t fmt; unsigned failures; }
     g_layer_mirror[KL_MTL_MAX_LAYERS * KL_MTL_MAX_STAGES];
+
+static int klfb_is_video_texture(uint32_t texture);
+#include "kl_glfb_video_copy.inc"
 
 int kl_glfb_mirror_layer(int layer, int stage, uint32_t src_tex, int src_layer,
                          int w, int h, uint32_t internal_fmt) {
@@ -4206,12 +4286,15 @@ int kl_glfb_mirror_layer(int layer, int stage, uint32_t src_tex, int src_layer,
                         "alone)\n", layer, stage, w, h, internal_fmt, src_tex);
     }
 
-    uint32_t e = klfb_mirror_blit(src_tex, src_layer, m->tex, w, h);
+    int video=src_layer<0&&klfb_is_video_texture(src_tex);
+    uint32_t e = video
+        ? klfb_copy_video_layer(src_tex,m->tex,w,h,internal_fmt)
+        : klfb_mirror_blit(src_tex, src_layer, m->tex, w, h);
     if (e) {
-        static int said;
-        if (!said++)
-            fprintf(stderr, "  [glfb] mirror layer=%d stage=%d: glBlitFramebuffer -> "
-                            "GL error 0x%x\n", layer, stage, e);
+        if (++m->failures <= 2)
+            fprintf(stderr, "  [glfb] mirror layer=%d stage=%d source=%u: %s -> "
+                            "GL error 0x%x\n", layer, stage, src_tex,
+                    video ? "video sample copy" : "glBlitFramebuffer", e);
         return 0;
     }
     return 1;
@@ -4812,6 +4895,14 @@ typedef struct klfb_image {
 // object we must forward rather than dereference for a magic word.
 static klfb_image  *g_images;
 static pthread_mutex_t g_images_lk = PTHREAD_MUTEX_INITIALIZER;
+static int klfb_is_video_texture(uint32_t texture) {
+    int video=0;
+    pthread_mutex_lock(&g_images_lk);
+    for(klfb_image *image=g_images;image;image=image->next)
+        if(image->bound_tex==texture){video=1;break;}
+    pthread_mutex_unlock(&g_images_lk);
+    return video;
+}
 
 static int img_resolve(void) {
     if (a_eglCreatePbufferFromClientBuffer) return 1;
@@ -5913,7 +6004,7 @@ static void klfb_CopyImageSubData(uint32_t src, uint32_t src_target, int32_t src
 // UE4's Java bitmap renderer writes into the guest's existing 2D texture.
 // Decoder pixels are packed BGRA and cannot inherit the guest's PBO/row layout.
 static int upload_bgra(uint32_t texture, int w, int h, const void *pixels, int allocate) {
-    if (!texture || w <= 0 || h <= 0 || !pixels) return 0;
+    if (!texture || w <= 0 || h <= 0 || !pixels || !kl_glfb_context_current()) return 0;
     void (*get)(uint32_t, int32_t *) = asym("glGetIntegerv");
     void (*bind)(uint32_t, uint32_t) = asym("glBindTexture");
     void (*bindbuf)(uint32_t, uint32_t) = asym("glBindBuffer");
@@ -5921,7 +6012,8 @@ static int upload_bgra(uint32_t texture, int w, int h, const void *pixels, int a
     void (*upload)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
                    uint32_t, uint32_t, const void *) = asym("glTexSubImage2D");
     void (*image)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, const void *) = asym("glTexImage2D");
-    if (!get || !bind || !bindbuf || !store || !upload || (allocate && !image)) return 0;
+    void (*parameter)(uint32_t,uint32_t,int32_t*)=asym("glGetTexParameteriv");
+    if (!get || !bind || !bindbuf || !store || !upload || !a_glGetError || (allocate && (!image||!parameter))) return 0;
     // ES only accepts BGRA uploads into BGRA storage. UE4's bitmap target is
     // RGBA, as in its Java renderer's framebuffer, so convert the channel order.
     if ((size_t)w > SIZE_MAX / 4 / (size_t)h) return 0;
@@ -5934,17 +6026,35 @@ static int upload_bgra(uint32_t texture, int w, int h, const void *pixels, int a
                   ((bgra[i] & 0x00FF0000u) >> 16) | ((bgra[i] & 0xFFu) << 16);
     int32_t oldtex = 0, oldpbo = 0, unpack[6];
     const uint32_t names[] = {0x0CF5, 0x0CF2, 0x0CF3, 0x0CF4, 0x806E, 0x806D};
+    // Separate this upload's result from a sticky error left by guest code.
+    while(a_glGetError()){}
     get(0x8069, &oldtex);             // TEXTURE_BINDING_2D
     get(0x88EF, &oldpbo);             // PIXEL_UNPACK_BUFFER_BINDING
     for (unsigned i = 0; i < 6; i++) { get(names[i], &unpack[i]); store(names[i], i ? 0 : 1); }
     bindbuf(0x88EC, 0);
     bind(0x0DE1, texture);
-    if (allocate) image(0x0DE1, 0, 0x1908, w, h, 0, 0x1908, 0x1401, rgba);
-    else upload(0x0DE1, 0, 0, 0, w, h, 0x1908 /* RGBA */, 0x1401, rgba);
+    uint32_t error=a_glGetError();int32_t immutable=0;
+    if(!error&&allocate){parameter(0x0DE1,0x912F /* TEXTURE_IMMUTABLE_FORMAT */,&immutable);error=a_glGetError();}
+    if(!error){
+        // Unity may already have allocated immutable Texture2D storage. A first
+        // browser snapshot is still an upload, not permission to redefine it.
+        if (allocate&&!immutable) image(0x0DE1, 0, 0x1908, w, h, 0, 0x1908, 0x1401, rgba);
+        else upload(0x0DE1, 0, 0, 0, w, h, 0x1908 /* RGBA */, 0x1401, rgba);
+        error=a_glGetError();
+    }
     bind(0x0DE1, (uint32_t)oldtex);
     bindbuf(0x88EC, (uint32_t)oldpbo);
     for (unsigned i = 0; i < 6; i++) store(names[i], unpack[i]);
     free(rgba);
+    if(error){
+        static unsigned failures;
+        if(failures++<8)fprintf(stderr,"  [glfb] BGRA upload failed: texture=%u size=%dx%d allocate=%d immutable=%d GL=0x%x\n",texture,w,h,allocate,immutable,error);
+        return 0; // The browser keeps its last uploaded serial and retries.
+    }
+    if(allocate&&kl_env_on("KL_WEBVIEW_TRACE",0)){
+        static unsigned reported;
+        if(reported++<16)fprintf(stderr,"  [glfb] BGRA first upload: texture=%u size=%dx%d immutable=%d\n",texture,w,h,immutable);
+    }
     return 1;
 }
 
@@ -6743,12 +6853,14 @@ static void klfb_DrawArraysInstanced(uint32_t mode, int32_t first, int32_t count
 // the guest's uniforms are indistinguishable from the picture, and the second
 // one cost Beat Saber its menu UI for nine commits.
 static void klfb_report_pins(void) {
-    if (!g_prog_pins_n) return;
+    pthread_mutex_lock(&g_pins_lock);
+    if (!g_prog_pins_n) {pthread_mutex_unlock(&g_pins_lock);return;}
     fprintf(stderr, "  [glfb] uniform pins: %u program(s) pinned, %u of them resolve "
                     "by name (pins not honoured there); %u remap%s fired, %u changed "
                     "a location\n",
             g_prog_pins_n, g_pin_byname_progs, g_pin_remap_hits,
             g_pin_remap_hits == 1 ? "" : "s", g_pin_remap_changed);
+    pthread_mutex_unlock(&g_pins_lock);
 }
 
 static void klfb_report_draws(void) {

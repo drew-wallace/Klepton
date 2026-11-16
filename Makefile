@@ -16,9 +16,9 @@ CFLAGS  := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(R
 # VideoToolbox/CoreMedia/CoreVideo are the video decoder (kl_vtdec.c), and they
 # are in the base LDLIBS rather than on one target because kl_vtdec is in
 # RUNTIME_SHIP — everything that links the runtime needs them.
-LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio \
+LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio -framework Security \
            -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
-           -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework AppKit
+           -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework ImageIO -framework AppKit
 # The host/ship split is a source-list boundary, not a runtime getenv.
 #
 # RUNTIME_SHIP is everything that goes into the visionOS app bundle. It is the
@@ -50,13 +50,13 @@ RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_jump.c runtime/kl
            runtime/libc/kl_libc.c steam/steamlink/runtime/libc/kl_libc_slink.c runtime/libc/kl_eventfd.c runtime/libc/kl_pthread.c runtime/kl_dl.c steam/runtime/kl_steam.c \
            runtime/guest/kl_ndk.c runtime/kl_x18.c runtime/kl_target.c \
            $(RUNTIME_JNI) \
-           runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c \
+           runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/media/kl_vivox.c runtime/xr/kl_ovrp.c \
            runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
-           runtime/xr/kl_ovrplat.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m runtime/media/kl_webview.m runtime/media/kl_stream.m \
+           runtime/xr/kl_ovrplat.c runtime/xr/kl_meta_account.m runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m runtime/media/kl_webview.m runtime/media/kl_stream.m \
            runtime/gfx/kl_vulkan.c \
            runtime/guest/kl_nativeactivity.c steam/steamlink/runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_sdl2.c \
-           runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c runtime/guest/kl_bigscreen.c \
+           runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c runtime/guest/kl_bigscreen.c runtime/guest/kl_unity_compat.c \
            runtime/media/kl_aaudio.c runtime/media/kl_mediaplayer.c \
            runtime/gfx/kl_glfb.c runtime/gfx/kl_cvmtl.m runtime/gfx/kl_fove.m runtime/gfx/kl_gl_trace.S runtime/gfx/kl_gl_lock.S \
            runtime/guest/kl_mono.c \
@@ -113,6 +113,22 @@ build/t_vk_base_vertex: tests/t_vk_base_vertex.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_vk_base_vertex.c $(filter-out runtime/gfx/kl_vulkan.c,$(RUNTIME)) $(LDLIBS)
 
+build/t_vk_view_mips: tests/t_vk_view_mips.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_vk_view_mips.c $(filter-out runtime/gfx/kl_vulkan.c,$(RUNTIME)) $(LDLIBS)
+
+build/t_vk_webview: tests/t_vk_webview.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_vk_webview.c $(filter-out runtime/gfx/kl_vulkan.c,$(RUNTIME)) $(LDLIBS)
+
+build/t_vk_frame_publish: tests/t_vk_frame_publish.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_vk_frame_publish.c $(filter-out runtime/xr/kl_ovrp.c,$(RUNTIME)) $(LDLIBS)
+
+build/t_ovrp_frame_samples: tests/t_ovrp_frame_samples.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_ovrp_frame_samples.c $(RUNTIME) $(LDLIBS)
+
 .PHONY: vkvertexcheck
 vkvertexcheck: build/t_vk_base_vertex
 	./build/t_vk_base_vertex 1
@@ -120,8 +136,9 @@ vkvertexcheck: build/t_vk_base_vertex
 	./build/t_vk_base_vertex -1
 
 .PHONY: openslcheck
-openslcheck: build/t_opensl build/t_photon_audio build/t_jni_array_args
+openslcheck: build/t_opensl build/t_opensl_record build/t_photon_audio build/t_jni_array_args
 	./build/t_opensl
+	./build/t_opensl_record
 	./build/t_photon_audio
 	./build/t_jni_array_args
 
@@ -190,6 +207,15 @@ build/t_dladdr: tests/t_dladdr.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_dladdr.c $(RUNTIME) $(LDLIBS)
 
+build/t_core_dlsym: tests/t_core_dlsym.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_core_dlsym.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: loadercheck
+loadercheck: build/t_core_dlsym build/t_dladdr
+	./build/t_core_dlsym
+	./build/t_dladdr
+
 build/t_fadvise: tests/t_fadvise.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_fadvise.c $(RUNTIME) $(LDLIBS)
@@ -222,9 +248,29 @@ build/t_platform_user_error: tests/t_platform_user_error.c $(RUNTIME) $(RUNTIME_
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_platform_user_error.c $(RUNTIME) $(LDLIBS)
 
+build/t_procfs: tests/t_procfs.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_procfs.c $(RUNTIME) $(LDLIBS)
+
+build/t_meta_account: tests/t_meta_account.m runtime/xr/kl_meta_account.m runtime/xr/kl_meta_account.h runtime/xr/kl_ovrplat.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ $< -framework Foundation -framework Security
+
+build/t_unity_settings: tests/t_unity_settings.c runtime/guest/kl_unity_compat.c runtime/guest/kl_unity_compat.h runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $< runtime/guest/kl_unity_compat.c runtime/kl_env.c
+
 build/t_touch_pose: tests/t_touch_pose.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_touch_pose.c $(RUNTIME) $(LDLIBS)
+
+build/t_lowmem_thread: tests/t_lowmem_thread.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_lowmem_thread.c $(RUNTIME) $(LDLIBS)
+
+build/t_renderer_activation: tests/visionos/RendererActivationTests.swift visionos/Sources/KleptonRendererActivation.swift
+	@mkdir -p build
+	xcrun swiftc -o $@ visionos/Sources/KleptonRendererActivation.swift tests/visionos/RendererActivationTests.swift
 
 build/t_webview_texture: tests/t_webview_texture.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
@@ -234,13 +280,21 @@ build/t_overlay_image_thread: tests/t_overlay_image_thread.c tests/t_mtl_provide
 	@mkdir -p build
 	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_overlay_image_thread.c tests/t_mtl_provider.m $(RUNTIME) $(LDLIBS) -framework Metal
 
-build/t_webview: tests/t_webview.m runtime/media/kl_webview.m runtime/media/kl_webview.h
+build/t_webview: tests/t_webview.m runtime/media/kl_webview.m runtime/media/kl_webview.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_webview.m runtime/media/kl_webview.m -framework WebKit -framework CoreGraphics -framework AppKit
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_webview.m runtime/media/kl_webview.m runtime/kl_env.c -framework WebKit -framework CoreGraphics -framework ImageIO -framework AppKit
 
-build/t_webview_video: tests/t_webview_video.m runtime/media/kl_webview.m runtime/media/kl_webview.h
+build/t_webview_cookie: tests/t_webview_cookie.m runtime/media/kl_webview.m runtime/media/kl_webview.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_webview_video.m runtime/media/kl_webview.m -framework WebKit -framework CoreGraphics -framework AppKit -framework AVFoundation -framework CoreVideo -framework CoreMedia
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_webview_cookie.m runtime/media/kl_webview.m runtime/kl_env.c -framework WebKit -framework CoreGraphics -framework ImageIO -framework AppKit
+
+build/t_webview_video: tests/t_webview_video.m runtime/media/kl_webview.m runtime/media/kl_webview.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_webview_video.m runtime/media/kl_webview.m runtime/kl_env.c -framework WebKit -framework CoreGraphics -framework ImageIO -framework AppKit -framework AVFoundation -framework CoreVideo -framework CoreMedia
+
+build/t_webview_hidden_video: tests/t_webview_hidden_video.m runtime/media/kl_webview.m runtime/media/kl_webview.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_webview_hidden_video.m runtime/kl_env.c -framework WebKit -framework CoreGraphics -framework ImageIO -framework AppKit
 
 build/t_bigscreen_web_input: tests/t_bigscreen_web_input.m $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
@@ -319,6 +373,14 @@ build/t_jni_refcache: tests/t_jni_refcache.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_jni_refcache.c $(RUNTIME) $(LDLIBS)
 
+build/t_jni_strings: tests/t_jni_strings.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_jni_strings.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: jnistringcheck
+jnistringcheck: build/t_jni_strings
+	./build/t_jni_strings
+
 steamcheck: assetcheck build/t_jni_refcache build/t_jump_mask build/t_signal_wait build/t_mprobe_gate build/t_steam_init_retry build/t_steam_versions build/t_fadvise build/t_steam_callbacks build/t_steam_ticket_gate build/t_steam_mailbox build/t_steam build/t_eventfd build/t_tls_classifier build/t_steam_ipc build/t_dladdr
 	./build/t_jni_refcache
 	./build/t_jump_mask
@@ -347,6 +409,29 @@ build/t_eleven_fmod_device: games/eleven/tests/t_fmod_device.c runtime/jni/kl_jn
 build/t_audio_mix: tests/visionos/AudioMixTests.c runtime/media/kl_audio.c runtime/media/kl_audio.h runtime/kl_env.c
 	@mkdir -p build
 	$(CC) $(CFLAGS) -Wl,-dead_strip -Iruntime -framework AudioToolbox -framework CoreAudio -o $@ tests/visionos/AudioMixTests.c runtime/kl_env.c
+
+build/t_voice_io: tests/visionos/VoiceIOTests.c runtime/media/kl_audio.c runtime/media/kl_audio.h runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -Wl,-dead_strip -framework AudioToolbox -framework CoreAudio -o $@ tests/visionos/VoiceIOTests.c runtime/kl_env.c
+
+build/t_phase_audio_format: tests/visionos/PhaseAudioFormatTests.m tests/visionos/VoiceIOTests.c runtime/media/kl_audio.c runtime/media/kl_audio.h runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -Wl,-dead_strip -framework AVFAudio -framework Foundation -framework AudioToolbox -framework CoreAudio -o $@ tests/visionos/PhaseAudioFormatTests.m runtime/kl_env.c
+
+build/t_pcm_filter: tests/visionos/PCMFilterTests.c runtime/media/kl_pcm_filter.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/visionos/PCMFilterTests.c
+
+.PHONY: voicecheck
+build/t_capture_timing: tests/visionos/CaptureTimingTests.c runtime/media/kl_opensl.c runtime/media/kl_aaudio.c runtime/media/kl_pcm_filter.h runtime/media/kl_audio.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -Wl,-dead_strip -o $@ tests/visionos/CaptureTimingTests.c
+
+voicecheck: build/t_voice_io build/t_pcm_filter build/t_audio_mix build/t_capture_timing
+	./build/t_voice_io
+	./build/t_pcm_filter
+	./build/t_audio_mix
+	./build/t_capture_timing
 
 elevencheck: build/t_eleven_fmod_device build/t_audio_mix build/t_steam_init_retry build/t_ctr
 	./build/t_eleven_fmod_device
@@ -421,7 +506,7 @@ guestlibs-list:
 
 # ---- Steam Link ----
 .PHONY: slinkcheck
-check: slinkcheck
+check: slinkcheck loadercheck jnistringcheck
 build/t_slink_jni: tests/t_slink_jni.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_slink_jni.c $(RUNTIME) $(LDLIBS)
@@ -551,6 +636,22 @@ build/t_hevc: tests/t_hevc.c $(RUNTIME) $(RUNTIME_HDRS)
 hevc: build/t_hevc
 	./build/t_hevc
 
+build/t_vtdec_recovery: tests/t_vtdec_recovery.c runtime/media/kl_vtdec.c runtime/media/kl_vtdec.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_vtdec_recovery.c runtime/kl_env.c -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
+
+.PHONY: decoderrecoverycheck
+decoderrecoverycheck: build/t_vtdec_recovery
+	./build/t_vtdec_recovery
+
+build/t_video_shader: tests/t_video_shader.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_video_shader.c $(RUNTIME) $(LDLIBS)
+
+build/t_opensl_record: tests/t_opensl_record.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_opensl_record.c $(RUNTIME) $(LDLIBS)
+
 # The video TEXTURE gate: a natively-decoded biplanar frame through
 # CVMetalTextureCache + EGL_METAL_TEXTURE_ANGLE to sampled pixels, compared
 # against the same picture through the BGRA path. This is what proves the
@@ -561,6 +662,10 @@ hevc: build/t_hevc
 build/t_vidtex: tests/t_vidtex.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_vidtex.c $(RUNTIME) $(LDLIBS)
+
+build/t_video_layer: tests/t_vidtex.c tests/t_mtl_provider.m tests/t_mtl_provider.h $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -DKL_TEST_VIDEO_LAYER_MIRROR -o $@ tests/t_vidtex.c tests/t_mtl_provider.m $(RUNTIME) $(LDLIBS) -framework Metal
 
 .PHONY: vidtex
 vidtex: build/t_vidtex
@@ -802,8 +907,11 @@ build/t_tlsdesc: tests/t_tlsdesc.c tests/t_tlsdesc_probe.S runtime/kl_tlsdesc.S
 tlsdesc: build/t_tlsdesc
 	./build/t_tlsdesc
 
-check: steamcheck build/t_surface_decode build/t_errno_bridge build/t_touch_pose build/t_bigscreen_login build/t_platform_user_error build/t_putenv build/t_oculus_init build/t_bigscreen_jni build/t_gles_version build/t_opensl build/t_photon_audio build/t_jni_array_args build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_xrinput build/t_softinput build/t_ctr build/t_tlsdesc build/t_bcast build/t_fault build/t_glcaps build/t_fove build/t_x18race build/klepton-ld
+check: build/t_ovrp_frame_samples
+check: steamcheck build/t_surface_decode build/t_errno_bridge build/t_touch_pose build/t_vk_frame_publish build/t_bigscreen_login build/t_platform_user_error build/t_putenv build/t_oculus_init build/t_bigscreen_jni build/t_gles_version build/t_opensl build/t_photon_audio build/t_jni_array_args build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_xrinput build/t_softinput build/t_ctr build/t_tlsdesc build/t_bcast build/t_fault build/t_glcaps build/t_fove build/t_x18race build/klepton-ld
 	@./build/t_touch_pose
+	@./build/t_ovrp_frame_samples
+	@./build/t_vk_frame_publish
 	@./build/t_errno_bridge
 	@./build/t_bigscreen_login
 	@./build/t_platform_user_error
@@ -1062,22 +1170,24 @@ swiftcheck:
 # runs the PREVIOUS constant while the source says otherwise. That is the same
 # stale-artifact trap the xcframework rule below already records; the fix there
 # stopped at the archives and left this behind it.
-build/xros/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
+build/xros/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS) Makefile
 	@mkdir -p build/xros
 	@rm -f $@
 	@for s in $(RUNTIME_SHIP); do \
 	  o=build/xros/$$(basename $$s | sed 's/\.[cSm]$$/.o/'); \
+	  meta_objc_flags=; if test "$$s" = runtime/xr/kl_meta_account.m; then meta_objc_flags=-fobjc-arc; fi; \
 	  $(CC) $(XROS_CFLAGS) -target arm64-apple-xros1.0 -isysroot $(XROS_SDK) \
-	    -c $$s -o $$o || exit 1; done
+	    $$meta_objc_flags -c $$s -o $$o || exit 1; done
 	@ar rcs $@ build/xros/*.o
 
-build/xrsim/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
+build/xrsim/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS) Makefile
 	@mkdir -p build/xrsim
 	@rm -f $@
 	@for s in $(RUNTIME_SHIP); do \
 	  o=build/xrsim/$$(basename $$s | sed 's/\.[cSm]$$/.o/'); \
+	  meta_objc_flags=; if test "$$s" = runtime/xr/kl_meta_account.m; then meta_objc_flags=-fobjc-arc; fi; \
 	  $(CC) $(XROS_CFLAGS) -target arm64-apple-xros1.0-simulator -isysroot $(XRSIM_SDK) \
-	    -c $$s -o $$o || exit 1; done
+	    $$meta_objc_flags -c $$s -o $$o || exit 1; done
 	@ar rcs $@ build/xrsim/*.o
 
 # The gate: link each archive into a dylib with -all_load, so a symbol that is
@@ -1087,14 +1197,14 @@ build/xros/libklepton.dylib: build/xros/libklepton.a
 	@$(CC) -target arm64-apple-xros1.0 -isysroot $(XROS_SDK) -arch arm64 \
 	   -dynamiclib -o $@ -Wl,-all_load $< -lz -framework AudioToolbox \
 	   -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
-	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework UIKit \
+	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework ImageIO -framework UIKit -framework Security \
 	   -install_name @rpath/libklepton.dylib
 
 build/xrsim/libklepton.dylib: build/xrsim/libklepton.a
 	@$(CC) -target arm64-apple-xros1.0-simulator -isysroot $(XRSIM_SDK) -arch arm64 \
 	   -dynamiclib -o $@ -Wl,-all_load $< -lz -framework AudioToolbox \
 	   -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
-	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework UIKit \
+	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework WebKit -framework CoreGraphics -framework ImageIO -framework UIKit -framework Security \
 	   -install_name @rpath/libklepton.dylib
 
 xros-device: build/xros/libklepton.dylib
@@ -1542,5 +1652,7 @@ installer-check:
 	python3 -m unittest discover -s steam/tests -p 'test_steam_updates.py'
 	node --test steam/tools/library/test_*.cjs
 	mkdir -p build/installer-tests
-	xcrun swiftc -parse-as-library -D KLEPTON_MODEL_TESTS macos/Sources/KleptonInstaller.swift macos/Tests/SteamLibraryModelTests.swift -o build/installer-tests/steam-library-model
+	xcrun swiftc -parse-as-library -D KLEPTON_MODEL_TESTS macos/Sources/*.swift visionos/Sources/KleptonMetaSignIn.swift macos/Tests/SteamLibraryModelTests.swift -o build/installer-tests/steam-library-model
 	build/installer-tests/steam-library-model
+	xcrun swiftc -parse-as-library visionos/Sources/KleptonMetaSignIn.swift macos/Tests/MetaSignInTests.swift -o build/installer-tests/meta-signin
+	build/installer-tests/meta-signin

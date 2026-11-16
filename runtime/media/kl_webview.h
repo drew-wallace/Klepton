@@ -11,6 +11,12 @@ void *kl_webview_create(uint64_t id, int width, int height, const char *agent,
                         int autoplay, kl_webview_event event);
 void kl_webview_close(void *view);
 void kl_webview_load(void *view, const char *content, const char *base, int html);
+// Vuplex Cookie JSON; stored in the shared WebKit cookie store. Subsequent
+// explicit loads wait for outstanding cookie writes. Never logs cookie data.
+void kl_webview_set_cookie(const char *json);
+// Clear this app's shared WebKit website data. Later explicit loads wait for
+// removal and earlier cookie writes; the guest explicitly requests this reset.
+void kl_webview_clear_data(void);
 void kl_webview_eval(void *view, const char *script, uint64_t request);
 void kl_webview_resize(void *view, int width, int height);
 void kl_webview_command(void *view, const char *command, int value);

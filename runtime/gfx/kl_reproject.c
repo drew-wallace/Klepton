@@ -491,6 +491,8 @@ static const char kl_msl_overlay[] =
 "    uint     srgb_decode;\n"
 "    uint     visible;\n"
 "    uint     opaque;\n"
+"    float4   color_scale;\n"
+"    float4   color_bias;\n"
 "};\n"
 "vertex VOut kl_ov_v(uint vid [[vertex_id]],\n"
 "                    constant KLOv *us [[buffer(0)]],\n"
@@ -515,17 +517,19 @@ static const char kl_msl_overlay[] =
 "}\n"
 "fragment float4 kl_ov_f(VOut in [[stage_in]],\n"
 "                        texture2d<float> tex [[texture(0)]],\n"
+"                        texture2d<float> rightTex [[texture(1)]],\n"
 "                        sampler samp [[sampler(0)]],\n"
 "                        constant KLOv *us [[buffer(0)]],\n"
 "                        ushort amp [[amplification_id]]) {\n"
 "    constant KLOv &u = us[amp];\n"
-"    float4 c = tex.sample(samp, in.uv);\n"
+"    float4 c = u.slice == 1u ? rightTex.sample(samp, in.uv) : tex.sample(samp, in.uv);\n"
 "    if (u.srgb_decode != 0u) {\n"
 "        float3 lo = c.rgb / 12.92;\n"
 "        float3 hi = pow((c.rgb + 0.055) / 1.055, float3(2.4));\n"
 "        c.rgb = select(hi, lo, c.rgb <= float3(0.04045));\n"
 "    }\n"
 "    if (u.opaque != 0u) c.a = 1.0;\n"
+"    c = c * u.color_scale + u.color_bias;\n"
 "    return c;\n"
 "}\n";
 
@@ -945,6 +949,7 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
                                      (float)r[1] / (float)ov->tex_h,
                                      (float)r[2] / (float)ov->tex_w,
                                      (float)r[3] / (float)ov->tex_h);
+    if(ov->has_uv_rect){const float *v=ov->uv_rect[(unsigned)eye>1?0:eye];u.uv_rect=simd_make_float4(v[0],v[1],v[2],v[3]);}
     if (ov->mirror_x) {u.uv_rect.x+=u.uv_rect.z;u.uv_rect.z=-u.uv_rect.z;}
     if (ov->mirror_y) {u.uv_rect.y+=u.uv_rect.w;u.uv_rect.w=-u.uv_rect.w;}
 
@@ -981,6 +986,9 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
     u.flip_y = ov->origin_top_left ? 1u : 0u;
     u.visible = 1;
     u.opaque = kl_env_on("KL_OVERLAY_OPAQUE", 0) ? 1u : 0u;
+    u.slice=eye==1&&ov->tex_right&&ov->tex_right!=ov->tex?1u:0u;
+    u.color_scale=simd_make_float4(1,1,1,1);u.color_bias=simd_make_float4(0,0,0,0);
+    if(ov->has_color_scale_bias){memcpy(&u.color_scale,ov->color_scale,sizeof u.color_scale);memcpy(&u.color_bias,ov->color_bias,sizeof u.color_bias);}
     return u;
 }
 

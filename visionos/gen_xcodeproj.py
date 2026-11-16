@@ -64,6 +64,19 @@ if STEAM_LOCAL:
     _info_path.parent.mkdir(parents=True, exist_ok=True)
     _info_path.write_bytes(plistlib.dumps(_info))
 
+# Meta games use their own per-app account gate, independently of Steam.
+from meta_game import app_id as meta_game_app_id
+_meta_id = meta_game_app_id(pathlib.Path(KLT.get('host_tree') or pathlib.Path(HERE).parent / KLT['tree']),
+                            KLT.get('import_id', ''), KLT.get('meta_app_id', ''))
+if _meta_id:
+    import plistlib
+    _meta_info = plistlib.loads(pathlib.Path(HERE, GAME_INFO_PLIST).read_bytes())
+    _meta_info['KleptonMetaAppID'] = _meta_id
+    GAME_INFO_PLIST = f"build/GameInfo-{KLT['name']}.plist"
+    _meta_path = pathlib.Path(HERE, GAME_INFO_PLIST)
+    _meta_path.parent.mkdir(parents=True, exist_ok=True)
+    _meta_path.write_bytes(plistlib.dumps(_meta_info))
+
 # Standalone guests keep the Personal Team-compatible defaults. Steam Link
 # enables Extended Virtual Addressing and Low-Latency Streaming by default.
 # The latter permits low-latency wireless networking for streamed game content;
@@ -98,6 +111,10 @@ ANGLE = ["ANGLE_libEGL", "ANGLE_libGLESv2"]
 # would stop everyone's build for a dependency most targets do not use.
 MVK = ["MoltenVK"] if os.path.isdir(
     os.path.join(HERE, "Frameworks", "MoltenVK.xcframework")) else []
+sys.path.insert(0, os.path.join(HERE, '..', 'tools'))
+from vivox_native import supports_tree as vivox_supports_tree
+VIVOX = ["KleptonVivox"] if vivox_supports_tree(KLT.get('host_tree')) and os.path.isdir(
+    os.path.join(HERE, "Frameworks", "KleptonVivox.xcframework")) else []
 # Where each set is staged on the SOURCE side. The guest's is per-target so the
 # two apps do not overwrite each other's translations in place; ANGLE's is not,
 # because it is the same renderer for every guest. Inside the built .app both
@@ -108,7 +125,7 @@ ANGLE_DIR = "Frameworks"
 # the generator stays data-driven — the two lists differ only in what a missing
 # one means, which is why main() reports them separately.
 STEAM_FRAMEWORKS = ['libsteamclient_backend', 'libsteamclient'] + [pathlib.Path(record['path']).stem for record in mksteam.profile(KLT['name'])['files']] if STEAM_LOCAL else []
-EMBED = GUEST + ANGLE + MVK + STEAM_FRAMEWORKS
+EMBED = GUEST + ANGLE + MVK + VIVOX + STEAM_FRAMEWORKS
 
 
 def detect_team():
@@ -143,10 +160,8 @@ C_PRJ_D = oid("CPRJD"); C_PRJ_R = oid("CPRJR")
 C_TGT_D = oid("CTGTD"); C_TGT_R = oid("CTGTR")
 F_C = oid("FC"); F_H = oid("FH"); F_BRIDGE = oid("FBRDG")
 B_C = oid("BC")
-# The app icon: an asset catalog holding one solid-image-stack per target that
-# has one (AppIcon-<name>.solidimagestack). Targets without one build exactly
-# as before - the catalog compiles empty for them and no APPICON setting is
-# emitted, so the icon is strictly additive.
+# The app icon: prefer locally supplied stacks, otherwise extract the decoded
+# APK's launcher artwork into the per-target build catalog.
 F_ASSETS = oid("FASSET"); B_ASSETS = oid("BASSET"); BP_RES = oid("BPRES")
 import os as _os
 # Compile-time launcher opt-in (also drives LAUNCHER_COND + the display name below).
@@ -166,13 +181,6 @@ _icon_name = (f"{_icon_base}-launcher"
               if _launcher_on and _stack_exists(f"{_icon_base}-launcher")
               else _icon_base)
 HAS_ICON = _stack_exists(_icon_name)
-ASSETCATALOG_SETTING = ((f"\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = \"{_icon_name}\";\n"
-                         if HAS_ICON else "")
-                        # Info.plist's CFBundleIconName is $(KL_APPICON_NAME) —
-                        # always defined so expansion never leaves a literal
-                        # "$(...)" in the bundle; the placeholder names no stack
-                        # and behaves exactly like the old no-icon build.
-                        + f"\t\t\t\tKL_APPICON_NAME = \"{_icon_name if HAS_ICON else 'AppIcon'}\";\n")
 
 # Trim the asset catalog to THIS target. The shared Assets.xcassets holds one icon
 # stack per target (~26), and actool compiles ALL of them into the app's Assets.car
@@ -196,11 +204,31 @@ for _stack in (_icon_base, f"{_icon_base}-launcher"):
     if _os.path.isdir(_s):
         _shutil.copytree(_s, _os.path.join(_cat_abs, _stack + ".solidimagestack"))
 
+if not HAS_ICON:
+    from app_icon import generate_icon
+    _icon_tree = pathlib.Path(KLT.get('host_tree') or pathlib.Path(HERE).parent / KLT['tree'])
+    try:
+        HAS_ICON = generate_icon(_icon_tree, _cat_abs, _icon_name, pathlib.Path(HERE) / 'build')
+        if HAS_ICON:
+            print(f"App icon: extracted {_icon_tree.name} launcher artwork as {_icon_name}")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # Optional artwork must not prevent a working game from installing.
+        print(f"warning: could not generate {_icon_name}: {exc}", file=sys.stderr)
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            print(exc.stderr.decode(errors='replace')[-2000:], file=sys.stderr)
+
+ASSETCATALOG_SETTING = ((f"\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = \"{_icon_name}\";\n"
+                         if HAS_ICON else "")
+                        # Keep Info.plist expansion defined for iconless guests.
+                        + f"\t\t\t\tKL_APPICON_NAME = \"{_icon_name if HAS_ICON else 'AppIcon'}\";\n")
+
 # The Swift half of the language split: the App/UI, and the Compositor Services
 # renderer adds. A list rather than an id pair each, for the same reason
 # the guest libraries are one.
-SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift",
+SWIFT = ["KleptonMetaSignIn.swift", "KleptonMetaAccount.swift", "KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift",
          "KleptonControllerMotion.swift",
+         "KleptonLayerDepth.swift",
+         "KleptonRendererActivation.swift",
          "KleptonAudio.swift", "KleptonShell.swift", "KleptonTuning.swift",
          "KleptonChroma.swift", "KleptonMic.swift",
          "KleptonGuardian.swift", "KleptonGuardianGeometry.swift", "KleptonGuardianRuntime.swift",
@@ -209,8 +237,11 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonLauncher.swift", "KleptonHL1.swift"]
 if STEAM_LOCAL:
     SWIFT += ['../../steam/visionos/Sources/kl_steam_host.c', '../build/SteamLocal/SteamHostLogin.swift']
-if os.environ.get('KLEPTON_BUILD_MANIFEST'):
-    generated = pathlib.Path(os.environ['KLEPTON_BUILD_MANIFEST']).resolve().with_name('BuildTarget.c')
+BUILD_TARGET = bool(os.environ.get('KLEPTON_BUILD_MANIFEST') or KLT.get('runtime_defaults'))
+if BUILD_TARGET:
+    generated = (pathlib.Path(os.environ['KLEPTON_BUILD_MANIFEST']).resolve().with_name('BuildTarget.c')
+                 if os.environ.get('KLEPTON_BUILD_MANIFEST') else pathlib.Path(HERE, 'build', f'{NAME}-BuildTarget.c'))
+    generated.parent.mkdir(parents=True, exist_ok=True)
     generated.write_text(targets_mod.build_target_source(KLT))
     SWIFT += [str(generated)]
 swift = [{"name": s, "ref": oid(f"FS{i}"), "bld": oid(f"BS{i}")} for i, s in enumerate(SWIFT)]
@@ -274,8 +305,9 @@ LAUNCHER_COND = ('\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "'+ ' '.join(_co
                  if _conditions else "")
 STEAM_C_COND = ('\t\t\t\tARCHS = arm64;\n' if STEAM_LOCAL else '')
 STEAM_C_DEFINE = ('\t\t\t\t\t"KL_STEAM_GAME_HOST=1",\n' if STEAM_LOCAL else '')
-if os.environ.get('KLEPTON_BUILD_MANIFEST'):
+if BUILD_TARGET:
     STEAM_C_DEFINE += '\t\t\t\t\t"KL_BUILD_MANIFEST=1",\n'
+if os.environ.get('KLEPTON_BUILD_MANIFEST'):
     # Android labels are data, not pbxproj syntax.
     import json
     _display = json.dumps(_display)[1:-1]
@@ -356,7 +388,7 @@ COMMON = f"""
 				// second target needed one. The failure is a link error naming
 				// VTDecompressionSession*, which reads as a missing SDK rather
 				// than as a build setting that was never updated.
-				OTHER_LDFLAGS = "-lz -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface -framework WebKit -framework CoreGraphics";
+				OTHER_LDFLAGS = "-lz -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface -framework WebKit -framework CoreGraphics -framework ImageIO -framework Security";
 				PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE_ID};
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = xros;

@@ -40,7 +40,14 @@ struct SteamLibraryModelTests {
         model.info = APKInfo(["package": "test.manual", "kind": "unity", "entry": "libmain"])
         model.selectProfile()
         precondition(model.dataPath.isEmpty, "A different manual APK must not inherit Steam's data path")
-        precondition(model.libraryRefreshScope == "vr_android", "Startup checks must focus on VR Android games")
+        model.info = APKInfo(["package": "com.LuckyVR.PokerStarsVR", "kind": "unity", "entry": "libmain",
+            "suggested_data_path": "Android/obb/com.LuckyVR.PokerStarsVR",
+            "catalog_data": ["files": ["main.42.com.LuckyVR.PokerStarsVR.obb", "required.bundle"]],
+            "data_requirements": ["": ["required": true, "files": ["main.42.com.LuckyVR.PokerStarsVR.obb"],
+                "description": "1 catalog-referenced bundles"]]])
+        model.selectProfile()
+        precondition(model.dataDestination == "Android/obb/com.LuckyVR.PokerStarsVR")
+        precondition(model.info?.dataInclude.count == 2 && model.requiresData)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         func game(_ local: [String: Any]? = nil, revision: String = "first", remoteKnown: Bool = true,
@@ -54,30 +61,37 @@ struct SteamLibraryModelTests {
             return try decoder.decode(SteamLibraryGame.self, from: JSONSerialization.data(withJSONObject: value))
         }
         model.libraryGames = [try game(), try game(vr: false), try game(android: false)]
-        precondition(model.filteredLibrary.count == 1, "Default filters must intersect VR and Android availability")
+        precondition(!model.libraryVROnly, "VR filtering must default to off")
+        precondition(model.filteredLibrary.count == 2, "Default library must show all Android games")
+        model.libraryVROnly = true
+        precondition(model.filteredLibrary.count == 1, "VR toggle must limit the Android library to VR games")
         model.libraryVROnly = false
-        precondition(model.libraryRefreshScope == "all")
-        precondition(model.filteredLibrary.count == 2)
-        model.libraryAndroidOnly = false
-        precondition(model.libraryRefreshScope == "all")
-        precondition(model.filteredLibrary.count == 3)
+        precondition(model.filteredLibrary.count == 2, "Disabling VR must still exclude desktop-only games")
         model.librarySearch = "EXAMPLE"
-        precondition(model.filteredLibrary.count == 3, "Search must ignore case")
+        precondition(model.filteredLibrary.count == 2, "Search must ignore case")
         model.librarySearch = "not present"
         precondition(model.filteredLibrary.isEmpty)
 
-        model.busy = true // Exercise filter scope changes without launching the backend.
-        model.libraryFiltersChanged()
         model.libraryVROnly = true
-        model.libraryAndroidOnly = true
-        precondition(model.libraryRefreshScope == "all", "Filter changes must enable full refreshes for this session")
-        model.busy = false
 
         model.libraryGames = [try game()]
         model.libraryGameID = "10"
         model.selectLibraryGame()
         precondition(model.libraryBranch == "public" && model.libraryLaunch == "0")
         precondition(model.downloadAction == "Download" && model.canDownloadGame)
+        model.source = "meta"
+        model.updateSteamLibrary([try game(remoteKnown: false)], afterDownload: true)
+        model.source = "steam"
+        precondition(model.canDownloadGame, "A partial download catalog must preserve other games' completed version checks across tabs")
+        model.updateSteamLibrary([try game(revision: "changed", remoteKnown: false)], afterDownload: true)
+        precondition(!model.canDownloadGame, "Changed remote content must not inherit a previous version check")
+        model.libraryGames = [try game()]
+        model.updateSteamLibrary([try game(remoteKnown: false)])
+        precondition(!model.canDownloadGame, "An offline catalog must not inherit freshness from a failed refresh")
+        model.libraryGames = [try game()]
+        model.libraryBranch = "missing"; model.libraryLaunch = "missing"
+        model.updateSteamLibrary([try game()])
+        precondition(model.libraryBranch == "public" && model.libraryLaunch == "0" && model.canDownloadGame)
         let local: [String: Any] = ["build_id": "100", "downloaded_at": "2026-10-27T12:00:00+00:00", "revision": "first", "valid": true]
         model.libraryGames = [try game(local)]
         precondition(model.downloadAction == "Use Downloaded")
@@ -101,6 +115,33 @@ struct SteamLibraryModelTests {
         model.librarySearch = "not present"
         model.reconcileLibrarySelection()
         precondition(model.libraryGameID.isEmpty, "Filtering must not leave a hidden game selected")
+        // Meta JSON uses a single build/receipt rather than Steam's branches.
+        func metaGame(_ build: String = "100", remote: Bool = true, valid: Bool = true, downloaded: Bool = true) throws -> MetaLibraryGame {
+            var fixture: [String: Any] = ["app_id": "2370815932930055", "name": "Example Quest Game", "owned": true,
+                "remote_known": remote, "latest": ["build_id": build, "version": "1.0", "version_code": 12]]
+            if downloaded { fixture["downloaded"] = ["build_id": "100", "version": "1.0", "version_code": 12,
+                "downloaded_at": "2026-11-08T12:00:00Z", "valid": valid] }
+            let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(MetaLibraryGame.self, from: JSONSerialization.data(withJSONObject: fixture))
+        }
+        model.source = "meta"; model.metaGameID = "2370815932930055"
+        model.metaGames = [try metaGame(downloaded: false)]
+        precondition(model.metaDownloadAction == "Download")
+        model.metaGames = [try metaGame()]
+        precondition(model.metaDownloadAction == "Use Downloaded")
+        model.metaGames = [try metaGame("200")]
+        precondition(model.metaDownloadAction == "Update")
+        model.metaGames = [try metaGame("200", remote: false)]
+        precondition(model.metaDownloadAction == "Use Downloaded", "Stale Meta metadata cannot claim an update")
+        model.metaGames = [try metaGame(valid: false)]
+        precondition(model.metaDownloadAction == "Repair")
+        model.info = APKInfo(["package": "example.test"]); model.filename = "old"
+        model.clearMetaSelection()
+        precondition(model.info == nil && model.filename.isEmpty)
+        precondition(model.metaGameID == "2370815932930055", "Using a download must retain the selected Meta game")
+        model.metaSearch = "hidden selection"
+        model.reconcileMetaSelection()
+        precondition(model.metaGameID.isEmpty, "Searching Meta must not retain a hidden selection")
         print("Steam library model checks passed (filtering, JSON decoding, download/update/repair, offline reuse, APK isolation).")
     }
 }

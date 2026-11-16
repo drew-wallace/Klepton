@@ -6,6 +6,7 @@
 // binding table that names them. See runtime/jni/kl_jni_int.h for the seam.
 #include <ctype.h>
 #include "kl_bigscreen.h"
+#include "kl_driver.h"
 #include <errno.h>
 #include <stdarg.h>
 #include <pthread.h>
@@ -138,6 +139,11 @@ static klj_val klj_TimeZone_getDefault(void *env, void *self, const klj_val *a, 
         KLJ_LOG("TimeZone.getDefault() -> %s", klj_host_tzid());
     }
     return (klj_val){.l = tz};
+}
+
+static klj_val klj_JavaTimeZone_getDefault(void *env, void *self, const klj_val *a, int n) {
+    static void *tz;
+    return klj_singleton("java/util/TimeZone",&tz);
 }
 
 static klj_val klj_TimeZone_getID(void *env, void *self, const klj_val *a, int n) {
@@ -358,7 +364,7 @@ static klj_val klj_Intent_getExtras(void *env, void *self, const klj_val *a, int
         built = 1;
         static klj_kv kv[6];
         int k = 0;
-        const char *unity=kl_bigscreen_unity_arguments();
+        const char *unity=kl_driver_unity_arguments();
         if(*unity){kv[k].key="unity";kv[k].val=unity;k++;}
         const struct { const char *env, *key; } want[] = {
             {"KL_SLINK_SARGS",         "sArgs"},
@@ -590,8 +596,8 @@ static klj_val klj_Intent_getStringExtra(void *env, void *self, const klj_val *a
     (void)env; (void)self;
     const char *key=n?klj_str(a[0].l):NULL;
     if(key&&!strcmp(key,"unity")){
-        const char *arguments=kl_bigscreen_unity_arguments();
-        if(*arguments){KLJ_LOG_ONCE("Bigscreen requests Unity CPU skinning for the host graphics backend");return (klj_val){.l=kl_jni_new_string(arguments)};}
+        const char *arguments=kl_driver_unity_arguments();
+        if(*arguments){KLJ_LOG_ONCE("Unity launch arguments: %s",arguments);return (klj_val){.l=kl_jni_new_string(arguments)};}
     }
     return (klj_val){.l = NULL};
 }
@@ -1560,6 +1566,12 @@ const klj_binding klj_bind_android[] = {
     {"java/util/HashMap", "containsKey", "(Ljava/lang/Object;)Z", klj_HashMap_containsKey},
     {"java/util/HashMap", "size", "()I", klj_HashMap_size},
 // ICU's time zones, which is where Mono's TimeZoneInfo looks on Android.
+    {"java/util/TimeZone", "getDefault", "()Ljava/lang/Object;", klj_JavaTimeZone_getDefault},
+    {"java/util/TimeZone", "getDefault", "()Ljava/util/TimeZone;", klj_JavaTimeZone_getDefault},
+    {"java/util/TimeZone", "getID", "()Ljava/lang/String;", klj_TimeZone_getID},
+    {"java/util/TimeZone", "getOffset", "(J)I", klj_TimeZone_getOffset},
+    {"java/util/TimeZone", "getRawOffset", "()I", klj_TimeZone_getRawOffset},
+    {"java/util/TimeZone", "useDaylightTime", "()Z", klj_TimeZone_useDaylightTime},
     {"android/icu/util/TimeZone", "getDefault", "()Ljava/lang/Object;", klj_TimeZone_getDefault},
     {"android/icu/util/TimeZone", "getID", "()Ljava/lang/String;", klj_TimeZone_getID},
     {"android/icu/util/TimeZone", "getAvailableIDs", "()[Ljava/lang/String;", klj_TimeZone_getAvailableIDs},

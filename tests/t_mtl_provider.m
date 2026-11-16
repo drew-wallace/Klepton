@@ -477,6 +477,15 @@ unsigned long kl_mtl_count_lit_layer(int layer, int stage, int *out_w, int *out_
     void *texp = kl_glfb_layer_mtl_texture(layer, stage, NULL, NULL);
     return klmtl_count_lit_tex(texp, 0, out_w, out_h);
 }
+int kl_mtl_layer_rgba(int layer,int stage,void *out,unsigned long capacity) {
+    id<MTLTexture> t=(__bridge id<MTLTexture>)kl_glfb_layer_mtl_texture(layer,stage,NULL,NULL);
+    if(!t||!out||capacity<t.width*t.height*4||
+       (t.pixelFormat!=MTLPixelFormatRGBA8Unorm&&t.pixelFormat!=MTLPixelFormatRGBA8Unorm_sRGB))return 0;
+    NSUInteger slice=0;t=klmtl_readable(t,0,&slice);if(!t)return 0;
+    [t getBytes:out bytesPerRow:t.width*4 bytesPerImage:t.width*t.height*4
+        fromRegion:MTLRegionMake2D(0,0,t.width,t.height) mipmapLevel:0 slice:slice];
+    return 1;
+}
 
 // The eye's MTLTexture as a PNG, tone-mapped exactly as kl_glfb's capture is, so
 // the two files can be looked at side by side. This is what a lit count cannot

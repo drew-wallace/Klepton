@@ -35,6 +35,11 @@ void kl_ovrp_report(FILE *f);
 // a frontend that reports an eye-level head into a floor-level world puts the
 // camera on the ground and its hands underneath it.
 int kl_ovrp_tracking_origin(void);
+// Frontends publish physical floor-space positions. EyeLevel starts at the
+// first tracked eye height, retaining later seated/standing movement.
+float kl_ovrp_tracking_head_y(float physical_y);
+float kl_ovrp_tracking_y_offset(void);
+void kl_ovrp_reset_eye_level_height(void);
 
 // The frontend seam, pose in: whoever owns the window tells us where the head
 // is, and ovrp_GetNodePoseState reports it back to the guest. Today that is the
@@ -369,7 +374,15 @@ typedef struct {
     // Owned composition order, decoded only for legacy EnqueueSubmitLayer2.
     // Other producers' raw flag bits have different meanings.
     int underlay;
+    int has_composition_depth,composition_depth;
+    unsigned long long tex_right;
+    int has_uv_rect,has_color_scale_bias;
+    float uv_rect[2][4];
+    float color_scale[4],color_bias[4];
 } kl_ovrp_overlay;
+
+// Distinct provider storage for the right image of a stereo GLES layer.
+int kl_ovrp_overlay_texture_layer(int layer,int eye);
 
 // How many non-eye layers the guest submitted with its most recent frame, and
 // what they were. The list is replaced whole at each ovrp_EndFrame4 under the

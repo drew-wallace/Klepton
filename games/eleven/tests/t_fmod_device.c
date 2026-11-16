@@ -17,7 +17,9 @@ int kl_audio_open(unsigned rate, unsigned channels, unsigned bits) {
     assert(bits == 16); opens++; opened_rate = rate; opened_channels = channels; return fail_open ? -1 : 0;
 }
 void kl_audio_play(void) { plays++; }
-size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
+void kl_audio_forget_src(const void *src) { assert(src); }
+size_t kl_audio_write_pcm(const void *src, const void *pcm, size_t bytes, unsigned rate, unsigned channels) {
+    assert(rate == opened_rate && channels == opened_channels);
     assert(src && bytes <= sizeof written_pcm); producer = src; writes++; written_bytes = bytes;
     memcpy(written_pcm, pcm, bytes); return bytes;
 }

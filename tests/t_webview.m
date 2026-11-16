@@ -127,6 +127,14 @@ int main(void) { @autoreleasepool {
     kl_webview_eval(second,"navigator.userAgent",47);
     for(int i=0;i<50&&evaluated<7;i++)pump(.1);
     assert(evaluated==7&&!strcmp(result,"Independent browser"));
+    NSString *jarRoot=[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    [NSFileManager.defaultManager createDirectoryAtPath:jarRoot withIntermediateDirectories:YES attributes:nil error:nil];
+    [@"<body>APK page</body>" writeToFile:[jarRoot stringByAppendingPathComponent:@"playback menu.html"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    kl_webview_load(second,"jar:file:///guest/game.apk!/assets/playback%20menu.html?text=fixture%20message#controls",jarRoot.UTF8String,0);
+    for(int i=0;i<50&&finished<6;i++)pump(.1);assert(finished==6);
+    kl_webview_eval(second,"new URL(location.href).searchParams.get('text')+location.hash",48);
+    for(int i=0;i<50&&evaluated<8;i++)pump(.1);assert(evaluated==8&&!strcmp(result,"fixture message#controls"));
+    [NSFileManager.defaultManager removeItemAtPath:jarRoot error:nil];
     kl_webview_load(view,"http://127.0.0.1:1/fails",NULL,0);
     for(int i=0;i<50&&!failed;i++)pump(.1);assert(failed==1);
     kl_webview_close(view);kl_webview_close(second);pump(1);

@@ -147,13 +147,21 @@ int klb_posix_fadvise(int fd, int64_t offset, int64_t length, int advice) {
 
 // bionic spells it __errno(), and it returns the *location* rather than the
 // value — so the translation has to be staged through a per-thread slot that is
-// refreshed on every call. Reads are what matter and they are always fresh; a
-// guest that writes here (errno = 0 before a call) sets the slot, and the next
-// read re-derives from Darwin's real errno anyway.
-static _Thread_local int g_guest_errno;
+// refreshed on every call. Keep the exposed value too: errno-sensitive native
+// operations such as readdir must commit guest writes before entering Darwin.
+// Otherwise IL2CPP's errno=0 before readdir leaves an old native error behind,
+// and an ordinary end-of-directory is mistaken for a broken stream.
+static _Thread_local int g_guest_errno, g_guest_errno_exposed;
 int *klb_errno(void) {
     g_guest_errno = kl_errno_to_linux(*__error());
+    g_guest_errno_exposed = g_guest_errno;
     return &g_guest_errno;
+}
+static void klb_commit_guest_errno(void) {
+    if (g_guest_errno != g_guest_errno_exposed) {
+        *__error() = kl_errno_from_linux(g_guest_errno);
+        g_guest_errno_exposed = g_guest_errno;
+    }
 }
 
 extern char **environ;
@@ -1135,6 +1143,13 @@ int klb_sysinfo(void *out) {
 // once rather than every frame.
 static _Atomic int g_lowmem_armed = 1;
 static _Atomic uint64_t g_lowmem_fired;
+static _Atomic unsigned g_lowmem_pending_system;
+
+void kl_mem_pressure_request_system(int critical) {
+    // Dispatch workers have neither Unity's managed-thread state nor its frame
+    // ordering. Coalesce OS notifications until the guest's frame thread polls.
+    atomic_fetch_or(&g_lowmem_pending_system,critical?2u:1u);
+}
 
 void kl_mem_pressure_fire(const char *why) {
     if (!kl_jni_low_memory()) {
@@ -1153,6 +1168,11 @@ void kl_mem_pressure_fire(const char *why) {
 
 // Cheap enough for once a frame: one task_info call.
 void kl_mem_pressure_poll(void) {
+    unsigned pending=atomic_exchange(&g_lowmem_pending_system,0);
+    if(pending){
+        atomic_store(&g_lowmem_armed,0);
+        kl_mem_pressure_fire(pending&2u?"system critical":"system warning");
+    }
     int at = kl_env_int("KL_LOWMEM_AT", 80);
     if (at <= 0) return;
     int clear = kl_env_int("KL_LOWMEM_CLEAR", 70);
@@ -1194,12 +1214,9 @@ void kl_mem_pressure_init(void) {
         dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
     if (!src) return;
     dispatch_source_set_event_handler(src, ^{
-        // The OS asked, so it is delivered whatever the hysteresis says — this
-        // source only fires when the system means it.
-        kl_mem_pressure_fire(
-            dispatch_source_get_data(src) & DISPATCH_MEMORYPRESSURE_CRITICAL
-                ? "system critical" : "system warning");
-        atomic_store(&g_lowmem_armed, 0);
+        // Do not enter Unity/IL2CPP from this unattached dispatch worker.
+        kl_mem_pressure_request_system(
+            (dispatch_source_get_data(src)&DISPATCH_MEMORYPRESSURE_CRITICAL)!=0);
     });
     dispatch_resume(src);   // deliberately never cancelled: it lives as long as
                             // the process, and there is nothing to release it to
@@ -1629,7 +1646,10 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
             return buf;
         }
     }
-    if (strncmp(path, "/proc/", 6) != 0 &&
+    // Managed FileStream checks the parent before opening meminfo. Map the
+    // directory itself as well as its children, or /proc/meminfo throws a
+    // DirectoryNotFoundException even though the synthesized file exists.
+    if (strcmp(path, "/proc") != 0 && strncmp(path, "/proc/", 6) != 0 &&
         strncmp(path, "/sys/devices/system/cpu", 23) != 0) return KL_GP_PASS();
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, proc_build);
@@ -2056,6 +2076,7 @@ int   klb_closedir(void *d)      {
     return closedir((DIR *)d);
 }
 void *klb_readdir(void *d) {
+    klb_commit_guest_errno();
     static _Thread_local bionic_dirent out;    // matches readdir's per-stream lifetime
     char name[256]; int is_dir;
     int r = kl_obbmap_readdir(d, name, sizeof name, &is_dir);

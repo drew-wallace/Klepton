@@ -11,6 +11,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LOCK = ROOT / 'steam_auth_ui.lock.json'
 ENTRY = 'var bs=ve.O(void 0,[41],()=>ve(2804));bs=ve.O(bs)'
+BETA_ENTRY = 'var Un=ze.O(void 0,[41],()=>ze(43519));Un=ze.O(Un)'
+# The 2026-11-13 UI moves the HTTPS transport and folds the RSA helper into
+# Valve's login module. Preserve the wrapper's small existing module interface;
+# encryption still runs through Valve's exported password/key function.
+BETA_LOADER = '''globalThis.KleptonValveRequire=id=>id===79853?{D:ze(19099).x}:
+id===36500?{A:{getPublicKey:(publickey_mod,publickey_exp)=>({publickey_mod,publickey_exp}),
+encrypt:ze(53366).P8}}:ze(id)'''
+
+
+def expose_loader(main):
+    known = [(ENTRY, 'globalThis.KleptonValveRequire=ve'), (BETA_ENTRY, BETA_LOADER)]
+    matching = [(entry, loader) for entry, loader in known if main.count(entry)]
+    if len(matching) != 1 or main.count(matching[0][0]) != 1:
+        raise ValueError('Unrecognized Valve UI bootstrap')
+    entry, loader = matching[0]
+    return main.replace(entry, loader)
 
 
 def package(source, destination, interactive=False, records=None):
@@ -34,10 +50,8 @@ def package(source, destination, interactive=False, records=None):
             raise ValueError('Valve auth UI artifact does not match its pin: ' + record['path'])
         checked[record['path']] = content
     main = checked['library.js'].decode('utf-8')
-    if main.count(ENTRY) != 1:
-        raise ValueError('Unrecognized Valve UI bootstrap')
     # Only expose the existing loader. Do not launch the desktop library shell.
-    checked['library.js'] = main.replace(ENTRY, 'globalThis.KleptonValveRequire=ve').encode('utf-8')
+    checked['library.js'] = expose_loader(main).encode('utf-8')
     destination.mkdir(parents=True, exist_ok=True)
     for name, content in checked.items():
         target = destination / name

@@ -163,7 +163,7 @@ static klj_val klj_ReflectionHelper_getMethodID(void *env, void *self,
     char *normalized = klj_reflection_signature(sig);
     if (sig && !normalized) return (klj_val){0};
     sig = klj_photon_reflected_signature(cls, name, normalized, is_static);
-    KLJ_LOG("ReflectionHelper.getMethodID %s.%s%s", cls, name, sig ? sig : "");
+    KLJ_TRACE("ReflectionHelper.getMethodID %s.%s%s", cls, name, sig ? sig : "");
     void *m = klj_own(klj_new_method(strdup(cls), name ? strdup(name) : NULL,
                                      sig ? strdup(sig) : NULL), klj_method_free);
     free(normalized);
