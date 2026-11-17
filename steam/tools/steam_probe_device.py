@@ -117,7 +117,9 @@ struct AuthTransportProbe: UIViewRepresentable {
             guard let root = Bundle.main.url(forResource: "SteamAuthAssets", withExtension: nil) else { return }
             Task { @MainActor in
                 do {
-                    for name in ["libraries/libraries~00299a408.js", "chunk~2dcc5aaf7.js", "chunk~1a96cdf59.js", "library.js", "probe.js"] {
+                    let scripts = try JSONDecoder().decode([String].self,
+                        from: Data(contentsOf: root.appendingPathComponent("scripts.json")))
+                    for name in scripts + ["probe.js"] {
                         let source = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
                         _ = try await webView.evaluateJavaScript(source)
                     }

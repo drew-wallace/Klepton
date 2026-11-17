@@ -289,11 +289,11 @@ class InstallerTests(unittest.TestCase):
 
     def test_steam_audit_and_auto_offline(self):
         self.info['steam'] = True
-        with patch.object(u, 'steam_audit', return_value=False):
+        with patch.object(u, 'steam_runtime_profile', return_value=None):
             self.assertEqual(u.resolve_steam('auto', self.info, None), 'offline')
             with self.assertRaisesRegex(u.UtilityError, 'audited'):
                 u.resolve_steam('runtime', self.info, None)
-        with patch.object(u, 'steam_audit', return_value=True):
+        with patch.object(u, 'steam_runtime_profile', return_value='eleven'):
             self.assertEqual(u.resolve_steam('auto', self.info, 'eleven'), 'runtime')
         lock = self.root/'steam.json'
         binary = self.tree/'lib/arm64-v8a/libmain.so'
@@ -302,6 +302,82 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(u.steam_audit('fixture', self.tree))
             binary.write_bytes(b'different')
             self.assertFalse(u.steam_audit('fixture', self.tree))
+
+    def test_new_walkabout_version_bundles_steam_without_legacy_game_patches(self):
+        # Cached inspections and Experimental requests must gain Steam without
+        # being promoted to the old game's compatibility profile or bundle ID.
+        info = dict(self.info, steam=True, package='com.MightyCoconut.WalkaboutMiniGolf',
+                    version_code='59349', steam_audited_profiles=[])
+        sdk = self.tree/'lib/arm64-v8a/libsteam_api.so'
+        sdk.write_bytes(elf())
+        lock = self.root/'steam.json'
+        lock.write_text(json.dumps({'files': [dict(path='libsteam_api.so',
+            size=sdk.stat().st_size, sha256=u.digest(sdk))]}))
+        with patch.dict(u.STEAM_PROFILES, {'walkabout-57013': lock}, clear=True):
+            self.assertEqual(u.audited_steam_profiles(info), ['walkabout-57013'])
+            self.assertEqual(u.match_profiles(info, self.tree), [])
+            for mode in ('auto', 'runtime'):
+                with self.subTest(mode=mode):
+                    m = u.validate_request(dict(self.request, steam_mode=mode), info, self.root/'steam-job')
+                    self.assertEqual(m['steam_mode'], 'runtime')
+                    self.assertEqual(m['steam_profile'], 'walkabout-57013')
+                    self.assertIsNone(m['profile'])
+                    self.assertTrue(m['target'].startswith('import-'))
+                    self.assertFalse(m['adapters'])
+                    path = self.root/'manifest.json'
+                    u.write_json(path, m)
+                    target = u.targets.resolve_manifest(path, m['target'])
+                    self.assertTrue(target['steam_local'])
+                    self.assertEqual(target['steam_profile'], 'walkabout-57013')
+                    self.assertEqual(target['guest_prepare'], '')
+                    self.assertEqual(target['host_srcdir'], str(sdk.parent.resolve()))
+            spec = importlib.util.spec_from_file_location('imported_mksteam', u.ROOT/'steam/visionos/mksteam.py')
+            mksteam = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mksteam)
+            with patch.dict(os.environ, u.environment(path, m)), patch.dict(sys.modules, {'mksteam': mksteam}):
+                # The generated app's target remains import-..., while its
+                # Steam app ID/interfaces come from the separately audited SDK.
+                config = mksteam.profile(m['target'])
+                self.assertEqual(config['app_id'], 1408230)
+                self.assertIn('"KL_STEAM_APP_ID", "1408230"', mksteam.host_source(m['target']))
+                with patch.object(mksteam, 'verify_staged') as verify:
+                    project_spec = importlib.util.spec_from_file_location('steam_import_project', u.ROOT/'visionos/gen_xcodeproj.py')
+                    project = importlib.util.module_from_spec(project_spec)
+                    project_spec.loader.exec_module(project)
+                verify.assert_called_once_with(m['target'])
+                self.assertIn('libsteamclient_backend', project.STEAM_FRAMEWORKS)
+                self.assertIn('libsteamclient', project.STEAM_FRAMEWORKS)
+                self.assertIn('libsteam_api', project.STEAM_FRAMEWORKS)
+                self.assertNotIn('libsteam_api', project.GUEST)
+                self.assertIn('KL_STEAM_GAME_HOST', project.COMMON)
+                self.assertIn('SteamAuthAssets', project.STEAM_ASSETS_REF)
+                self.assertIn('../build/SteamLocal/SteamHostLogin.swift', project.SWIFT)
+                client = self.root/'androidarm64/libsteamclient.so'
+                client.parent.mkdir()
+                client.write_bytes(elf())
+                release = dict(files=[dict(path='androidarm64/libsteamclient.so',
+                    size=client.stat().st_size, sha256=u.digest(client))])
+                with (patch.object(mksteam, 'ROOT', self.root),
+                      patch.object(mksteam, 'profile', return_value=dict(config, files=json.loads(lock.read_text())['files'])),
+                      patch.object(mksteam, 'runtime_source', return_value=(self.root, release)),
+                      patch.object(mksteam.steam_updates, 'client_profile')):
+                    original, records = mksteam.inputs(m['target'])
+                self.assertEqual(original, client)
+                self.assertEqual(records[1]['path'], str(sdk.resolve()))
+            offline = u.validate_request(dict(self.request, steam_mode='offline'), info, self.root/'offline')
+            self.assertIsNone(offline['steam_profile'])
+            self.assertEqual(m['bundle'], offline['bundle'])
+            self.assertEqual(u.resolve_steam('auto', dict(info, game_source='meta'), None), 'none')
+            # Shared SDK bytes cannot assign another title's Steam app ID.
+            other = dict(info, package='test.other')
+            self.assertEqual(u.audited_steam_profiles(other), [])
+            self.assertEqual(u.resolve_steam('auto', other, 'walkabout-57013'), 'offline')
+            with self.assertRaisesRegex(u.UtilityError, 'audited'):
+                u.resolve_steam('runtime', other, 'walkabout-57013')
+            sdk.write_bytes(b'updated SDK requires a new audit')
+            self.assertEqual(u.resolve_steam('auto', info, None), 'offline')
+            with self.assertRaisesRegex(u.UtilityError, 'audited'):
+                u.resolve_steam('runtime', info, None)
 
     def test_steam_channel_is_validated_and_forwarded_to_every_build_stage(self):
         self.request['steam_channel'] = 'beta'

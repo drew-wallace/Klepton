@@ -25,13 +25,35 @@ def profile(target='walkabout-57013'):
     profiles = {
         'walkabout-57013': 'games/walkabout/steam/walkabout_steam_api.lock.json',
         'eleven': 'games/eleven/steam/steam_api.lock.json',
+        'pistolwhip-12': 'games/pistolwhip/steam/steam_api.lock.json',
     }
-    if target not in profiles:
+    steam_target = target
+    if os.environ.get('KLEPTON_BUILD_MANIFEST'):
+        sys.path.insert(0, str(ROOT/'visionos'))
+        import targets
+        steam_target = targets.resolve(target)['steam_profile']
+    if steam_target not in profiles:
         raise ValueError('unsupported local Steam target: '+target)
-    config = json.loads((ROOT/profiles[target]).read_text())
-    if config['target'] != target or not isinstance(config['app_id'], int) or not 0 < config['app_id'] < 2**32:
+    config = json.loads((ROOT/profiles[steam_target]).read_text())
+    if config['target'] != steam_target or not isinstance(config['app_id'], int) or not 0 < config['app_id'] < 2**32:
         raise ValueError('invalid Steam target profile')
     return config
+
+
+def cloud_configuration(config, publisher, apk_sha256):
+    """Only an exact APK audit can add a local Android save rule."""
+    result = json.loads(json.dumps(publisher)) if isinstance(publisher, dict) else dict(enabled=True, rules=[], overrides=[])
+    if (result.get('enabled') and apk_sha256 == config.get('cloud_android_apk_sha256')
+            and (config.get('cloud_android_rules') or config.get('cloud_android_preferences'))):
+        rules = result.setdefault('rules', [])
+        for rule in config.get('cloud_android_rules', []):
+            if rule not in rules:
+                rules.append(json.loads(json.dumps(rule)))
+        for preference in config.get('cloud_android_preferences', []):
+            preferences = result.setdefault('preferences', [])
+            if preference not in preferences:
+                preferences.append(json.loads(json.dumps(preference)))
+    return result
 
 
 def host_source(target='walkabout-57013'):
@@ -39,6 +61,9 @@ def host_source(target='walkabout-57013'):
     source = HOST_SWIFT.replace('setenv("KL_STEAM_WALKABOUT_API", "1", 1)',
         'setenv("KL_STEAM_WALKABOUT_API", "1", 1)\n            setenv("KL_STEAM_APP_ID", "'+str(config['app_id'])+'", 1)\n            setenv("KL_STEAM_APPS_INTERFACE", "'+config['interfaces'][2]+'", 1)')
     source += (ROOT/'steam/tools/steam_auth_ui_login.swift').read_text()
+    if config.get('pause_only_shutdown'):
+        source = source.replace('setenv("KL_STEAM_WALKABOUT_API", "1", 1)',
+            'setenv("KL_STEAM_WALKABOUT_API", "1", 1)\n            setenv("KL_UNITY_QUIT_PAUSE_ONLY", "1", 0)')
     source = source.replace('@RUN_ID@', 'standalone-branch-unused').replace('@WALKABOUT_API_ENV@', 'setenv("KL_STEAM_WALKABOUT_API", "1", 1)')
     source = source.replace('Server verification and PlayFab remain untested.', 'Game server verification remains untested.')
     return source.replace('Walkabout', config.get('display', 'Walkabout'))
@@ -161,7 +186,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--verify', action='store_true')
     parser.add_argument('--platform', choices=['visionos', 'visionossim'], default='visionossim')
-    parser.add_argument('--target', choices=['walkabout-57013', 'eleven'], default='walkabout-57013')
+    parser.add_argument('--target', default='walkabout-57013',
+                        help='Audited game target or the target in KLEPTON_BUILD_MANIFEST')
     args = parser.parse_args()
     try:
         verify_staged(args.target) if args.verify else stage(args.platform, args.target)

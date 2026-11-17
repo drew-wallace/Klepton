@@ -187,7 +187,7 @@ build/t_load: tests/t_load.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_load.c $(RUNTIME) $(LDLIBS)
 
-build/steam_probe: steam/tools/steam_probe.c steam/tools/steam_probe_callbacks.h steam/tools/steam_service_probe.h steam/tools/steam_probe_login.h steam/tools/steam_probe_session.h steam/tools/steam_probe_mailbox.h games/walkabout/steam/steam_probe_game_api.h steam/tools/steam_probe_ticket_gate.h $(RUNTIME) $(RUNTIME_HDRS)
+build/steam_probe: steam/tools/steam_probe.c steam/tools/steam_probe_callbacks.h steam/tools/steam_service_probe.h steam/tools/steam_probe_login.h steam/tools/steam_probe_session.h steam/tools/steam_probe_mailbox.h steam/tools/steam_probe_cloud.h games/walkabout/steam/steam_probe_game_api.h steam/tools/steam_probe_ticket_gate.h $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ steam/tools/steam_probe.c $(RUNTIME) $(LDLIBS)
 
@@ -337,11 +337,30 @@ build/t_steam_callbacks: steam/tests/t_steam_callbacks.c steam/tools/steam_probe
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_callbacks.c
 
+build/t_steam_cloud: steam/tests/t_steam_cloud.c steam/tools/steam_probe_cloud.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_cloud.c -lpthread
+
+build/t_steam_cloud_sync: visionos/Sources/KleptonSteamCloudProtocol.swift visionos/Sources/KleptonSteamCloudPreferences.swift visionos/Sources/KleptonSteamCloud.swift steam/tests/SteamCloudTests.swift
+	@mkdir -p build
+	xcrun swiftc -o $@ $^
+
+.PHONY: steamcloudcheck
+build/t_unity_save_shutdown: steam/tests/t_unity_save_shutdown.c runtime/guest/kl_unity_shutdown.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ steam/tests/t_unity_save_shutdown.c
+
+steamcloudcheck: build/t_steam_cloud build/t_steam_cloud_sync build/t_steam_init_retry build/t_unity_save_shutdown
+	./build/t_steam_cloud
+	./build/t_steam_cloud_sync
+	./build/t_steam_init_retry
+	./build/t_unity_save_shutdown
+
 build/t_steam_versions: steam/tests/t_steam_versions.c steam/tools/steam_probe_versions.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ steam/tests/t_steam_versions.c -lpthread
 
-build/t_steam_init_retry: games/walkabout/tests/t_steam_init_retry.c games/walkabout/steam/steam_probe_game_api.h steam/tools/steam_probe_callbacks.h steam/tools/steam_probe_ticket_gate.h steam/tools/steam_probe_versions.h
+build/t_steam_init_retry: games/walkabout/tests/t_steam_init_retry.c games/walkabout/steam/steam_probe_game_api.h steam/tools/steam_probe_callbacks.h steam/tools/steam_probe_ticket_gate.h steam/tools/steam_probe_versions.h steam/tools/steam_probe_cloud.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ games/walkabout/tests/t_steam_init_retry.c -lpthread
 
@@ -381,7 +400,9 @@ build/t_jni_strings: tests/t_jni_strings.c $(RUNTIME) $(RUNTIME_HDRS)
 jnistringcheck: build/t_jni_strings
 	./build/t_jni_strings
 
-steamcheck: assetcheck build/t_jni_refcache build/t_jump_mask build/t_signal_wait build/t_mprobe_gate build/t_steam_init_retry build/t_steam_versions build/t_fadvise build/t_steam_callbacks build/t_steam_ticket_gate build/t_steam_mailbox build/t_steam build/t_eventfd build/t_tls_classifier build/t_steam_ipc build/t_dladdr
+steamcheck: build/t_steam_cloud build/t_steam_cloud_sync assetcheck build/t_jni_refcache build/t_jump_mask build/t_signal_wait build/t_mprobe_gate build/t_steam_init_retry build/t_steam_versions build/t_fadvise build/t_steam_callbacks build/t_steam_ticket_gate build/t_steam_mailbox build/t_steam build/t_eventfd build/t_tls_classifier build/t_steam_ipc build/t_dladdr
+	./build/t_steam_cloud
+	./build/t_steam_cloud_sync
 	./build/t_jni_refcache
 	./build/t_jump_mask
 	./build/t_signal_wait

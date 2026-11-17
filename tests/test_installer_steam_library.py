@@ -69,6 +69,18 @@ class SteamLibraryTests(unittest.TestCase):
         self.assertTrue(catalog['games'][0]['branches'][0]['remote_known'])
         self.assertFalse(self.cache.cached(ACCOUNT)['games'][0]['branches'][0]['remote_known'])
 
+    def test_cloud_rules_follow_download_receipt_into_installer_inspection(self):
+        self.game['cloud'] = dict(enabled=True, rules=[dict(root='AndroidExternalData', path='files',
+            pattern='*.sav', recursive=True, platforms=['android'])], overrides=[])
+        _, receipt, folder, _ = self.publish()
+        self.assertEqual(receipt['cloud'], self.game['cloud'])
+        info = self.inspect(folder/'game.apk')
+        with patch.object(u, 'STORE', self.store):
+            u.steam_game_data(info, folder, receipt)
+        expected = dict(app_id='10', configuration=self.game['cloud'])
+        self.assertEqual(info['steam_cloud'], expected)
+        self.assertEqual(json.loads((self.store/'imports'/info['import_id']/'inspection.json').read_text())['steam_cloud'], expected)
+
     def test_update_keeps_original_content_and_publishes_new_revision(self):
         _, original, folder, _ = self.publish()
         self.branch.update(build_id='101', revision='second')
@@ -158,6 +170,23 @@ class SteamLibraryTests(unittest.TestCase):
         for path in self.store.rglob('*.json'):
             self.assertNotIn('private-', path.read_text())
         self.assertNotIn('private-', output.getvalue())
+
+    def test_cached_legacy_download_uses_refreshed_cloud_rules_without_network(self):
+        _, receipt, _, _ = self.publish()
+        cloud = dict(enabled=True, rules=[], overrides=[])
+        self.game['cloud'] = cloud
+        self.cache.save_catalog(dict(steam_id=ACCOUNT, games=[self.game]))
+        output = io.StringIO()
+        request = dict(steam_id=ACCOUNT, app_id='10', branch='public', launch_id='0')
+        with patch.object(u, 'STORE', self.store), patch.object(library, 'run_helper') as network, \
+             patch.object(u, 'inspect_apk', side_effect=lambda apk, runner: self.inspect(apk)), \
+             patch.object(sys, 'stdin', io.StringIO(json.dumps(request)+'\n')), contextlib.redirect_stdout(output):
+            u.library_job('use', u.Runner(self.root/'reuse-job'))
+        network.assert_not_called()
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        inspected = next(event for event in events if event['stage'] == 'steam-game')
+        self.assertEqual(inspected['steam_cloud'], dict(app_id='10', configuration=cloud))
+        self.assertEqual(self.cache.local(ACCOUNT, '10', 'public', '0')['downloaded_at'], receipt['downloaded_at'])
 
     def test_use_cached_does_not_start_network_or_change_date(self):
         _, receipt, _, _ = self.publish()

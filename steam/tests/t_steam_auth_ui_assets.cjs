@@ -20,8 +20,16 @@ location=new URL('https://steamloopback.host/');origin=location.origin;
 localStorage={getItem:()=>null,setItem:()=>{},removeItem:()=>{}};
 sessionStorage=localStorage;document={cookie:'',getElementById:()=>null};`, context);
 const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
-for (const [, name] of html.matchAll(/<script src="([^"]+)"><\/script>/g)) {
-    if (name !== 'probe.js') vm.runInContext(fs.readFileSync(path.join(root, name), 'utf8'), context);
+const scripts = JSON.parse(fs.readFileSync(path.join(root, 'scripts.json'), 'utf8'));
+assert.deepEqual([...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map(m => m[1]), [...scripts, 'probe.js']);
+for (const name of scripts) {
+    vm.runInContext(fs.readFileSync(path.join(root, name), 'utf8'), context);
+}
+if (fs.existsSync(path.join(root, 'login.js'))) {
+    const messages = [];
+    context.webkit = {messageHandlers: {steamLogin: {postMessage: data => messages.push(data)}}};
+    vm.runInContext(fs.readFileSync(path.join(root, 'login.js'), 'utf8'), context);
+    assert(messages.some(m => m.kind === 'status' && m.stage === 'modules_ready'));
 }
 const requireValve = context.KleptonValveRequire;
 const auth = requireValve(13459).kX;

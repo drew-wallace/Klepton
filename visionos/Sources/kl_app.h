@@ -107,6 +107,7 @@ void kl_app_guest_publish(void);
 // publish resumes it; guest state, graphics resources and saves remain live.
 void kl_app_guest_suspend(void);
 void kl_app_guest_stop(void);
+int kl_app_guest_stop_completed(void);
 
 // Where the guest thread has got to. 0 = still in _begin (nothing to present
 // yet), 1 = running frames, -1 = _begin failed or the loop has ended; in the

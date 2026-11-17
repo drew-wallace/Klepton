@@ -60,10 +60,13 @@ def package(source, destination, interactive=False, records=None):
     (destination/'probe.js').write_bytes((ROOT/'steam_auth_ui_probe.js').read_bytes())
     if interactive:
         (destination/'login.js').write_bytes((ROOT/'steam_auth_ui_login.js').read_bytes())
+    # Both native WebViews and the HTML probe consume this order. Upstream
+    # releases can rename the shared bundle without changing its module IDs.
     scripts = ['libraries/libraries~00299a408.js', bundle,
-               'chunk~1a96cdf59.js', 'library.js', 'probe.js']
+               'chunk~1a96cdf59.js', 'library.js']
+    (destination/'scripts.json').write_text(json.dumps(scripts) + '\n')
     html = '<!doctype html><meta charset="utf-8"><title>Steam authentication transport probe</title>'
     html += '<p id="status">Loading Valve authentication modules…</p>'
-    html += ''.join(f'<script src="{name}"></script>' for name in scripts)
+    html += ''.join(f'<script src="{name}"></script>' for name in scripts + ['probe.js'])
     (destination/'index.html').write_text(html)
     return records

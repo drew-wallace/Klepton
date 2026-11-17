@@ -88,13 +88,14 @@ class GameVersionTests(unittest.TestCase):
                 <application><meta-data android:name="build_date" android:value="2026-09-21"/></application></manifest>''')
             target = dict(name='walkabout-57013', product='KleptonWalkabout57013',
                           bundle='test.klepton.walkabout', display='Walkabout',
-                          libs='libmain', tree=str(root), steam_local=True)
+                          libs='libmain', tree=str(root), steam_local=True,
+                          steam_cloud={'app_id': '1408230', 'configuration': {'enabled': True, 'rules': [], 'overrides': []}})
             with patch.dict('os.environ', {'KLEPTON_STEAM_LOCAL': '1',
                             'KLEPTON_ENTITLEMENTS': '0', 'KLEPTON_TEAM': 'TESTTEAM00'}), \
                  patch.dict('sys.modules', {
                      'targets': types.SimpleNamespace(DEFAULT=target['name'], resolve=lambda _: target),
-                     'mksteam': types.SimpleNamespace(verify_staged=lambda target: None,
-                         profile=lambda target: {'files': [{'path': 'libsteam_api.so'}, {'path': 'libc++_shared.so'}]}),
+                     'mksteam': types.SimpleNamespace(verify_staged=lambda target: None, cloud_configuration=lambda config, publisher, fingerprint: publisher or dict(enabled=True, rules=[], overrides=[]),
+                         profile=lambda target: {'app_id': 1408230, 'files': [{'path': 'libsteam_api.so'}, {'path': 'libc++_shared.so'}]}),
                      'game_version': versions,
                  }):
                 project_spec = importlib.util.spec_from_file_location('fixture_version_project', ROOT/'visionos/gen_xcodeproj.py')
@@ -106,6 +107,9 @@ class GameVersionTests(unittest.TestCase):
             self.assertEqual(installed['KleptonGameVersionCode'], '57013')
             self.assertEqual(installed['KleptonGameBuildDate'], '2026-09-21')
             self.assertIn('UIApplicationSceneManifest', installed)
+            self.assertIn('KleptonSteamCloudConfiguration', installed)
+            for name in ('KleptonSteamCloudProtocol.swift', 'KleptonSteamCloudPreferences.swift', 'KleptonSteamCloud.swift', 'KleptonSteamCloudUI.swift'):
+                self.assertIn(name, project.SWIFT)
             self.assertIn(f'INFOPLIST_FILE = "{project.GAME_INFO_PLIST}";', project.COMMON)
             metadata.write_text('versionInfo:\n  versionName: 7.0\n')
             self.assertEqual(plistlib.loads(plist.read_bytes())['KleptonGameVersion'], '6.7')

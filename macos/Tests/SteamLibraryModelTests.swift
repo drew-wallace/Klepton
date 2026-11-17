@@ -31,14 +31,20 @@ struct SteamLibraryModelTests {
         model.selectProfile()
         precondition(model.glesVersion == "3.0", "Measured graphics workaround must be suggested for the inspected APK")
         model.info = APKInfo(["package": "com.MightyCoconut.WalkaboutMiniGolf", "version_code": "59349",
-            "kind": "unity", "entry": "libmain", "suggested_data_path": "obb"])
+            "kind": "unity", "entry": "libmain", "suggested_data_path": "obb", "steam": true,
+            "steam_audited_profiles": ["walkabout-57013"]])
         model.profile = ""
+        model.steam = "runtime"
         model.selectProfile()
+        precondition(model.steamRuntimeAvailable && model.steam == "runtime",
+            "An audited Steam SDK must work without selecting an older game's compatibility profile")
         precondition(model.glesVersion.isEmpty, "A new APK must not inherit another game’s GLES workaround")
         precondition(model.dataPath == "obb", "Steam data defaults must apply even when the APK has no pinned compatibility profile")
         model.dataPath = "manual-custom-path"
         model.info = APKInfo(["package": "test.manual", "kind": "unity", "entry": "libmain"])
         model.selectProfile()
+        precondition(!model.steamRuntimeAvailable && model.steam == "auto",
+            "Changing to an unaudited APK must clear explicit Steam runtime mode")
         precondition(model.dataPath.isEmpty, "A different manual APK must not inherit Steam's data path")
         model.info = APKInfo(["package": "com.LuckyVR.PokerStarsVR", "kind": "unity", "entry": "libmain",
             "suggested_data_path": "Android/obb/com.LuckyVR.PokerStarsVR",

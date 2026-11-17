@@ -82,6 +82,24 @@ class ProfileDefaultsTests(unittest.TestCase):
         self.assertIn('setenv("KL_OVRP_EYE_MAX", "2048", 0)',
                       u.targets.build_target_source(self.resolve(manifest)))
 
+    def test_pistolwhip_runtime_uses_its_own_app_and_the_audited_sdk(self):
+        pistol = json.loads(u.STEAM_PROFILES['pistolwhip-12'].read_text())
+        eleven = json.loads(u.STEAM_PROFILES['eleven'].read_text())
+        self.assertEqual(pistol['app_id'], 1079800)
+        self.assertEqual(pistol['interfaces'], eleven['interfaces'])
+        for key in ('size', 'sha256'):
+            self.assertEqual(pistol['files'][0][key], eleven['files'][0][key])
+        self.assertEqual(u.audited_steam_profiles(self.info), [])
+        sdk = self.tree/'lib/arm64-v8a/libsteam_api.so'
+        sdk.write_bytes(bytes(pistol['files'][0]['size']))
+        real_digest = u.digest
+        with patch.object(u, 'digest', side_effect=lambda path: pistol['files'][0]['sha256'] if Path(path) == sdk else real_digest(path)):
+            self.assertEqual(u.audited_steam_profiles(self.info), ['pistolwhip-12'])
+            manifest = u.validate_request(self.request, self.info, self.root/'steam-build')
+        self.assertEqual(manifest['steam_mode'], 'runtime')
+        self.assertEqual(manifest['steam_profile'], 'pistolwhip-12')
+        self.assertTrue(self.resolve(manifest)['steam_local'])
+
     def test_cached_experimental_request_gets_defaults_and_keeps_existing_identity(self):
         old = u.validate_request(self.request, self.info, self.root / 'cached-install')
         selected = u.validate_request(dict(self.request, profile='pistolwhip-12'),

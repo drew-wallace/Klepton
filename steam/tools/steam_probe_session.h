@@ -4,6 +4,7 @@
 #ifndef KL_STEAM_PROBE_SESSION_H
 #define KL_STEAM_PROBE_SESSION_H
 #include "steam_probe_mailbox.h"
+#include "steam_probe_cloud.h"
 static double session_now(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -72,6 +73,7 @@ static int session_run(kl_image *image, void *engine, void *steam_user, void *cl
         if (!failed && backend_pipe != game_pipe) failed = drain_callbacks(backend_pipe, next, release, &callbacks);
         if (failed) { session_publish(4, 0); break; }
         int now_logged_on = logged_on(steam_user);
+        cloud_tick(client, user, backend_pipe, now_logged_on ? steam_id(steam_user) : 0, session_now());
         game_advance(now_logged_on);
 #ifdef KL_STEAM_GAME_HOST
         game_release_for_host();
@@ -84,6 +86,7 @@ static int session_run(kl_image *image, void *engine, void *steam_user, void *cl
         if (attempted && !now_logged_on && session_now() > login_deadline) { session_publish(4, 0); attempted = 0; }
         const struct timespec interval = {0, 10000000}; nanosleep(&interval, NULL);
     }
+    cloud_tick(client, user, backend_pipe, 0, session_now());
     game_shutdown();
     version_finish();
     logout(user, backend_pipe);

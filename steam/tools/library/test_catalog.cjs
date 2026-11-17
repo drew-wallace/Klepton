@@ -74,3 +74,17 @@ test('shared depot uses source application for CDN authorization', () => {
   const info = fixture(); info.depots[102].depotfromapp = '500';
   assert.equal(gameInfo(10, info, licenses).branches[0].depots[1].app_id, '500');
 });
+
+test('preserves cloud save rules and only Android root overrides', () => {
+  const info = fixture();
+  info.ufs = {quota: '1048576', savefiles: {0: {root: 'AndroidInternalData', path: 'saves', pattern: '*.sav',
+    recursive: '1', platforms: {0: 'Android'}}}, rootoverrides: {
+    0: {root: 'WinAppDataLocalLow', os: 'Android', useinstead: 'AndroidInternalData', addpath: 'saves', replacepath: '1'},
+    1: {root: 'WinAppDataLocalLow', os: 'Windows', useinstead: 'WinMyDocuments'}}};
+  assert.deepEqual(gameInfo(10, info, licenses).cloud, {enabled: true,
+    rules: [{root: 'AndroidInternalData', path: 'saves', pattern: '*.sav', recursive: true, platforms: ['android']}],
+    overrides: [{root: 'WinAppDataLocalLow', useInstead: 'AndroidInternalData', addPath: 'saves', replacePath: true}]});
+  assert.equal(gameInfo(10, fixture(), licenses).cloud.enabled, false);
+  info.ufs = {maxnumfiles: '10'};
+  assert.equal(gameInfo(10, info, licenses).cloud.enabled, true);
+});

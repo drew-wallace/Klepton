@@ -450,10 +450,13 @@ downloaded and clearly marked as needing a Klepton compatibility update; they
 cannot silently use recovery offsets. Acquisition and compilation do not verify
 headset authentication or game server acceptance.
 
-**Auto** chooses the genuine local Steam host only when the selected profile
-has an audited integration and the imported SDK binaries pass its existing
-size/hash checks. Steam sign-in remains in the headset app. An arbitrary SDK
-match alone never identifies a game or proves server compatibility.
+**Auto** chooses the genuine local Steam host when the APK's package identifies
+a game with an audited integration and its imported SDK binaries pass the
+existing size/hash checks. This Steam profile is independent of the selected
+game compatibility profile: a newer Walkabout release can use the audited Steam
+SDK while keeping **Experimental / autodetected** for game startup and patches.
+Steam sign-in remains in the headset app. An arbitrary SDK match alone never
+identifies a game or proves server compatibility.
 
 Other Steam APKs use **Offline diagnostics**, visibly labeled on both the Mac
 and headset. This supplies no authenticated Steam services. Selecting a game
@@ -656,8 +659,20 @@ Existing package-derived app/container identity is preserved. Older cached
 Experimental requests also pick up the verified defaults when rebuilt.
 Other APKs and unverified versions do not inherit this tuning automatically.
 Explicit launch settings and `Documents/klepton-env.txt` can override the default.
-This profile uses the existing **Offline diagnostics** Steam mode; it does not
-add an audited Steam runtime or authenticated Steam services.
+The packaged Steam SDK matches Eleven's audited SDK byte-for-byte, allowing
+**Auto** to use the authenticated local Steam runtime. **Offline diagnostics**
+remains selectable. The publisher's Auto-Cloud rules are Windows-only. For this
+exact APK fingerprint, Klepton adds a verified Android `*.dat` save rule under
+`Android/data/com.cloudheadgames.pistolwhip/files`, matching
+`CHPlatform_Steam.CloudStoragePathUpdateMethod` and the game's text save writer.
+The Android build actually flushes its `gsdata.dat` save into PlayerPrefs.
+Klepton syncs that audited string through `klepton-android/playerprefs/gsdata.dat`
+and merges downloads back into PlayerPrefs without uploading authentication or
+device preferences. Physical upload, independent restore and post-quit upload
+were verified on Vision Pro on November 17, 2026.
+These uploads are marked Android-only and stay separate from Windows saves.
+Unverified APK versions do not inherit this rule. A successful SDK audit alone
+does not establish cross-platform save-format compatibility.
 
 ## Verification
 

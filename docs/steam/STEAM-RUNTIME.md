@@ -467,6 +467,29 @@ password or code is retained. Reusable credentials keep the existing Keychain
 policy. Fresh physical code approval and outgoing voice need retesting with
 the updated build.
 
+## November 16 headset login module loading
+
+The stable 0.4.5 payload names its shared UI bundle `sp.js`. Packaging already
+accepted that receipt-verified file, but the native WebViews still loaded the
+older `chunk~2dcc5aaf7.js` filename. Walkabout showed **Valve login modules could
+not load**, preventing both QR and account/code login. The device runtime log
+stopped at `interactive native session ready` without an authentication attempt.
+The earlier `ConnectToGlobalUser` initialization failure occurred before sign-in.
+
+Packaging now writes `scripts.json` with the verified bundle names and their
+load order. Both native WebViews consume it, as does the offline integration
+check. That check loads the genuine stable scripts and interactive adapter,
+requires `modules_ready`, and verifies the request builders, transport and RSA
+handoff without network access. Before sign-in, the UI prompts for login rather
+than presenting the initial SDK connection failure as a login error.
+
+The repaired device build was signed and installed on November 16, with the
+existing writable data backed up and restored. Steam update/runtime tests and
+the installer regression suite passed. The offline integration check passed
+against both the stable 0.4.5 UI and the original 0.3.0 pin. A remote launch
+did not complete, so physical QR rendering and fresh sign-in remain to be
+confirmed by opening Walkabout on the headset.
+
 ## Game date display
 
 Steam-enabled game builds show **Installed APK** and **Latest on Steam (public)**
@@ -508,3 +531,104 @@ results, missing APIs, SDK login gating and preservation across startup handoff,
 plus installed-version/date parsing, download metadata fallback, versioned API
 selection and generated-plist provenance. Live metadata
 display on a physical headset has not yet been verified.
+
+## Steam Cloud saves
+
+Local Steam game builds expose **Upload saves** and **Download saves** in the
+headset launcher. Both default to **off**, independently for each Steam account
+and app. Sign in, choose the directions, then press **Boot**. Both off makes no
+Cloud service calls. With either on, Boot waits for every permitted transfer and
+its verification before releasing the startup SDK and starting the guest. A
+network failure, checksum failure, unsafe mapping or conflicting changes leaves
+launch paused and allows retry. **Sync saves** runs the same checks while idle;
+**Use cloud saves** explicitly resolves conflicts by downloading, with backups,
+and never uploads.
+
+The existing authenticated backend sends Valve's Cloud unified-service messages;
+there is no second account login. Its worker owns all SDK and RPC calls. The
+client's combined per-app automatic Cloud switch is disabled and checked before
+startup can proceed, so game-side automatic sync cannot bypass the direction
+controls. API downloads are also written through the SDK's local write stream
+with that switch off, updating its cached file index before SDK handoff.
+If the internal file-upload RPC returns `NoMatch`, the
+same batch uses Valve's documented `BeginHTTPUpload` / `CommitHTTPUpload`
+requests instead. Android platform flags and direction checks are preserved;
+other errors pause synchronization without this fallback.
+Downloads are staged, SHA-1 checked, backed up and atomically installed. Subsequent
+syncs compare account/app SHA-1 baselines; concurrent or initially ambiguous
+changes require **Use cloud saves**. Cloud deletions are never sent or propagated
+into local deletions, and previously synced files removed remotely are not
+re-uploaded automatically. A disabled direction leaves that side unchanged.
+
+Steam Unity hosts deliver Android focus-loss, pause and quit callbacks on the
+guest's frame thread, allowing managed save handlers to flush before upload.
+Pistol Whip uses pause-only shutdown: its pause callback flushes the Android
+save, while destructive Unity cleanup recurses through game singleton access
+during gun teardown and overflows the guest stack on the headset. After the
+paused frame thread stops, saves sync and the host exits the process.
+Quit attempts an upload only after the guest lifecycle thread has stopped; a
+stop timeout skips transfers. Upload-enabled sessions have a bounded two-minute
+quit grace period. A durable pending-upload journal survives forced termination,
+network failure and crashes; the next cold launch retries synchronization before
+starting the game. Home/background retains the live guest and does not sync its
+active saves. Per-account API save folders are isolated. Shared Android save
+folders remember their first account and refuse uploads from a different account.
+
+Steam library downloads retain the publisher's UFS save rules and Android root
+overrides in their receipt, inspection, build manifest and generated app plist,
+scoped to the audited app ID. AndroidExternalData maps to the guest's external
+storage, including the current package's Context files-directory alias;
+AndroidInternalData maps to its data storage. Only declared Android save patterns, exact-APK audited Android rules, and API
+remote files are enumerated. Pistol Whip's verified APK adds its `*.dat` files in
+the package's external files directory even though the publisher currently lists
+only Windows rules. Its Android `gsdata.dat` PlayerPrefs string is projected into
+an Android-only cloud file as well. Downloads merge just that audited key into
+the local preferences XML, backing up the prior XML; Steam authentication,
+device settings and other preferences stay local. The saved string encoding is
+preserved, and concurrent preference edits pause sync. Android-root uploads use Steam's Android platform bit; files
+restricted to other platforms are excluded before path mapping. Unknown/read-only platform roots block sync
+rather than guessing a desktop-to-Android save conversion. Older/local-APK builds
+without UFS metadata can restore listed mapped saves and sync API saves. Refresh
+the library and rebuild a cached download to add its save rules without fetching
+the unchanged APK again.
+
+`make steamcloudcheck` runs credential-free tests for direction defaults, staged
+restore, conflict handling, backups, upload commit/verification, retry journals,
+account isolation, Android mappings, path safety, worker RPC bounds, local SDK
+cache writes and the startup handoff. The host app also typechecks with
+`KL_STEAM_GAME_HOST`. These tests do not establish live Steam Cloud compatibility;
+headset verification with opted-in saves remains necessary.
+
+Physical verification on November 17, 2026 passed with Pistol Whip Steam Frame
+1.6.0.2 (version code 12), using the exact APK audit in its Steam profile. The
+actual Android `gsdata.dat` preference uploaded as an Android-only cloud file;
+an independent shadow restore matched all 63,649 bytes and their SHA-1. Only the
+audited save key appeared in the restored preferences, and the active preferences
+stayed byte-identical during that check. A subsequent automated Boot/quit run
+passed the prelaunch gate, flushed a new 63,651-byte save, uploaded it after the
+paused guest thread stopped, cleared the pending journal and exited. A separate
+read-only download matched the new save's SHA-1. This verifies Android save
+snapshots; desktop save-format conversion remains untested.
+
+References: Valve's [Steam Cloud](https://partner.steamgames.com/doc/features/cloud),
+[Android Cloud setup](https://partner.steamgames.com/doc/steamhardware/steamframe/apk_upload),
+[Cloud upload API](https://partner.steamgames.com/doc/webapi/ICloudService),
+and [public unified-message ABI](https://github.com/ValveSoftware/Proton/blob/proton_11.0/lsteamclient/steamworks_sdk_139/isteamunifiedmessages.h).
+
+
+For a read-only physical backend check, launch with
+`KL_STEAM_CLOUD_PROBE=list`. Once genuine login and ticket checks finish, it writes
+`Documents/klepton-steam-cloud-probe.json` with the server's file listing,
+platform flags and raw protobuf response. This explicit diagnostic sends only a
+listing request; it does not transfer save bytes or release the startup gate.
+`KL_STEAM_CLOUD_PROBE=download` restores mapped cloud files into a separate
+`SteamCloudProbe` folder and records their sizes and verified SHA-1 hashes. Its
+transport refuses every upload or mutation request. `sync-roundtrip` first runs
+the normal synchronization with the user's saved upload/download settings, then
+performs that separate restore. Neither mode boots the game, and an empty cloud
+listing does not establish an upload/download pass.
+For an automated physical startup/quit check, set `KL_AUTOBOOT=1` and
+`KL_STEAM_TEST_QUIT_SECONDS` to 5–120. This explicit test mode waits for real
+Steam readiness, runs the normal save gate and Boot, then invokes Quit Klepton
+after that interval. It honors the existing save-direction settings. Ordinary
+game launches still require the Boot button.

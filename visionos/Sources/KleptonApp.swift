@@ -123,6 +123,7 @@ enum Immersive {
     @Published var quitting = false
 #if KL_STEAM_GAME_HOST
     @Published var steamReady = false
+    @Published var steamSyncing = false
 #endif
     private var rendererID: ObjectIdentifier?
     private var rendererActivation = KLRendererActivation()
@@ -223,7 +224,11 @@ enum Lifecycle {
         session.status = "Quitting…"
         NSLog("[app] Quit Klepton requested")
         // A stuck guest or scene dismissal must not prevent an explicit quit.
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 12) {
+        var quitGrace: Double = 12
+#if KL_STEAM_GAME_HOST
+        if KleptonSteamCloud.shared.permissions.upload { quitGrace = 120 }
+#endif
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + quitGrace) {
             _exit(0)
         }
         return true
@@ -234,6 +239,16 @@ enum Lifecycle {
         // while it finishes its current frame and writes its lifecycle report.
         Thread.detachNewThread {
             kl_app_guest_stop()
+#if KL_STEAM_GAME_HOST
+            if kl_app_guest_stop_completed() != 0 {
+                Task { @MainActor in
+                    await KleptonSteamCloud.shared.uploadAfterStop()
+                    fflush(nil)
+                    _exit(0)
+                }
+                return
+            }
+#endif
             fflush(nil)
             // Terminate every guest thread without running guest destructors,
             // which can wait forever on threads that have already stopped.
@@ -496,12 +511,21 @@ struct BootView: View {
     @State private var showMetaAccount = false
     @ObservedObject private var files = klActiveFiles() ?? LauncherFiles(bookmarkKey: "none", expected: "")
     private var isLauncher: Bool { klIsLauncher() }
+    private var bootDisabled: Bool {
+        let disabled = running || finished || (isLauncher && !files.canLaunch)
+#if KL_STEAM_GAME_HOST
+        return disabled || session.steamSyncing || steamCloud.syncing
+#else
+        return disabled
+#endif
+    }
     private var bootLogURL: URL? {
         let path = String(cString: kl_app_log_path())
         guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return nil }
         return URL(fileURLWithPath: path)
     }
 #if KL_STEAM_GAME_HOST
+    @ObservedObject private var steamCloud = KleptonSteamCloud.shared
     private var steamReady: Bool {
         get { session.steamReady }
         nonmutating set { session.steamReady = newValue }
@@ -524,7 +548,6 @@ struct BootView: View {
                     HStack {
                         SteamLoginProbeView {
                             steamReady = true
-                            boot()
                         }
                         Group {
                             guestContent
@@ -832,6 +855,10 @@ struct BootView: View {
             // KleptonLauncher.swift / KleptonHL1.swift.
             if isLauncher { LauncherPanel() }
 
+#if KL_STEAM_GAME_HOST
+            if !steamOfflineDiagnostics { KleptonSteamCloudPanel() }
+#endif
+
             // Guardian setup and review stay available beside the game.
             DisclosureGroup("Guardian") { GuardianView() }
                 .font(.callout)
@@ -862,7 +889,7 @@ struct BootView: View {
                     if isLauncher, !klLauncherApply() { return }
                     boot()
                 }
-                .disabled(running || finished || (isLauncher && !files.canLaunch))
+                .disabled(bootDisabled)
                 if session.wantsImmersive {
                     Button(session.openedSpace ? "Reopen VR" : "Resume session") {
                         Task {
@@ -897,6 +924,29 @@ struct BootView: View {
         // restores the button-only shape for hand-driven debugging, where the
         // point is to attach or start a capture before the guest runs.
         .task {
+#if KL_STEAM_GAME_HOST
+            // Explicit physical-test opt-in. Exercise the normal Boot and Quit
+            // paths after real login, without asking a tester to repeat them.
+            if let seconds = Int(ProcessInfo.processInfo.environment["KL_STEAM_TEST_QUIT_SECONDS"] ?? ""),
+               (5...120).contains(seconds), klEnvOn("KL_AUTOBOOT", default: false), !steamOfflineDiagnostics {
+                let deadline = Date().addingTimeInterval(240)
+                while !steamReady || bootDisabled {
+                    guard !Task.isCancelled, !session.quitting, Date() < deadline else { return }
+                    do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                }
+                boot()
+                while !running {
+                    guard !Task.isCancelled, !session.quitting, Date() < deadline,
+                          session.steamSyncing else { return }
+                    do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                }
+                do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
+                guard !session.quitting, !Task.isCancelled else { return }
+                print("[steam-cloud-test] exercising Quit Klepton after \(seconds) seconds")
+                quit()
+                return
+            }
+#endif
             // A game build NEVER auto-boots — even though visionos/run.sh sets
             // KL_AUTOBOOT=1 for scripted launches — because it must let the player
             // choose the game folder, set options, and press "Boot" first.
@@ -934,6 +984,25 @@ struct BootView: View {
     }
 
     private func boot() {
+#if KL_STEAM_GAME_HOST
+        guard !session.steamSyncing, !session.quitting, !running, !finished else { return }
+        if !steamOfflineDiagnostics {
+            guard steamReady else { status = "Sign in to Steam before starting the game."; return }
+            session.steamSyncing = true
+            status = "Syncing Steam Cloud saves…"
+            Task { @MainActor in
+                let ready = await KleptonSteamCloud.shared.sync(launching: true)
+                session.steamSyncing = false
+                guard ready else { status = KleptonSteamCloud.shared.status; return }
+                bootAfterCloudSync()
+            }
+            return
+        }
+#endif
+        bootAfterCloudSync()
+    }
+
+    private func bootAfterCloudSync() {
         guard !metaAccount.required || metaAccount.ready else {
             status = "Sign in to Meta before starting the game."; return
         }

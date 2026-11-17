@@ -39,9 +39,19 @@ static _Bool beta_info_dated(void *p, int index, uint32_t *flags, uint32_t *buil
     *updated = 1780000000;
     return beta_info(p, index, flags, build, name, name_size, description, description_size);
 }
+static int cloud_enabled = 1, refuse_cloud_disable;
+static _Bool is_cloud_enabled(void *self) { return cloud_enabled; }
+static void set_cloud_enabled(void *self, _Bool enabled) { if (!refuse_cloud_disable) cloud_enabled = enabled; }
+static void *remote_table[24];
+static void **remote_object = remote_table;
+static void *cloud_interface(int32_t user, const char *version) {
+    if (!strcmp(version, "STEAMREMOTESTORAGE_INTERFACE_VERSION016")) return &remote_object;
+    return NULL;
+}
 static void *apps_table[33];
 static void **apps_object = apps_table;
 static void *find_user_interface(int32_t user, const char *version) {
+    if (!strcmp(version, "STEAMREMOTESTORAGE_INTERFACE_VERSION016")) return cloud_interface(user, version);
     assert(user == 1 && !strcmp(version, "STEAMAPPS_INTERFACE_VERSION009"));
     return &apps_object;
 }
@@ -70,6 +80,10 @@ static void cancel(void *p, uint32_t handle) { assert(handle != 0); cancellation
 static void frame(int32_t pipe) { assert(pipe == 1); }
 static _Bool callback(int32_t pipe, probe_callback *p) { return 0; }
 static void reset(void) {
+    cloud_enabled = 1; refuse_cloud_disable = 0;
+    cloud_rpc.account = 7; cloud_rpc.state = 0; cloud_release_requested = 0;
+    cloud_release_epoch = cloud_release_retry_epoch = 0;
+    remote_table[22] = (void *)is_cloud_enabled; remote_table[23] = (void *)set_cloud_enabled;
     version_publish(0, 0); version_next_check = version_deadline = 0; version_queries = 0;
     memset(&game_api, 0, sizeof game_api);
     game_retry_requested = game_retry_allowed = game_status = game_result = 0;
@@ -81,6 +95,7 @@ static void reset(void) {
     game_api.enabled = 1; game_api.init = init;
     game_api.get_user_interface = interface; game_api.get_apps_interface = interface;
     game_api.get_utils_interface = interface; game_api.get_pipe = handle; game_api.get_user = handle;
+    game_api.find_user_interface = cloud_interface;
     game_api.get_app_id = app_id; game_api.logged_on = logged_on;
     game_api.subscribed = subscribed; game_api.session_ticket = session_ticket; game_api.web_ticket = web_ticket;
     game_api.dlc_count = dlc_count; game_api.set_recipient = set_recipient;
@@ -88,6 +103,10 @@ static void reset(void) {
     game_api.manual_init = no_args; game_api.manual_frame = frame; game_api.manual_next = callback;
 }
 int main(void) {
+    reset(); success_after = 1; sdk_logged_on = 1;
+    game_advance(1); assert(!cloud_enabled);
+    reset(); success_after = 1; sdk_logged_on = 1; refuse_cloud_disable = 1;
+    game_advance(1); assert(game_api.failed && game_status == 3 && !session_requests);
     reset(); success_after = 3;
     game_advance(0); assert(!calls);
     game_advance(1); assert(calls == 1 && !game_api.initialized);
@@ -156,11 +175,46 @@ int main(void) {
     game_api.tickets = (probe_ticket_gate){.session_handle=11, .web_handle=12,
         .session_size=4, .web_size=4, .session_done=1, .web_done=1,
         .session_result=1, .web_result=1};
+    assert(!game_release_for_host());
+    assert(kl_steam_cloud_release_startup(7));
     assert(game_release_for_host());
     assert(shutdowns == 1 && cancellations == 2 && game_status == 9 && !game_api.enabled);
     assert(!game_api.requested && !game_api.initialized && !game_api.tickets.session_size);
     assert(!game_release_for_host() && shutdowns == 1);
     game_advance(1); assert(!calls); // startup code cannot consume game callbacks
+    // Physical Pistol Whip regression: native login reconnects after tickets
+    // were cancelled and the old five-minute ticket window has expired. Boot
+    // must refresh the SDK and obtain new genuine callbacks before releasing.
+    reset(); success_after = 1; sdk_logged_on = 1; session_handle = 11; web_handle = 12;
+    game_advance(1);
+    session.handle = 11; web.handle = 12;
+    assert(probe_ticket_callback(&game_api.tickets, 1, 163, &session, sizeof session) == 1);
+    assert(probe_ticket_callback(&game_api.tickets, 1, 168, &web, sizeof web) == 1);
+    game_advance(1); assert(game_status == 7);
+    game_advance(0); assert(game_status == 8 && !game_api.requested);
+    clock_now = 601;
+    assert(kl_steam_cloud_release_startup(7));
+    assert(!game_release_for_host() && game_retry_requested);
+    session_handle = 21; web_handle = 22;
+    game_advance(1); assert(game_api.requested && game_api.tickets.user == 1);
+    session.handle = 21; web.handle = 22;
+    assert(probe_ticket_callback(&game_api.tickets, 1, 163, &session, sizeof session) == 1);
+    assert(probe_ticket_callback(&game_api.tickets, 1, 168, &web, sizeof web) == 1);
+    game_advance(1); assert(game_release_for_host() && game_status == 9);
+    // A cancelled/timed-out launch cannot later release the startup SDK.
+    reset(); game_api.initialized = 1; game_status = 7;
+    game_api.tickets = (probe_ticket_gate){.session_handle=11, .web_handle=12,
+        .session_size=4, .web_size=4, .session_done=1, .web_done=1,
+        .session_result=1, .web_result=1};
+    assert(kl_steam_cloud_release_startup(7)); kl_steam_cloud_cancel_startup(7);
+    assert(!game_release_for_host() && game_api.initialized);
+    // Permanent failures are not refreshed indefinitely for one Boot request.
+    reset(); success_after = sdk_logged_on = 1; owns = 0;
+    game_status = 8; game_allow_retry(1);
+    assert(kl_steam_cloud_release_startup(7)); assert(!game_release_for_host());
+    game_advance(1); clock_now = 301; game_advance(1);
+    assert(game_status == 8 && !game_release_for_host() && !game_retry_requested);
+
     // Version lookup waits for SDK login, runs even while tickets are delayed,
     // and remains available after startup releases the SDK to the game.
     reset(); success_after = 1;
@@ -173,7 +227,7 @@ int main(void) {
     session.handle = 11; web.handle = 12;
     assert(probe_ticket_callback(&game_api.tickets,1,163,&session,sizeof session)==1);
     assert(probe_ticket_callback(&game_api.tickets,1,168,&web,sizeof web)==1);
-    game_advance(1); assert(game_release_for_host());
+    game_advance(1); assert(kl_steam_cloud_release_startup(7)); assert(game_release_for_host());
     assert(kl_steam_game_version_status(&latest) == 2 && latest == 123456);
     game_advance(1); assert(version_queries == 1);
     // Resolve Apps009 after initialization and use its dated method instead
@@ -190,6 +244,10 @@ int main(void) {
     assert(updated == 1780000000);
     // Eleven's startup must query its own license and reject another app's SDK context.
     reset(); game_api.app_id = sdk_app_id = ownership_app_id = 488310;
+    success_after = sdk_logged_on = 1; session_handle = 11; web_handle = 12;
+    game_advance(1);
+    assert(game_api.initialized && game_api.requested && session_requests == 1);
+    reset(); game_api.app_id = sdk_app_id = ownership_app_id = 1079800;
     success_after = sdk_logged_on = 1; session_handle = 11; web_handle = 12;
     game_advance(1);
     assert(game_api.initialized && game_api.requested && session_requests == 1);

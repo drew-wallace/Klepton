@@ -1143,6 +1143,11 @@ static void *guest_thread(void *unused) {
         }
     }
 
+#if KL_STEAM_GAME_HOST
+    // Unity keeps some saves in memory until its Android lifecycle callbacks.
+    // The stop deadline still bounds this call, and a timeout skips uploads.
+    kl_driver_lifecycle_end(stdout);
+#endif
     // The report belongs to the guest's loop end, not the render loop's: with
     // the two decoupled, "the run ended" has two meanings and these are the
     // guest's numbers.
@@ -1244,4 +1249,12 @@ void kl_app_guest_stop(void) {
         printf("[guest] did not stop within 10 s — carrying on without its report\n");
         fflush(NULL);
     }
+}
+
+// A timeout in guest_stop is not a safe point for save synchronization.
+int kl_app_guest_stop_completed(void) {
+    pthread_mutex_lock(&g_guest.mu);
+    int stopped = g_guest.finished;
+    pthread_mutex_unlock(&g_guest.mu);
+    return stopped;
 }

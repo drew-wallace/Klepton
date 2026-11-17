@@ -787,14 +787,20 @@ def resolve_manifest(path, name=None):
     host_apk = Path(m['host_apk']).resolve()
     if not host_tree.is_dir() or not host_apk.is_file():
         raise ValueError('Imported APK or decoded tree is missing; inspect it again')
+    # Older manifests used the game compatibility profile for both purposes.
+    steam_profile = m.get('steam_profile') or (profile if t.get('steam_local') else None)
+    if m['steam_mode'] == 'runtime' and not TARGETS.get(steam_profile, {}).get('steam_local'):
+        raise ValueError('Steam runtime requires an audited Steam profile')
     t.update(name=key, bundle=m['bundle'], product=m['product'],
              framework_key=m['framework_key'], display=m['display'],
              tree=key, apk=key+'.apk', assets=key+'/assets',
              srcdir=key+'/lib/arm64-v8a', kind=m['kind'], entry=m['entry'],
              host_tree=str(host_tree), host_apk=str(host_apk),
              host_assets=str(host_tree/'assets'), host_srcdir=str(host_tree/'lib/arm64-v8a'),
+             steam_local=m['steam_mode'] == 'runtime', steam_profile=steam_profile,
              steam_diagnostics=m['steam_mode'] == 'offline',
              guest_prepare=t.get('guest_prepare', '') if m.get('adapters', False) else '')
+    t['steam_cloud'] = m.get('steam_cloud')
     t['meta_app_id'] = m.get('meta_app_id', '')
     t['import_id'] = m.get('import_id', '')
     t['runtime_defaults'] = validate_runtime_defaults(m.get('runtime_defaults', t.get('runtime_defaults', {})))

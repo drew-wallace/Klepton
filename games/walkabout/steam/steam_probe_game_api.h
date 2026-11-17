@@ -3,6 +3,9 @@
 #define KL_STEAM_PROBE_GAME_API_H
 #include "../../../steam/tools/steam_probe_ticket_gate.h"
 #include "../../../steam/tools/steam_probe_versions.h"
+#ifdef KL_STEAM_GAME_HOST
+#include "../../../steam/tools/steam_probe_cloud.h"
+#endif
 static pthread_mutex_t game_status_lock = PTHREAD_MUTEX_INITIALIZER;
 static int game_status, game_result, game_retry_requested, game_retry_allowed;
 static void game_publish(int stage, int result) {
@@ -85,6 +88,20 @@ static int game_initialize(void) {
         game_publish(3, 0); game_api.failed = 1;
         game_api.shutdown(); game_api.initialized = 0; return 0;
     }
+#ifdef KL_STEAM_GAME_HOST
+    // Native directional sync owns all network transfers. Keep the client's
+    // combined automatic switch off even when both user directions are enabled.
+    // RemoteStorage016 public slots 22/23; no cloud file API is called here.
+    void *remote = game_api.find_user_interface ? game_api.find_user_interface(
+        game_api.user, "STEAMREMOTESTORAGE_INTERFACE_VERSION016") : NULL;
+    if (!remote) { game_publish(3, -100); game_api.failed = 1; return 0; }
+    cloud_cache_remote = remote;
+    void **storage = *(void ***)remote;
+    ((void (*)(void *, _Bool))storage[23])(remote, 0);
+    if (((_Bool (*)(void *))storage[22])(remote)) {
+        game_publish(3, -100); game_api.failed = 1; return 0;
+    }
+#endif
     game_api.release_api = version_release_api(game_api.find_user_interface, game_api.user);
     game_api.tickets.user = game_api.user;
     game_api.manual_init();
@@ -186,6 +203,9 @@ static void game_advance(int native_logged_on) {
         game_allow_retry(0); game_cancel_tickets(); game_api.reported = 0;
         game_api.ticket_request_retry_at = 0; game_api.ticket_request_deadline = 0;
         if (game_api.initialized) {
+#ifdef KL_STEAM_GAME_HOST
+            cloud_cache_remote = NULL;
+#endif
             game_api.shutdown(); game_api.initialized = 0;
             game_api.steam_user = game_api.apps = game_api.utils = NULL; game_api.pipe = game_api.user = 0;
         }
@@ -305,12 +325,28 @@ static void game_advance(int native_logged_on) {
 static void game_shutdown(void) {
     if (!game_api.enabled) return;
     game_cancel_tickets();
+#ifdef KL_STEAM_GAME_HOST
+    cloud_cache_remote = NULL;
+#endif
     if (game_api.initialized) { game_api.shutdown(); game_api.initialized = 0; printf("[steam-probe] Game SteamAPI_Shutdown returned\n"); }
 }
 #ifdef KL_STEAM_GAME_HOST
 static int game_release_for_host(void) {
-    if (!game_api.enabled || !game_api.initialized || game_api.failed ||
-        game_status != 7 || !probe_tickets_delivered(&game_api.tickets)) return 0;
+    pthread_mutex_lock(&cloud_lock);
+    int release = cloud_release_requested && cloud_release_account == cloud_rpc.account && cloud_rpc.account != 0;
+    unsigned epoch = cloud_release_epoch;
+    int refresh = cloud_release_retry_epoch != epoch;
+    pthread_mutex_unlock(&cloud_lock);
+    if (!release || !game_api.enabled || game_api.failed) return 0;
+    // A disconnect can cancel tickets while the launcher waits for a person
+    // or a long save transfer. Boot must rearm the genuine SDK, not wait on a
+    // stale "ready" UI flag. One bounded refresh is allowed per launch request.
+    if (game_status == 8 && refresh && kl_steam_ticket_retry()) {
+        pthread_mutex_lock(&cloud_lock); cloud_release_retry_epoch = epoch; pthread_mutex_unlock(&cloud_lock);
+        printf("[steam-probe] refreshing startup SDK for game handoff\n");
+        return 0;
+    }
+    if (!game_api.initialized || game_status != 7 || !probe_tickets_delivered(&game_api.tickets)) return 0;
     // Release all startup ticket/callback ownership before Unity starts. The
     // backend remains alive; the game owns its subsequent original SDK pipe.
     game_allow_retry(0); game_shutdown(); game_api.enabled = 0;

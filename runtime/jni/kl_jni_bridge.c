@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,6 +80,16 @@ static klj_val klj_Method_getName(void *env, void *self, const klj_val *a, int n
 }
 
 // ------------------------------------------------- Unity's ReflectionHelper
+static atomic_uint reflection_generation;
+
+// Android invalidates reflection proxies when the Unity player ends. Keep
+// queued Java callbacks from reentering managed handles destroyed by nativeDone.
+static klj_val klj_ReflectionHelper_endUnityLaunch(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    atomic_fetch_add(&reflection_generation, 1);
+    KLJ_LOG("ReflectionHelper.endUnityLaunch: expired the player's reflection proxies");
+    return (klj_val){0};
+}
 //
 // com/unity3d/player/ReflectionHelper is Unity's own Java helper, and its field
 // half is a three-step round trip: getFieldID(class, name, sig, isStatic) hands
@@ -210,6 +221,7 @@ static klj_val klj_ReflectionHelper_newProxyInstance(void *env, void *clazz,
     int offset = n == 2 ? 0 : 1;
     p->native_ptr = n > offset ? (int64_t)a[offset].j : 0;
     p->reflection_helper = 1;
+    p->launch_generation = atomic_load(&reflection_generation);
     // Wrapped in a one-element array so the two doors' proxies are identical
     // down to the field, rather than alike: klj_proxy_invoke and the report
     // both read `classes` as an object array.
@@ -280,6 +292,7 @@ static klj_val klj_Method_getDeclaringClass(void *env, void *self, const klj_val
     }
     klj_proxy *p = o->data;
     if (!p) return NULL;
+    if (p->reflection_helper && p->launch_generation != atomic_load(&reflection_generation)) return NULL;
     const char *native_class = p->reflection_helper ? "com/unity3d/player/ReflectionHelper"
                                                    : "bitter/jnibridge/JNIBridge";
     const char *native_name = p->reflection_helper ? "nativeProxyInvoke" : "invoke";
@@ -508,6 +521,7 @@ const klj_binding klj_bind_bridge[] = {
     {"com/unity3d/player/ReflectionHelper", "newProxyInstance", "(JLjava/lang/Class;)Ljava/lang/Object;", klj_ReflectionHelper_newProxyInstance},
     {"com/unity3d/player/ReflectionHelper", "newProxyInstance", "(Lcom/unity3d/player/UnityPlayer;JLjava/lang/Class;)Ljava/lang/Object;", klj_ReflectionHelper_newProxyInstance},
     {"com/unity3d/player/ReflectionHelper", "getFieldSignature", "(Ljava/lang/reflect/Field;)Ljava/lang/String;", klj_ReflectionHelper_getFieldSignature},
+    {"com/unity3d/player/ReflectionHelper", "endUnityLaunch", "()V", klj_ReflectionHelper_endUnityLaunch},
     {"java/lang/reflect/Field", "getDeclaringClass", "()Ljava/lang/Class;", klj_Field_getDeclaringClass},
     {"java/lang/reflect/Method", "getName", "()Ljava/lang/String;", klj_Method_getName},
     {"java/lang/reflect/Method", "getDeclaringClass", "()Ljava/lang/Class;", klj_Method_getDeclaringClass},

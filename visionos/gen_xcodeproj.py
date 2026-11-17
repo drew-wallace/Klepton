@@ -59,6 +59,21 @@ if STEAM_LOCAL:
     _game_apk = KLT.get('host_apk') or (_root / KLT['apk'] if KLT.get('apk') else None)
     _info.update(installed_version(pathlib.Path(KLT.get('host_tree') or _root / KLT['tree']),
                                   pathlib.Path(_game_apk) if _game_apk else None))
+    import xml.etree.ElementTree as ET
+    try:
+        _info['KleptonGamePackage'] = ET.parse(pathlib.Path(KLT.get('host_tree') or _root / KLT['tree']) / 'AndroidManifest.xml').getroot().get('package', '')
+    except (OSError, ET.ParseError):
+        pass
+    # Cloud rules are frozen with this APK, never inferred from loose data.
+    import json
+    _cloud = KLT.get('steam_cloud')
+    _steam_profile = mksteam.profile(KLT['name'])
+    _publisher_cloud = (_cloud.get('configuration') if _cloud and str(_cloud.get('app_id')) == str(_steam_profile.get('app_id')) else None)
+    _apk_fingerprint = KLT.get('import_id', '')
+    if not _apk_fingerprint and _steam_profile.get('cloud_android_rules') and _game_apk:
+        _apk_fingerprint = mksteam.digest(pathlib.Path(_game_apk))
+    _configuration = mksteam.cloud_configuration(_steam_profile, _publisher_cloud, _apk_fingerprint)
+    _info['KleptonSteamCloudConfiguration'] = json.dumps(_configuration)
     GAME_INFO_PLIST = f"build/GameInfo-{KLT['name']}.plist"
     _info_path = pathlib.Path(HERE, GAME_INFO_PLIST)
     _info_path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,7 +251,7 @@ SWIFT = ["KleptonMetaSignIn.swift", "KleptonMetaAccount.swift", "KleptonApp.swif
          "KleptonGuardianPersistence.swift", "KleptonGuardianCoordinates.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift"]
 if STEAM_LOCAL:
-    SWIFT += ['../../steam/visionos/Sources/kl_steam_host.c', '../build/SteamLocal/SteamHostLogin.swift']
+    SWIFT += ['KleptonSteamCloudProtocol.swift', 'KleptonSteamCloudPreferences.swift', 'KleptonSteamCloud.swift', 'KleptonSteamCloudUI.swift', '../../steam/visionos/Sources/kl_steam_host.c', '../build/SteamLocal/SteamHostLogin.swift']
 BUILD_TARGET = bool(os.environ.get('KLEPTON_BUILD_MANIFEST') or KLT.get('runtime_defaults'))
 if BUILD_TARGET:
     generated = (pathlib.Path(os.environ['KLEPTON_BUILD_MANIFEST']).resolve().with_name('BuildTarget.c')

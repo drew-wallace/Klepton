@@ -185,5 +185,21 @@ int main(void) {
     assert(photon_start(NULL,self,start,8).j); wait_callbacks(before+2);
     assert(photon_stop(NULL,self,NULL,0).j);
     assert(atomic_load(&modern_callbacks)>=5);
+    // Unity shutdown expires already-queued callbacks before managed GC handles
+    // disappear. A newly created player's proxy still dispatches normally.
+    void *(*get_static)(void*,void*,const char*,const char*)=table[113];
+    void (*call_static_void)(void*,void*,void*,const void*)=table[143];
+    void *helper=kl_jni_class("com/unity3d/player/ReflectionHelper");
+    void *end=get_static(kl_jni_env(),helper,"endUnityLaunch","()V");
+    int prior=atomic_load(&modern_callbacks);
+    call_static_void(kl_jni_env(),helper,end,NULL);
+    klj_proxy_invoke(modern,PHOTON_CALLBACK,"OnData","()V",NULL);
+    assert(atomic_load(&modern_callbacks)==prior);
+    void *(*call_object)(void*,void*,void*,const void*)=table[116];
+    void *create=get_static(kl_jni_env(),helper,"newProxyInstance","(JLjava/lang/Class;)Ljava/lang/Object;");
+    klj_jvalue proxy_args[2]={{.j=1234},{.l=kl_jni_class(PHOTON_CALLBACK)}};
+    void *fresh=call_object(kl_jni_env(),helper,create,proxy_args);
+    klj_proxy_invoke(fresh,PHOTON_CALLBACK,"OnData","()V",NULL);
+    assert(atomic_load(&modern_callbacks)==prior+1);
     puts("Photon recorder JNI, opt-in refusal, PCM resampling, retained arrays, callback order, stop and restart passed");
 }

@@ -87,6 +87,11 @@ int kl_driver_gap_only(void);
 // anywhere.
 int kl_driver_lifecycle_begin(FILE *out);
 
+// On the Unity frame thread after its final frame: flush Android pause/quit
+// handlers before a frontend reads saves. May block; the caller bounds stop.
+// Other guest kinds and repeated calls are no-ops.
+void kl_driver_lifecycle_end(FILE *out);
+
 // One Unity frame: the pose latch, nativeRender, the posted-task drain and the
 // memory-pressure poll. Returns what nativeRender returned, or -1 if _begin has
 // not run or the guest owns its own frame loop.

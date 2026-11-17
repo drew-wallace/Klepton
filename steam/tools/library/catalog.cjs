@@ -22,6 +22,21 @@ function revision(depots) {
     .sort((a, b) => a[0].localeCompare(b[0])))).digest('hex');
 }
 
+// Preserve the publisher's UFS rules; only Android overrides are applicable.
+function cloudConfiguration(info) {
+  const ufs = info.ufs || {};
+  const entries = value => Object.values(value || {}).filter(v => v && typeof v === 'object');
+  return {
+    enabled: Number(ufs.quota || 0) > 0 || Number(ufs.maxnumfiles || 0) > 0 || entries(ufs.savefiles).length > 0,
+    rules: entries(ufs.savefiles).map(rule => ({root: String(rule.root || ''), path: String(rule.path || ''),
+      pattern: String(rule.pattern || '*'), recursive: yes(rule.recursive),
+      platforms: words(rule.platforms && typeof rule.platforms === 'object' ? Object.values(rule.platforms).join(' ') : rule.platforms)})),
+    overrides: entries(ufs.rootoverrides).filter(rule => String(rule.os || '').toLowerCase() === 'android')
+      .map(rule => ({root: String(rule.root || ''), useInstead: String(rule.useinstead || ''),
+        addPath: String(rule.addpath || ''), replacePath: yes(rule.replacepath)}))
+  };
+}
+
 function gameInfo(appID, info, ownedDepots) {
   const common = info.common || {};
   const launchEntries = Object.entries(info.config?.launch || {}).flatMap(([id, launch]) => {
@@ -59,7 +74,7 @@ function gameInfo(appID, info, ownedDepots) {
     Object.values(common.vrheadsets || {}).some(yes) ||
     Object.values(info.config?.launch || {}).some(l => l.type === 'vr');
   return {app_id: String(appID), name: common.name || `App ${appID}`, vr,
-    android_available: branches.some(b => b.available), launches: launchEntries, branches};
+    android_available: branches.some(b => b.available), launches: launchEntries, branches, cloud: cloudConfiguration(info)};
 }
 
-module.exports = {safePath, revision, gameInfo};
+module.exports = {safePath, revision, gameInfo, cloudConfiguration};

@@ -11,6 +11,7 @@ TARGETS = {
         'obb': 'obb',
         'entry': 'libmain',
         'kind': 'unity',
+        'steam_local': True,
         'steam_diagnostics': True,
         'product': 'KleptonPistolWhip',
         'display': 'Pistol Whip (Steam Frame 1.6.0.2)',

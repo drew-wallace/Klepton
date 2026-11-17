@@ -242,9 +242,14 @@ class SteamUpdateTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(steam_auth_ui.ENTRY if name == 'library.js' else '// bundle')
             records.append(dict(path=name, size=path.stat().st_size, sha256=updates.digest(path)))
-        steam_auth_ui.package(source, output, records=records)
+        steam_auth_ui.package(source, output, records=records, interactive=True)
         self.assertIn('src="sp.js"', (output/'index.html').read_text())
         self.assertNotIn('chunk~2dcc5aaf7', (output/'index.html').read_text())
+        scripts = json.loads((output/'scripts.json').read_text())
+        self.assertEqual(scripts, ['libraries/libraries~00299a408.js', 'sp.js',
+                                   'chunk~1a96cdf59.js', 'library.js'])
+        for name in scripts + ['login.js']:
+            self.assertTrue((output/name).is_file(), name)
         (source/'sp.js').write_text('changed')
         with self.assertRaisesRegex(ValueError, 'pin'): steam_auth_ui.package(source, self.root/'bad', records=records)
 

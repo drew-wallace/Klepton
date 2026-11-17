@@ -480,6 +480,10 @@ final class InstallerModel: ObservableObject {
     }
 
     var currentProfile: Profile? { profiles.first { $0.id == profile } }
+    var steamRuntimeAvailable: Bool {
+        guard let info else { return false }
+        return info.audited.contains(profile) || info.audited.count == 1
+    }
     var requiredChecks: [SetupCheck] {
         checks.filter { $0.required || ($0.name == "MoltenVK" && ((info?.vulkanRequired ?? false) || ["eleven", "walkabout-57013", "bonelab", "openbrush", "re4"].contains(profile))) }
     }
@@ -550,7 +554,7 @@ final class InstallerModel: ObservableObject {
             bundle = ""
             dataPath = info.suggestedDataPath
         }
-        if steam == "runtime", !(info?.audited.contains(profile) ?? false) { steam = "auto" }
+        if steam == "runtime", !steamRuntimeAvailable { steam = "auto" }
     }
 
     func refresh() { execute(["doctor"], operation: "doctor") }
@@ -1137,14 +1141,14 @@ struct InstallerView: View {
                     Picker("Steam mode", selection: $model.steam) {
                         Text("Auto").tag("auto")
                         Text("Not Steam").tag("none").disabled(info.steam)
-                        Text("Steam runtime (audited)").tag("runtime").disabled(!info.audited.contains(model.profile))
+                        Text("Steam runtime (audited)").tag("runtime").disabled(!model.steamRuntimeAvailable)
                         Text("Offline diagnostics").tag("offline")
                     }.labelsHidden().frame(maxWidth: 340)
                 }
                 steamVersionsSection
-                if model.steam == "offline" || (model.steam == "auto" && info.steam && !info.audited.contains(model.profile)) {
+                if model.steam == "offline" || (model.steam == "auto" && info.steam && !model.steamRuntimeAvailable) {
                     Label("Offline diagnostics provides no authenticated Steam services.", systemImage: "info.circle").font(.caption).foregroundStyle(.orange)
-                } else if model.steam == "runtime" || (model.steam == "auto" && info.audited.contains(model.profile)) {
+                } else if model.steam == "runtime" || (model.steam == "auto" && model.steamRuntimeAvailable) {
                     Text("Uses the audited local Steam runtime. Sign in on Vision Pro when you open the app.").font(.caption).foregroundStyle(.secondary)
                 }
                 Text(info.graphics).font(.caption).foregroundStyle(.secondary)

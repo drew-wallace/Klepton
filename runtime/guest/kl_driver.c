@@ -9,6 +9,7 @@
 
 #include "klepton.h"
 #include "kl_driver.h"
+#include "kl_unity_shutdown.h"
 #include "kl_bigscreen.h"
 #include "kl_obbmap.h"
 #include "kl_egl.h"
@@ -445,6 +446,29 @@ static void *unity_lifecycle_native(const char *name) {
     void *fn = kl_jni_native("com/unity3d/player/UnityPlayerForActivityOrService",
                              name, NULL);
     return fn ? fn : kl_jni_native("com/unity3d/player/UnityPlayer", name, NULL);
+}
+
+static void *unity_shutdown_native(const char *name, const char *signature) {
+    void *fn = kl_jni_native("com/unity3d/player/UnityPlayerForActivityOrService", name, signature);
+    return fn ? fn : kl_jni_native("com/unity3d/player/UnityPlayer", name, signature);
+}
+
+void kl_driver_lifecycle_end(FILE *out) {
+    if (kl_driver_kind() != KL_GUEST_UNITY || !g_render || !g_thiz) return;
+    g_render = NULL;
+    void *player = g_thiz;
+    g_thiz = NULL;
+    phase("Unity pause and quit");
+    P(out, "[guest] delivering Unity pause and quit before save sync\n");
+    kl_jni_local_frame_push();
+    kl_unity_stop_fn done = kl_env_on("KL_UNITY_QUIT_PAUSE_ONLY", 0) ? NULL :
+        (kl_unity_stop_fn)unity_shutdown_native("nativeDone", "()Z");
+    kl_unity_shutdown(kl_jni_env(), player,
+        (kl_unity_focus_fn)unity_shutdown_native("nativeFocusChanged", "(Z)V"),
+        (kl_unity_stop_fn)unity_shutdown_native("nativePause", "()Z"),
+        done);
+    kl_jni_local_frame_pop();
+    P(out, "[guest] Unity pause and quit completed\n");
 }
 
 // KL_SAMPLE_MS: the guest-thread sampler, wired here so it runs on DEVICE

@@ -49,6 +49,7 @@ ANDROID = '{http://schemas.android.com/apk/res/android}'
 STEAM_PROFILES = {
     'walkabout-57013': ROOT / 'games/walkabout/steam/walkabout_steam_api.lock.json',
     'eleven': ROOT / 'games/eleven/steam/steam_api.lock.json',
+    'pistolwhip-12': ROOT / 'games/pistolwhip/steam/steam_api.lock.json',
 }
 KINDS = ('unity', 'ue4', 'native', 'steamlink', 'jkxr', 'sdl2', 'gles3jni')
 RETAIL_PATHS = {'jkxr_ja': 'JKXR/JK3/base', 'jkxr_jo': 'JKXR/JK2/base'}
@@ -467,6 +468,23 @@ def steam_audit(profile, tree):
     return True
 
 
+def audited_steam_profiles(info):
+    """Identify a game's Steam integration independently of its patch version."""
+    if not info['steam'] or not info.get('package'):
+        return []
+    catalog = profile_catalog()
+    return [p for p in STEAM_PROFILES
+            if catalog.get(p, {}).get('package') == info['package']
+            and steam_audit(p, info['host_tree'])]
+
+
+def steam_runtime_profile(info, profile):
+    audited = audited_steam_profiles(info)
+    if profile in audited:
+        return profile
+    return audited[0] if len(audited) == 1 else None
+
+
 def inspection_warning(info):
     warning = 'Klepton has no ART/JVM. A successful conversion or installation does not establish gameplay compatibility.'
     limitation = KNOWN_RUNTIME_LIMITATIONS.get(info.get('apk_sha256', ''), '')
@@ -590,7 +608,7 @@ def inspect_apk(apk, runner):
     matches = match_profiles(info, tree)
     selected = matches[0] if len(matches) == 1 else ''
     # Steam locks also identify original SDKs; full gameplay remains unproven.
-    audited = [p for p in STEAM_PROFILES if steam_audit(p, tree)] if info['steam'] else []
+    audited = audited_steam_profiles(dict(info, host_tree=str(tree)))
     reason = ('Package, version and entry-library fingerprint match an existing profile.' if len(matches) == 1 else
               'Several profiles share these bytes; choose a profile or use Experimental.' if matches else
               'No exact profile match. Native-library detection does not establish compatibility.')
@@ -631,14 +649,14 @@ def load_inspection(import_id):
 def resolve_steam(mode, info, profile):
     if mode not in ('auto', 'none', 'runtime', 'offline'):
         raise UtilityError('Unknown Steam mode.')
-    audited = steam_audit(profile, info['host_tree'])
     meta_source = info.get('game_source') == 'meta'
     if mode == 'auto' and meta_source:
         return 'none'
+    audited = steam_runtime_profile(info, profile)
     if mode == 'auto':
         mode = 'runtime' if audited else 'offline' if info['steam'] else 'none'
     if mode == 'runtime' and not audited:
-        raise UtilityError('Steam runtime requires an audited profile and matching imported SDK binaries. Use Offline diagnostics or choose the matching APK.')
+        raise UtilityError('Steam runtime requires an identified game and matching audited SDK binaries. Use Offline diagnostics or choose the matching APK.')
     if mode == 'none' and info['steam'] and not meta_source:
         raise UtilityError('This APK contains Steam libraries. Choose Auto, Steam runtime, or Offline diagnostics.')
     return mode
@@ -750,6 +768,8 @@ def validate_request(request, info, job):
              host_tree=info['host_tree'], kind=kind, entry=entry, bundle=bundle,
              product='KleptonImport'+job.name.replace('-', ''), framework_key='import-'+job.name,
              display=info['name'], steam_mode=steam, steam_channel=steam_channel,
+             steam_profile=steam_runtime_profile(info, profile) if steam == 'runtime' else None,
+             steam_cloud=info.get('steam_cloud'),
              adapters=adapters, import_id=info['import_id'],
              meta_app_id=meta_game.app_id(info['host_tree'], info['import_id'], info.get('meta_app_id', '')),
              gles_version=gles_version,
@@ -1261,6 +1281,7 @@ def steam_game_data(info, folder, receipt):
     """Remember the downloaded data layout independently of compatibility pins."""
     data, unmapped = steam_library.data_candidates(folder, receipt)
     info['game_source'] = 'steam'
+    info['steam_cloud'] = dict(app_id=receipt['app_id'], configuration=receipt.get('cloud'))
     info['source_path'] = str(folder.joinpath(*steam_library.safe_path(receipt['executable']).parts))
     info['suggested_data'] = data
     info['suggested_data_path'] = (
@@ -1287,6 +1308,12 @@ def library_job(action, runner):
         if not local or not local['valid']:
             emit('steam-library', 'result', 'Downloaded files need repair.', **cache.cached(steam_id))
             raise UtilityError('Downloaded files are missing or damaged. Click Repair to download them again.')
+        # Older verified downloads predate UFS receipts. A library refresh can
+        # supply their save rules without redownloading unchanged APK/depot bytes.
+        if local.get('cloud') is None:
+            game = next((g for g in cache.read_catalog(steam_id)['games'] if g['app_id'] == local['app_id']), {})
+            if isinstance(game.get('cloud'), dict):
+                local = dict(local, cloud=game['cloud'])
         folder = Path(local['folder'])
         result = inspect_apk(folder.joinpath(*steam_library.safe_path(local['executable']).parts), runner)
         data, unmapped = steam_game_data(result, folder, local)

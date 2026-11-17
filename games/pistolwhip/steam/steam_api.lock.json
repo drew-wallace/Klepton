@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "target": "pistolwhip-12",
+  "app_id": 1079800,
+  "app_id_source": "https://store.steampowered.com/app/1079800/Pistol_Whip/",
+  "display": "Pistol Whip",
+  "files": [
+    {
+      "path": "pistolwhip/lib/arm64-v8a/libsteam_api.so",
+      "size": 524392,
+      "sha256": "ee573a79ad0bf0fa4e6530fa35a4e2911e9f473141a7580b83a3d79fd1679646"
+    }
+  ],
+  "interfaces": [
+    "SteamClient023",
+    "SteamUser023",
+    "SteamApps009",
+    "SteamUtils010"
+  ],
+  "callback_abi": {
+    "packing": 4,
+    "session_ticket": {
+      "id": 163,
+      "size": 8
+    },
+    "web_api_ticket": {
+      "id": 168,
+      "size": 2572
+    }
+  },
+  "sdk_provenance": "SDK bytes match the audited Eleven Steam API exactly. Original APK SHA-256: 9bb1f10e03122306452b671056d0987b4fa6e16245a54449c58b77c7762d50ba. Physical Vision Pro checks on 2026-11-17 verified genuine ownership and tickets, startup handoff, Android save upload/shadow restore, and post-quit upload. Desktop save-format conversion remains untested.",
+  "cloud_android_apk_sha256": "9bb1f10e03122306452b671056d0987b4fa6e16245a54449c58b77c7762d50ba",
+  "cloud_android_rules": [
+    {
+      "root": "AndroidExternalData",
+      "path": "Android/data/com.cloudheadgames.pistolwhip/files",
+      "pattern": "*.dat",
+      "recursive": false,
+      "platforms": [
+        "android"
+      ]
+    }
+  ],
+  "cloud_android_evidence": "APK v31 metadata plus IL2CPP code: CHPlatform_Steam.CloudStoragePathUpdateMethod (0x2fcb450) gets Unity Application.persistentDataPath (0x5c9d1b4); CHSaveManager.SaveToCloudDataPath (0x2fbf6e4) writes text files there through StreamWriter. Save literals include gsdata.dat and pwCheevoProgress.dat. Android namespace, no Windows save-format conversion. Physical Android run: nativePause flushed gsdata.dat as a string preference, containing URL-encoded gunSaveData, persistentStates, playerGunData and versionInfo JSON. Only this audited key is projected into an Android-only cloud file; credentials and unrelated preferences stay local.",
+  "cloud_android_preferences": [
+    {
+      "file": "shared_prefs/com.cloudheadgames.pistolwhip.v2.playerprefs.xml",
+      "key": "gsdata.dat",
+      "cloudPath": "klepton-android/playerprefs/gsdata.dat"
+    }
+  ],
+  "pause_only_shutdown": true,
+  "shutdown_evidence": "Physical nativeDone cleanup recurses through GameManager.get_IsPlaying/get_GameTime while disabling gun interactions and overflows the guest stack. nativePause already flushes gsdata.dat to PlayerPrefs. Pause, stop the host frame thread, sync its flushed save, then exit the process without destructive Unity cleanup."
+}

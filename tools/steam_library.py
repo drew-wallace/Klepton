@@ -278,7 +278,7 @@ class LibraryStore:
         folder = self.account(steam_id)/'downloads'/identifier
         folder.parent.mkdir(parents=True, exist_ok=True)
         receipt = dict(schema_version=1, download_id=identifier, steam_id=steam_id, app_id=app_id(game['app_id']),
-                       name=game['name'],
+                       name=game['name'], cloud=game.get('cloud'),
                        branch=branch['name'], launch_id=launch['id'], executable=launch['executable'],
                        build_id=branch['build_id'], revision=branch['revision'], depots=branch['depots'],
                        remote_updated_at=branch['updated_at'], downloaded_at=datetime.now(timezone.utc).isoformat(timespec='seconds'),

@@ -156,7 +156,10 @@ private enum SteamLoginKeychain {
     }
     func refresh() {
 #if KL_STEAM_GAME_HOST
-        defer { refreshGameDates() }
+        defer {
+            refreshGameDates(); KleptonSteamCloud.shared.refresh()
+            KleptonSteamCloud.shared.runDeviceProbeIfRequested()
+        }
 #endif
 #if KL_STEAM_GAME_HOST
         if !automaticStarted, nativeState == 1 {
@@ -179,12 +182,26 @@ private enum SteamLoginKeychain {
         ticketStage = steamTicketStatus(&ticketResult)
         switch ticketStage {
         case 1: ticketStatus = "Walkabout Steam API loaded."
-        case 2: ticketStatus = "Walkabout Steam API initialization failed (result \(ticketResult)); waiting for Steam account data…"
-        case 3: ticketStatus = "Walkabout Steam API interface or app context mismatch."
+        case 2:
+            if nativeState != 3 {
+                ticketStatus = "Sign in below to connect Walkabout to Steam."
+            } else if ticketResult == 1 {
+                ticketStatus = "Connecting Walkabout to Steam; retrying while account data arrives…"
+            } else {
+                ticketStatus = "Walkabout Steam API initialization failed (result \(ticketResult))."
+            }
+        case 3:
+            ticketStatus = ticketResult == -100 ? "Steam Cloud controls could not disable automatic sync. Startup is paused."
+                : "Walkabout Steam API interface or app context mismatch."
         case 4: ticketStatus = "Walkabout Steam API initialized. Tickets require a logged-on owning account."
         case 5: ticketStatus = "Waiting for Steam to confirm Walkabout ownership…"
         case 6: ticketStatus = "Waiting for Steam tickets; temporary failures retry automatically for up to five minutes…"
-        case 7: ticketStatus = "Both tickets delivered by Steam. Server verification and PlayFab remain untested."
+        case 7:
+#if KL_STEAM_GAME_HOST
+            ticketStatus = "Steam is ready for Walkabout. Choose save settings, then press Boot."
+#else
+            ticketStatus = "Both tickets delivered by Steam. Server verification and PlayFab remain untested."
+#endif
         case 8: ticketStatus = "Steam startup could not finish. Check your connection, then retry tickets here."
         case 9: ticketStatus = "Steam is ready for Walkabout."
         default: break
@@ -298,10 +315,15 @@ struct SteamLoginWebView: UIViewRepresentable {
             guard let root = Bundle.main.url(forResource: "SteamAuthAssets", withExtension: nil) else { return }
             Task { @MainActor in
                 do {
-                    for name in ["libraries/libraries~00299a408.js", "chunk~2dcc5aaf7.js", "chunk~1a96cdf59.js", "library.js", "login.js"] {
+                    let scripts = try JSONDecoder().decode([String].self,
+                        from: Data(contentsOf: root.appendingPathComponent("scripts.json")))
+                    for name in scripts + ["login.js"] {
                         _ = try await webView.evaluateJavaScript(String(contentsOf: root.appendingPathComponent(name), encoding: .utf8))
                     }
-                } catch { model.status = "Valve login modules could not load." }
+                } catch {
+                    print("[steam-probe] interactive Valve auth script loading failed")
+                    model.status = "Valve login modules could not load. Rebuild and reinstall the app from the Mac installer."
+                }
             }
         }
     }
@@ -400,7 +422,7 @@ struct SteamLoginProbeView: View {
             SteamHostLifecycle.start()
             while !Task.isCancelled {
                 model.refresh()
-                if model.ticketStage == 9, model.nativeState == 3, !readyReported {
+                if [7, 9].contains(model.ticketStage), model.nativeState == 3, !readyReported {
                     readyReported = true; onReady()
                 }
                 if model.nativeState == 5 { break }
