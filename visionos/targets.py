@@ -791,6 +791,9 @@ def resolve_manifest(path, name=None):
     steam_profile = m.get('steam_profile') or (profile if t.get('steam_local') else None)
     if m['steam_mode'] == 'runtime' and not TARGETS.get(steam_profile, {}).get('steam_local'):
         raise ValueError('Steam runtime requires an audited Steam profile')
+    prepare_profile = m.get('guest_prepare_profile') or profile
+    if prepare_profile and prepare_profile not in TARGETS:
+        raise ValueError('Unknown guest preparation profile')
     t.update(name=key, bundle=m['bundle'], product=m['product'],
              framework_key=m['framework_key'], display=m['display'],
              tree=key, apk=key+'.apk', assets=key+'/assets',
@@ -799,7 +802,7 @@ def resolve_manifest(path, name=None):
              host_assets=str(host_tree/'assets'), host_srcdir=str(host_tree/'lib/arm64-v8a'),
              steam_local=m['steam_mode'] == 'runtime', steam_profile=steam_profile,
              steam_diagnostics=m['steam_mode'] == 'offline',
-             guest_prepare=t.get('guest_prepare', '') if m.get('adapters', False) else '')
+             guest_prepare=TARGETS.get(prepare_profile, {}).get('guest_prepare', '') if m.get('adapters', False) else '')
     t['steam_cloud'] = m.get('steam_cloud')
     t['meta_app_id'] = m.get('meta_app_id', '')
     t['import_id'] = m.get('import_id', '')

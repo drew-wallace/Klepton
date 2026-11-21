@@ -8,7 +8,7 @@ case ",${KL_GUEST_PATCH_OFF:-}," in
   *,walkabout-dlc-ownership,*) DLC_OFF=1 ;;
   *) DLC_OFF=0 ;;
 esac
-if [ "$KLT_NAME" = walkabout-57013 ] && [ "${KL_GUEST_PATCH:-1}" != 0 ] && [ "$DLC_OFF" = 0 ]; then
+if [ "${KL_GUEST_PATCH:-1}" != 0 ] && [ "$DLC_OFF" = 0 ]; then
   GUEST_PATCH_INPUT="$ROOT/build/walkabout-dlc-compat/libil2cpp.so"
   python3 "$ROOT/games/walkabout/tools/walkabout_dlc_compat.py" --binary "$SRC/libil2cpp.so" --out "$GUEST_PATCH_INPUT"
 fi

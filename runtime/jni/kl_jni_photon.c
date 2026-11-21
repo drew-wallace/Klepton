@@ -183,7 +183,11 @@ static klj_val photon_start(void *env, void *self, const klj_val *a, int n) {
     if (!r->source_rate || !r->source_channels || r->source_channels > 2) {
         kl_audio_mic_close(); pthread_mutex_unlock(&r->lock); pthread_mutex_unlock(&capture_owner_lock); return (klj_val){0};
     }
-    r->rate = rate ? rate : r->source_rate; r->channels = channels; r->callback = a[1].l;
+    // AudioInAEC.GetSampleRate reports the recorder's negotiated clock, as in
+    // the supplied Java implementation (AudioRecord.getSampleRate()). Keep
+    // native PCM at that clock instead of converting 48k -> requested 44.1k
+    // only for Photon's 48k encoder to interpolate it back again.
+    r->rate = r->source_rate; r->channels = channels; r->callback = a[1].l;
     memset(&r->filter, 0, sizeof r->filter);
     r->have = 0; r->position = 0; atomic_store(&r->stop, 0); r->running = 1; capture_owner = r;
     kl_jni_pin_object(r->self); kl_jni_pin_object(r->callback);
@@ -193,7 +197,7 @@ static klj_val photon_start(void *env, void *self, const klj_val *a, int n) {
         r->callback = NULL; r->running = 0; capture_owner = NULL; kl_audio_mic_close();
     } else pthread_detach(r->thread);
     pthread_mutex_unlock(&r->lock); pthread_mutex_unlock(&capture_owner_lock);
-    KLJ_LOG("Photon voice capture start result=%d rate=%u channels=%u", result, r->rate, r->channels);
+    KLJ_LOG("Photon voice capture start result=%d rate=%u channels=%u requested_rate=%u", result, r->rate, r->channels, rate);
     return (klj_val){.j = result == 0};
 }
 static klj_val photon_stop(void *env, void *self, const klj_val *a, int n) {

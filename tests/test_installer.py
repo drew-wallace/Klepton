@@ -303,6 +303,23 @@ class InstallerTests(unittest.TestCase):
             binary.write_bytes(b'different')
             self.assertFalse(u.steam_audit('fixture', self.tree))
 
+    def test_audited_walkabout_adapter_preserves_experimental_import_identity(self):
+        info = dict(self.info, package='com.MightyCoconut.WalkaboutMiniGolf')
+        original = u.validate_request(self.request, info, self.root/'original')
+        with patch.object(u.walkabout_dlc_compat, 'supports_binary', return_value=True):
+            updated = u.validate_request(self.request, info, self.root/'updated')
+        self.assertIsNone(updated['profile'])
+        self.assertEqual(updated['target'], original['target'])
+        self.assertEqual(updated['bundle'], original['bundle'])
+        self.assertTrue(updated['adapters'])
+        self.assertEqual(updated['guest_prepare_profile'], 'walkabout-57013')
+        path = self.root/'manifest.json'; u.write_json(path, updated)
+        target = u.targets.resolve_manifest(path, updated['target'])
+        self.assertEqual(target['guest_prepare'], 'games/walkabout/prepare_guest.sh')
+        with patch.object(u.walkabout_dlc_compat, 'supports_binary', return_value=True):
+            other = u.validate_request(self.request, self.info, self.root/'other')
+        self.assertFalse(other['adapters'])
+
     def test_new_walkabout_version_bundles_steam_without_legacy_game_patches(self):
         # Cached inspections and Experimental requests must gain Steam without
         # being promoted to the old game's compatibility profile or bundle ID.

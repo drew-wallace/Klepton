@@ -44,6 +44,8 @@ import steam_library
 import meta_library
 import meta_game
 import installer_storage
+sys.path.insert(0, str(ROOT / 'games/walkabout/tools'))
+import walkabout_dlc_compat
 
 ANDROID = '{http://schemas.android.com/apk/res/android}'
 STEAM_PROFILES = {
@@ -719,12 +721,15 @@ def validate_request(request, info, job):
         raise UtilityError('Select a paired Vision Pro.')
     steam = resolve_steam(request.get('steam_mode', 'auto'), info, profile)
     steam_channel = steam_updates.channel_name(request.get('steam_channel', 'stable'))
-    adapters = bool(p.get('guest_prepare'))
-    if adapters:
-        # Walkabout's instruction adapter is separately hash-pinned from its SDK.
-        lock = json.loads((ROOT/'games/walkabout/tools/walkabout_login.lock.json').read_text())
-        binary = Path(info['host_tree'])/'lib/arm64-v8a/libil2cpp.so'
-        adapters = binary.exists() and digest(binary) == lock['binary']['sha256']
+    # Course ownership compatibility is independently audited from the Steam
+    # SDK and the whole-game profile. Cached Experimental imports keep their
+    # app identity while gaining only the exact binary's audited adapter.
+    prepare_profile = None
+    if (info['package'] == 'com.MightyCoconut.WalkaboutMiniGolf'
+            and profile in (None, 'walkabout-57013')
+            and walkabout_dlc_compat.supports_binary(Path(info['host_tree'])/'lib/arm64-v8a/libil2cpp.so')):
+        prepare_profile = 'walkabout-57013'
+    adapters = prepare_profile is not None
     requirements = data_requirements(info, profile)
     data = request.get('data', [])
     if not isinstance(data, list) or any(not isinstance(v, str) for v in data):
@@ -770,7 +775,7 @@ def validate_request(request, info, job):
              display=info['name'], steam_mode=steam, steam_channel=steam_channel,
              steam_profile=steam_runtime_profile(info, profile) if steam == 'runtime' else None,
              steam_cloud=info.get('steam_cloud'),
-             adapters=adapters, import_id=info['import_id'],
+             adapters=adapters, guest_prepare_profile=prepare_profile, import_id=info['import_id'],
              meta_app_id=meta_game.app_id(info['host_tree'], info['import_id'], info.get('meta_app_id', '')),
              gles_version=gles_version,
              runtime_profile=settings_profile if runtime_defaults else None,

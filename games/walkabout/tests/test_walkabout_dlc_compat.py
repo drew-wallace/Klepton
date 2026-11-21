@@ -100,6 +100,26 @@ class DLCAdapterTests(unittest.TestCase):
                 with self.assertRaises(ValueError): d.prepare(source, output, receipt)
                 self.assertEqual(first, (output.read_bytes(), receipt.read_bytes()))
 
+    def test_new_build_is_selected_by_binary_and_unknown_build_is_refused(self):
+        data, binary, policy = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old, new = root/'old.json', root/'new.json'
+            old.write_text(json.dumps({'binary': dict(binary, sha256='0' * 64)}))
+            new.write_text(json.dumps({'target': 'walkabout-59349', 'binary': binary,
+                                       'dlc_compatibility': policy}))
+            source = root/'original.so'; source.write_bytes(data)
+            with patch.object(d, 'LOCK', old), patch.object(d, 'EXTRA_LOCKS', (new,)):
+                self.assertTrue(d.supports_binary(source))
+                receipt = d.prepare(source, root/'derived.so', root/'receipt.json')
+                self.assertEqual(receipt['target'], 'walkabout-59349')
+                self.assertEqual(receipt['changed_instruction_count'], 1)
+                source.write_bytes(b'unknown')
+                self.assertFalse(d.supports_binary(source))
+                self.assertFalse(d.supports_binary(root/'missing.so'))
+                with self.assertRaisesRegex(ValueError, 'original binary hash'):
+                    d.prepare(source, root/'derived.so', root/'receipt.json')
+
 
 if __name__ == '__main__':
     unittest.main()

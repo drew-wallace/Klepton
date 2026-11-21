@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "target": "walkabout-59349",
+  "version_name": "6.8",
+  "apk_sha256": "86e06e72fdee6e15723adf1f3832faa25af3796d31c9f2a033f1a0b54f99f21e",
+  "metadata": {
+    "size": 20124644,
+    "sha256": "7428b7e95e28031e2e91a9ced916c5e5d0a2799aeedea82d736f0230847011e4"
+  },
+  "binary": {
+    "size": 117448768,
+    "sha256": "77bfd324c28e1534a14b2dba70640943851b12e540b00cc50a1f811e19d37776"
+  },
+  "dlc_compatibility": {
+    "consumer": "FarBridge.Worlds.IPlatformDLC.DoesUserOwnProduct",
+    "callsite": 50885380,
+    "original_target": 56568488,
+    "ownership_target": 56568396,
+    "reason": "Android course bundles are staged outside Steam depot installation; ownership must use the genuine subscription result",
+    "method_regions": [
+      {
+        "name": "DoesUserOwnProduct",
+        "address": 50885272,
+        "size": 140,
+        "sha256": "b143a74cc32cc9f9e075c2990ce97cff2982672dbb2f824316df7595e4501436"
+      },
+      {
+        "name": "BIsSubscribedApp",
+        "address": 56568396,
+        "size": 92,
+        "sha256": "30ff9d275392fb7e1865f54362d0257f0dc70714f712c9117e8faeeaed46eed2"
+      },
+      {
+        "name": "BIsDlcInstalled",
+        "address": 56568488,
+        "size": 92,
+        "sha256": "b3959cd3d46391d9dc08042f66b6d2369cbc271330f1d42d19d2e91e33c8395f"
+      }
+    ]
+  }
+}

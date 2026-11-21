@@ -582,3 +582,52 @@ Receipts: `mic-third-final-hardware-build.log`,
 `mic-third-final-artifact-verification.json`, `mic-third-install.json` and
 `mic-third-data-{before,after}.json` under ignored `build/steam-runtime/`.
 Physical unmute and outgoing voice remain pending user retest.
+
+### Walkabout 6.8 DLC and voice follow-up (November 21, 2026)
+
+The installed Steam-library import is version 6.8 / Android build 59349. Its
+Experimental compatibility selection correctly retained the original app/container
+identity, but also omitted the older build's DLC ownership adapter. The latest
+physical play-session Steam log records successful result-1 callbacks for both
+diagnostic ticket APIs, base-game ownership, and 39 DLC entries: 32 subscribed,
+seven unsubscribed, all reporting `installed=0`. This is a course ownership-query
+mismatch, not evidence that Steam authentication or the download failed.
+
+All 129 download files (15,207,903,686 bytes) passed their receipt hashes. The
+headset inventory contained the matching main OBB and all 127 loose course
+bundles at the expected names and sizes. Remote bundle contents were not hashed.
+
+`walkabout_59349_dlc.lock.json` pins the supplied binary, metadata fingerprint,
+and the audited consumer/wrapper regions. Metadata v39 codegen-module mapping
+and ARM64 disassembly locate the ownership consumer at `0x3087298`, its tail
+branch at `0x3087304`, and the existing `BIsSubscribedApp` / `BIsDlcInstalled`
+wrappers at `0x35f2a4c` / `0x35f2aa8`. The same App ID and null MethodInfo ABI
+are preserved. Preparation now selects either audited binary by its full hash;
+unknown inputs remain refused. Installer manifests can select this preparation
+independently of a whole-game profile, so cached Experimental imports gain the
+correction without changing their bundle identifier or saved-data paths.
+
+The same device log already confirms the shared November 6 microphone changes:
+VoiceProcessingIO, bypass off, AGC on, native 48 kHz mono capture, and successful
+Photon PCM callbacks. It also identifies an extra conversion: Photon requests
+44.1 kHz and its encoder resamples that stream back to 48 kHz. The supplied
+`AudioInAEC` Java implementation reports `AudioRecord.getSampleRate()` through
+`GetSampleRate`, so the bridge now reports and delivers the negotiated native
+capture clock. On this device that removes the 48 → 44.1 → 48 kHz round trip.
+This is a concrete signal-path improvement, not proof of the cause or resolution
+of the user's perceived poor voice quality. Native echo cancellation, opt-in
+capture, and channel conversion remain active.
+
+Validation: 17 Walkabout Python checks, 130 installer Python checks,
+`make voicecheck`, the Photon JNI/recorder fixture (including native-rate
+negotiation for the physical 44.1 kHz request), and the visionOS audio-session
+checks pass. The signed device app builds successfully and its translated
+IL2CPP framework contains the expected ownership branch. Logs and download,
+backup, build and deployment evidence are in ignored `build/walkabout-followup/`.
+The updated app was installed on the physical headset with the same bundle
+identifier. Before installation, 150 writable files (123,120,819 bytes) were
+backed up separately from the known course assets; the ordinary installer had
+stopped because backing up the 14 GB asset set exceeded free Mac space.
+Post-install readback verified identical hashes for all 145 game/settings/support
+files, and the OBB plus 127 course bundles retained their expected sizes.
+Owned-course loading and two-way voice quality still require a physical retest.

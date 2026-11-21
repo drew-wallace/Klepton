@@ -15,6 +15,28 @@ import tempfile
 
 from walkabout_inspect import Arm64ELF, LOCK, ROOT, digest
 
+EXTRA_LOCKS = (ROOT / 'games/walkabout/tools/walkabout_59349_dlc.lock.json',)
+
+
+def artifact_lock(content):
+    """Select an audited build by its full binary hash, never by SDK version."""
+    fingerprint = digest(content)
+    for path in (LOCK, *EXTRA_LOCKS):
+        lock = json.loads(path.read_text())
+        if len(content) == lock['binary']['size'] and fingerprint == lock['binary']['sha256']:
+            return lock
+    raise ValueError('DLC adapter requires the audited original binary hash')
+
+
+def supports_binary(path):
+    if not path.is_file():
+        return False
+    try:
+        artifact_lock(path.read_bytes())
+        return True
+    except ValueError:
+        return False
+
 
 def branch_word(source, target):
     displacement = target - source
@@ -60,10 +82,12 @@ def redirect_ownership(content, binary, policy):
 
 
 def prepare(source, output, receipt_path):
-    lock = json.loads(LOCK.read_text())
     if len({source.resolve(), output.resolve(), receipt_path.resolve()}) != 3:
         raise ValueError('source, derived input and receipt must be separate files')
-    result, receipt = redirect_ownership(source.read_bytes(), lock['binary'], lock['dlc_compatibility'])
+    content = source.read_bytes()
+    lock = artifact_lock(content)
+    result, receipt = redirect_ownership(content, lock['binary'], lock['dlc_compatibility'])
+    receipt['target'] = lock.get('target', 'walkabout-57013')
     # Validate everything before replacing even an existing generated input.
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=output.parent, delete=False) as temporary:

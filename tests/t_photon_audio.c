@@ -141,7 +141,17 @@ static void wait_callbacks(int count) {
     for(int i=0;i<2000 && atomic_load(&callbacks)<count;i++) usleep(1000);
     assert(atomic_load(&callbacks)>=count);
 }
+static void conversion_contract(void) {
+    // Keep coverage of the conversion helper for non-native clients, including
+    // partial capture reads, alongside Start's native-clock negotiation.
+    photon_audio recorder = {.rate=24000, .channels=1, .source_rate=48000, .source_channels=2};
+    int16_t samples[240]; int filled=0;
+    while (filled<240) filled+=photon_samples(&recorder,samples+filled,240-filled);
+    for (int i=0;i<240;i++) assert(samples[i]==2000);
+    free(recorder.held);
+}
 int main(void) {
+    conversion_contract();
     klj_val min_args[2]={{.j=24000},{.j=1}};
     assert(photon_min_buffer(NULL,NULL,min_args,2).j==960);
     min_args[1].j=3; assert((int)photon_min_buffer(NULL,NULL,min_args,2).j==-2);
@@ -163,7 +173,7 @@ int main(void) {
     kl_jni_local_frame_pop(); assert(klj_arr(test_buffer)); // retained array survives
     assert(photon_start(NULL,self,start,8).j);
     assert(!photon_start(NULL,self,start,8).j); // no second ring reader
-    assert(photon_rate(NULL,self,NULL,0).j==24000);
+    assert(photon_rate(NULL,self,NULL,0).j==48000);
     wait_callbacks(2);
     assert(photon_stop(NULL,self,NULL,0).j); assert(atomic_load(&stops)==1);
     int before=atomic_load(&callbacks); usleep(15000); assert(atomic_load(&callbacks)==before);
@@ -171,6 +181,15 @@ int main(void) {
     assert(photon_start(NULL,self,start,8).j); wait_callbacks(before+2);
     assert(photon_stop(NULL,self,NULL,0).j); assert(atomic_load(&stops)==2 && atomic_load(&closes)==2);
     assert(photon_stop(NULL,self,NULL,0).j && atomic_load(&stops)==2);
+    // The physical Walkabout trace asks for 44.1k from a 48k recorder, then
+    // uses GetSampleRate to configure its encoder input. Negotiate native PCM
+    // and preserve the declared clock rather than resampling down and back up.
+    start[2].j=44100; before=atomic_load(&callbacks);
+    assert(photon_start(NULL,self,start,8).j);
+    assert(photon_rate(NULL,self,NULL,0).j==48000);
+    assert(photon_state(self)->source_rate==photon_state(self)->rate);
+    wait_callbacks(before+2); assert(photon_stop(NULL,self,NULL,0).j);
+    start[2].j=24000;
     // The actual public JNI binding fixes the crashing method even with capture disabled.
     void **table=*(void***)kl_jni_env();
     void *(*method)(void*,void*,const char*,const char*)=table[33];
